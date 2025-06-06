@@ -1,0 +1,21 @@
+tracker:
+  window_length: 10
+  grid_size: 40
+  num_points: 200
+  scaling_factor: 2
+  border: False
+  num_neighbours: 4
+  server_addresses: ['http://upoates-tethys.epfl.ch:8000/', 'http://paperino.epfl.ch:8000']
+  base_kernel_size_xy: 41
+  kernel_size_z: 5
+  enable_sanity_check: True
+  sanity_threshold: 32.0
+
+tracking_runner:
+  timeout_ms: 400
+  log: True
+  log_dir_name: "embryo_tracking"
+
+simulated_microscope:
+  max_timeout: 4
+

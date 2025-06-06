@@ -1,0 +1,7 @@
+scikit-image
+bokeh
+imaging-server-kit==0.0.12
+pyyaml
+numpy
+matplotlib
+pyyaml
