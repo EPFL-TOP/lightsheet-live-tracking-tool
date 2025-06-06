@@ -230,7 +230,6 @@ class SingleRoIBaseTracker_v2 :
             containement, size_ratio = self.compute_rois_matching_metrics(roi_predicted, roi_detected)
             self.logger.info(f"{score}, {containement}, {size_ratio}, {self.time_since_last_detection}")
             if (score > 0.9) and (containement > containment_threshold) and (size_ratio > 0.3) and (self.time_since_last_detection >= self.detection_freq):
-                self.logger.info("oui")
                 fusion_valid = True
                 self.time_since_last_detection = 0
             

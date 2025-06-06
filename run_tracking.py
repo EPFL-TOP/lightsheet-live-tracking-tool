@@ -40,7 +40,7 @@ class Script:
         # label of each parameter in user interface
         self.parameter_label = {
             "pixel_size_xy" : "Pixel size x, y",
-            "pixel_size_z" : "Pixel size z",
+            "pixel_size_z" : "Step size z",
             "dirpath": "Data directory",
             "serverkit" : "Use serverkit",
             "simulated_microscope" : "Simulated Microscope",
@@ -79,7 +79,7 @@ class Script:
         # documentation shown in user interface for each parameter
         self.parameter_help = {
             "pixel_size_xy": "Pixel size in x and y",
-            "pixel_size_z": "Pixel size in z",
+            "pixel_size_z": "Step size in z",
             "dirpath": "Timelapse folder",
             "serverkit": "Use the serverkit implementation for the models",
             "simulated_microscope": "Use a simulated microscope for offline debugging",

@@ -1,9 +1,9 @@
 import time
 from ..logger.logger import init_logger
-import pymcs
 
 class MicroscopeInterface:
     def __init__(self) :
+        import pymcs
         self.microscope = pymcs.Microscope()
         self.connect()
         self.time_lapse_controller = pymcs.TimeLapseController(self.microscope)
