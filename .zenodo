@@ -1,0 +1,34 @@
+{
+    "creators": [
+	{
+	    "affiliation": "Ecole Polytechnique Fédérale de Lausanne",
+	    "name": "Pili, Frederic",
+	    #"orcid": ""
+	},
+  {
+	    "affiliation": "Ecole Polytechnique Fédérale de Lausanne",
+	    "name": "Helsens, Clement",
+	    "orcid": "0000-0002-9243-7554"
+	},
+	{
+	    "affiliation": "Ecole Polytechnique Fédérale de Lausanne",
+	    "name": "Aymanns, Florian",
+	    #"orcid": ""
+	},
+		{
+	    "affiliation": "Ecole Polytechnique Fédérale de Lausanne",
+	    "name": "Ando, Edward",
+	    #"orcid": ""
+	}
+
+    ],
+    "keywords": [
+	"light sheet microscopy",
+	"live tracking",
+	"cotracker3",
+	"FasterRCNN",
+  "smart microscopy"
+    ],
+    "license": "Apache-2.0",
+    "upload_type": "software"
+}
