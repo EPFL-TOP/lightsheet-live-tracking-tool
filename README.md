@@ -5,6 +5,10 @@
 |:------------------------------:|:----------------------------------:|
 | ![Tracker](videos/no_detection_compressed.gif) | ![Fusion](videos/detection_compressed.gif) |
 
+| Shifts and Trajectories |
+|:------------------------:|
+| ![Shifts and Trajectories](videos/shifts_and_trajectories.gif) |
+
 ## Installation
 
 ### Recommended Python Version
