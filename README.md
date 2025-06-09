@@ -3,7 +3,7 @@
 ## Demo Videos
 | Using Tracker predictions only| Using Detection and Sensor Fusion|
 |:------------------------------:|:----------------------------------:|
-| ![Tracker](videos/no_detection.gif) | ![Fusion](videos/detection.gif) |
+| ![Tracker](videos/no_detection_compressed.gif) | ![Fusion](videos/detection_compressed.gif) |
 
 ## Installation
 
