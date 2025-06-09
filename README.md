@@ -1,16 +1,9 @@
 # lightsheet-live-tracking-tool
 
 ## Demo Videos
-<div style="display: flex; gap: 20px; align-items: flex-start;">
-  <div>
-    <h4>Using Tracker predictions only</h4>
-    <img src="videos/no_detection.gif" alt="Tracker" width="300"/>
-  </div>
-  <div>
-    <h4>Using Detection and Sensor Fusion</h4>
-    <img src="videos/detection.gif" alt="Fusion" width="300"/>
-  </div>
-</div>
+| Using Tracker predictions only| Using Detection and Sensor Fusion|
+|:------------------------------:|:----------------------------------:|
+| ![Tracker](videos/no_detection.gif) | ![Fusion](videos/detection.gif) |
 
 ## Installation
 
