@@ -52,7 +52,7 @@ To use this integration:
 2. ```bash
     cd path/to/live/tracking/tool
     source tracking-tool-venv/bin/activate  # On Windows: tracking-tool-venv\Scripts\activate
-    python path/to/PyMCS/scripts/rum_tracking.py path/to/PyMCS
+    python path/to/PyMCS/scripts/run_tracking.py path/to/PyMCS
     ```
 > Running the script will start a GUI similar to the other PyMCS scripts.
 
