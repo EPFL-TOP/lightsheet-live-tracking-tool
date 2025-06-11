@@ -11,9 +11,11 @@ class PositionTrackerSingleRoI_v2 :
         self,
         first_frame,
         rois,
+        log,
         use_detection,
         position_name,
-        tracker_params,
+        roi_tracker_params,
+        position_tracker_params,
     ) :
 
         # If roi is a list, take the first element
@@ -21,21 +23,22 @@ class PositionTrackerSingleRoI_v2 :
             self.roi = rois[0]
 
         self.shape = first_frame.shape
-        self.scaling_factor = tracker_params["scaling_factor"]
+        self.scaling_factor = roi_tracker_params["scaling_factor"]
         self.position_name = position_name
-        self.pixel_size_xy = tracker_params["pixel_size_xy"]
-        self.pixel_size_z = tracker_params["pixel_size_z"]
-        self.log = tracker_params["log"]
+        self.pixel_size_xy = position_tracker_params["pixel_size_xy"]
+        self.pixel_size_z = position_tracker_params["pixel_size_z"]
+        self.log = log
 
         # Initialize Tracker
-        base_tracker_params = {k:v for k, v in tracker_params.items() if k not in ["pixel_size_xy", "pixel_size_z"]}
+        base_tracker_params = {k:v for k, v in roi_tracker_params.items() if k not in ["pixel_size_xy", "pixel_size_z"]}
         base_tracker_params = {
             "first_frame": first_frame,
             "roi": self.roi,
             "use_detection": use_detection,
+            "log": log,
             **base_tracker_params
         }
-        self.base_tracker = self.initialize_tracker(first_frame, base_tracker_params)
+        self.base_tracker = self.initialize_tracker(base_tracker_params)
 
         # Initialize tracking vars
         self.tracking_state = self.base_tracker.tracking_state
@@ -94,9 +97,7 @@ class PositionTrackerSingleRoI_v2 :
         # Y Axis is inverted for the microscope stage coordinate
         shift_x_um = self.convert_px_um(shift_px.x, self.pixel_size_xy, invert=False)
         shift_y_um = self.convert_px_um(shift_px.y, self.pixel_size_xy, invert=True)
-        self.logger.info(f"shift z px : {shift_px.z}")
         shift_z_um = self.convert_px_um(shift_px.z, self.pixel_size_z, invert=False)
-        self.logger.info(f"shift z um : {shift_z_um}")
         shift_um = Shift3D(x=shift_x_um, y=shift_y_um, z=shift_z_um)
         self.shifts_um.append(shift_um)
 
@@ -107,12 +108,11 @@ class PositionTrackerSingleRoI_v2 :
     
     def compute_shift_px(self, new_position, roi):
         D, H, W = self.shape
-        # Step 1: Compute base shift
+        # Compute base shift
         ref_position = self.ref_position
         shift_px = Shift3D.from_positions(new_position, Position3D(x=ref_position.x, y=ref_position.y, z=D//2))
-        self.logger.info(f"shift base x : {shift_px}")
 
-        # Step 2: Compute ROI bounds after shift
+        # Compute ROI bounds after shift
         half_height = roi.height / 2
         half_width = roi.width / 2
         # Projected ROI center after shift
@@ -124,7 +124,7 @@ class PositionTrackerSingleRoI_v2 :
         min_x = projected_x - half_width
         max_x = projected_x + half_width
 
-        # Step 3: Apply correction if ROI exceeds image boundaries
+        # Apply correction if ROI exceeds image boundaries
         dy_correction = 0
         dx_correction = 0
         if min_y < 0:
@@ -137,24 +137,23 @@ class PositionTrackerSingleRoI_v2 :
             dx_correction = max_x - W
         self.logger.info(f"Correction needed: dx={dx_correction}, dy={dy_correction}")
 
-        # Step 4: Apply corrections to shift
+        # Apply corrections to shift
         shift_px.y += dy_correction
         shift_px.x += dx_correction
         
-        # Step 6: Log and return
+        # Log and return
         self.shifts_px.append(shift_px)
         if self.log:
             self.logger.info(
-                f"[{self.position_name}] Pixel shift (z, y, x): "
+                f"[{self.position_name}] Pixel shift: "
                 f"{shift_px}"
             )
         return shift_px
 
-    def initialize_tracker(self, first_frame, params) :
+    def initialize_tracker(self, params) :
         from ..tracker.BaseTracker import SingleRoIBaseTracker_v2
         base_tracker = SingleRoIBaseTracker_v2(**params)
         return base_tracker
-
 
     def get_tracks(self) :
         return self.base_tracker.tracks
@@ -171,17 +170,6 @@ class PositionTrackerSingleRoI_v2 :
     def get_current_rois(self) :
         # Convert centerpoint, hws to anchor point, full size
         return self.base_tracker.rois_list[-1]
-    
-    def _scale_array(self, array, dims, down, twod=False) :
-        factor = 2 ** self.scaling_factor
-        result = np.array(array).copy()
-        if not twod :
-            for dim in dims:
-                result[dim] = result[dim] / factor if down else result[dim] * factor
-        else :
-            for dim in dims:
-                result[:,dim] = result[:,dim] / factor if down else result[:,dim] * factor
-        return result
 
     @staticmethod
     def convert_px_um(shift_px, pixel_size, invert) :

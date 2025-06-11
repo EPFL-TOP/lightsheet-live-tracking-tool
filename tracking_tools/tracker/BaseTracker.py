@@ -12,42 +12,45 @@ class SingleRoIBaseTracker_v2 :
             self,
             first_frame,
             roi,
-            border,
             scaling_factor,
             serverkit,
             server_addresses,
             window_length,
             grid_size,
-            num_points,
             base_kernel_size_xy,
             kernel_size_z,
-            num_neighbours,
-            enable_sanity_check,
-            sanity_threshold,
             log,
             use_detection,
+            containment_threshold,
+            k,
+            c0,
+            size_ratio_threshold,
+            score_threshold,
+            model_path,
     ) :
         # Takes raw frames as input, handle processing (norm, scaling, projection), manage the sliding window
         # and manage the computation of the RoI position across frames
-        self.border = border
         self.scaling_factor = scaling_factor
         self.window_length = window_length
         self.grid_size = grid_size
-        self.num_neighbours = num_neighbours
-        self.num_points = num_points
         self.kernel_size_xy = base_kernel_size_xy // (2**scaling_factor)
         self.kernel_size_z = kernel_size_z
-        self.enable_sanity_check = enable_sanity_check
-        self.sanity_threshold = sanity_threshold
         self.log = log
         self.current_frame = self._downsample(first_frame)
+        # self.current_frame = self._bin(first_frame)
         self.shape = self.current_frame.shape
         self.current_frame_proj = np.max(self.current_frame, axis=0)
         self.use_detection = use_detection
+        self.containment_threshold = containment_threshold
+        self.k = k
+        self.c0 = c0
+        self.size_ratio_threshold = size_ratio_threshold
+        self.score_threshold = score_threshold
+        self.model_path = model_path
         # Convert to ROI dataclass
         roi = ROI(**roi)
         # Downscale RoI
-        self.roi_init = self._scale_roi(roi, down=True)
+        self.roi_init = roi.scale(scaling_factor=self.scaling_factor, down=True)
         self.center_point_init = self.roi_init.to_position3D(z=self.shape[0]//2)
         # Set default logger
         self.logger = init_logger(self.__class__.__name__)
@@ -55,7 +58,8 @@ class SingleRoIBaseTracker_v2 :
         param_lines = [f"  {k}: {v}" for k, v in vars(self).items()
                 if not k.startswith('_') and k in ["scaling_factor", "window_length", "grid_size",
                                                     "shape", "kernel_size_xy", "kernel_size_z",
-                                                    "use_detection"]]
+                                                    "use_detection", "serverkit", "k", "c0", "containment_threshold",
+                                                    "score_threshold", "size_ratio_threshold"]]
         param_block = "\n".join(param_lines)
         self.logger.info(f"Initialized a new ROI tracker: \nParameters:\n{param_block}")
         self.count = 1
@@ -74,20 +78,19 @@ class SingleRoIBaseTracker_v2 :
         self.predictor = self.initialize_predictor(serverkit, server_addresses=server_addresses)
         if self.use_detection :
             self.detector = self.initialize_detector(serverkit, server_addresses=server_addresses)
-        self.detection_freq = 1 # take one detection out of 5 to avoid noisy updates
         self.time_since_last_detection = 0 # to keep track of when should the detection be done
 
         # Initialize 2D RoI List
         self.rois_list = [[self.roi_init]]
         self.predicted_points = [self.roi_init.to_position2D()]
         self.detected_points = [self.roi_init.to_position2D()]
-        self.motions_list = []
 
     def compute_new_position(self, frame) :
         if self.tracking_state != TrackingState.TRACKING_OFF :
             self.count += 1
 
             frame = self._downsample(frame)
+            # frame = self._bin(frame)
             self.current_frame = frame
             frame_proj = np.max(frame, axis=0)
             self.current_frame_proj = frame_proj
@@ -103,16 +106,10 @@ class SingleRoIBaseTracker_v2 :
             self.tracks.append([new_tracks])
             last_tracked_point = self.tracked_points[-1]
 
-            # Sanity check, still needs to decide what to do in case of failed check
-            if self.enable_sanity_check :
-                if not self.perform_sanity_check(new_tracks) :
-                    self.logger.warning(f'Inconsistent tracking detected')
-
             if tracking_state == TrackingState.WAIT_FOR_NEXT_TIME_POINT :
                 return Position3D.invalid(), self.tracking_state # Placeholder
             
             else :
-                # position_yx_predicted = self.compute_predicted_position_yx(new_tracks, last_tracked_point.to_position2D(), num_neighbours=self.num_neighbours)
                 position_yx_predicted = self.compute_predicted_position_yx_ls(new_tracks, last_tracked_point)
                 last_roi = self._get_past_roi(index=-1)
                 roi_predicted = ROI(
@@ -135,7 +132,7 @@ class SingleRoIBaseTracker_v2 :
                 position_z = self.compute_new_position_z(new_roi)
                 new_position = position_yx.to_position3D(z=position_z)
             self.tracked_points.append(new_position)
-            return self._scale_position(new_position, axis='xy', down=False), self.tracking_state
+            return new_position.scale(scaling_factor=self.scaling_factor, down=False, axes="xy"), self.tracking_state
         else :
             return Position3D.invalid(), self.tracking_state # Placeholder return
     
@@ -169,24 +166,10 @@ class SingleRoIBaseTracker_v2 :
             tracking_state = TrackingState.TRACKING_OFF
             return np.zeros_like(queries), tracking_state
     
-    def compute_predicted_position_yx(self, tracks, last_tracked_point, num_neighbours) :
-        # Link the tracked point to the closest point in previous frame
-        current_points = tracks[-1]
-        previous_points = tracks[-2]
-        distances = np.linalg.norm(previous_points[:,::-1] - last_tracked_point.to_array('yx'), axis=1) # tracks are (x, y) so invert there coordinates
-        neighbours_indices = np.argsort(distances, axis=0)[:num_neighbours]
-        if num_neighbours == 1 :
-            shift = current_points[neighbours_indices,::-1] - previous_points[neighbours_indices, ::-1]
-        else :
-            motions = current_points[neighbours_indices,::-1] - previous_points[neighbours_indices, ::-1]
-            self.motions_list.append(motions)
-            shift = np.mean(motions, axis=0)
-        new_pos_yx = last_tracked_point + Shift2D(x=shift[1], y=shift[0])
-        return new_pos_yx
     
     def compute_predicted_position_yx_ls(self, tracks, last_tracked_point) :
         current_points = tracks[-1][:,::-1]  # xy -> yx
-        previous_points = tracks[-2][:,::-1]
+        previous_points = tracks[-2][:,::-1] # xy -> yx
         motions = current_points - previous_points # yx
         # Fit a model to the vector field using least square regression
         X = np.hstack([previous_points, np.ones((previous_points.shape[0], 1))]) # add intercept (y, x, 1)
@@ -220,23 +203,22 @@ class SingleRoIBaseTracker_v2 :
             return ROI.invalid(order=1), score , ReturnStatus.NO_OP # Placeholder
 
     
-    def fuse_positions_yx(self, roi_predicted, roi_detected, score, containment_threshold=0.4) : ### TODO : Replace hard coded values by class parameters
+    def fuse_positions_yx(self, roi_predicted, roi_detected, score) :
         fusion_valid = False
-        self.time_since_last_detection += 1
-
         # Check if detection is present, and valid
         if self.detected :
-            # containement, size_ratio = self.compute_rois_matching_metrics(position_detected, hws_detected, position_predicted, last_roi['hws'])
             containement, size_ratio = self.compute_rois_matching_metrics(roi_predicted, roi_detected)
-            self.logger.info(f"{score}, {containement}, {size_ratio}, {self.time_since_last_detection}")
-            if (score > 0.9) and (containement > containment_threshold) and (size_ratio > 0.3) and (self.time_since_last_detection >= self.detection_freq):
+            self.logger.info(f"Detection validation : model score :{score}, containment: {containement}, size_ratio: {size_ratio}")
+            if (score > self.score_threshold) and (containement > self.containment_threshold) and (size_ratio > self.size_ratio_threshold):
                 fusion_valid = True
-                self.time_since_last_detection = 0
+                self.logger.info("Valid Detection")
+            else :
+                self.logger.info("Invalid Detection")
             
         if fusion_valid :
             position_detected = roi_detected.to_position2D()
             position_predicted = roi_predicted.to_position2D()
-            fused_pos_yx = self.confidence_weighted_average(position_detected, position_predicted, containement, confidence=score)
+            fused_pos_yx = self.confidence_weighted_average(position_detected, position_predicted, containement)
             new_roi = ROI(
                 x=fused_pos_yx.x,
                 y=fused_pos_yx.y,
@@ -266,10 +248,7 @@ class SingleRoIBaseTracker_v2 :
     def _initialize_queries(self, frame, roi) : 
         center_point = roi.to_position2D().to_array(order='yx')
         hws = [roi.height / 2, roi.width / 2]
-        if self.border:
-            points = generate_border_points_from_region(frame, center_point, hws, kernel_size=self.kernel_size_xy, num_points=self.num_points)
-        else:
-            points = generate_uniform_grid_in_region(frame, center_point, hws, grid_size=self.grid_size, gaussian_kernel=self.kernel_size_xy)
+        points = generate_uniform_grid_in_region(frame, center_point, hws, grid_size=self.grid_size, gaussian_kernel=self.kernel_size_xy)
         if len(points) == 0:
             self.logger.warning(f"No query points generated for RoI.")
             points = np.empty((0, 2))  # Ensure it stays consistent
@@ -287,26 +266,9 @@ class SingleRoIBaseTracker_v2 :
         image = image[:, ::2**self.scaling_factor, ::2**self.scaling_factor]
         return image
     
-    def _scale_roi(self, roi, down) :
-        factor = 1 / (2 ** self.scaling_factor) if down else 2 ** self.scaling_factor
-        return copy.copy(roi) * factor
-    
-    def _scale_position(self, position, axis='xy', down=True):
-        factor = 2 ** self.scaling_factor
-        scale = (lambda v: v / factor) if down else (lambda v: v * factor)
-        # Copy fields manually, scaling only specified axes
-        kwargs = {}
-        for field in position.__dataclass_fields__:
-            value = getattr(position, field)
-            if field in axis:
-                value = scale(value)
-            kwargs[field] = value
-        return type(position)(**kwargs)
-    
-    def perform_sanity_check(self, tracks) :
-        current_points = tracks[-1]
-        previous_points = tracks[-2]
-        return sanity_check_pairwise_matrix(previous_points, current_points, threshold=self.sanity_threshold)
+    def _bin(self, image) : ### FOR TESTING
+        from scipy.ndimage import zoom
+        return zoom(image, (1, 1/2**self.scaling_factor, 1/2**self.scaling_factor), order=0)
     
     def initialize_predictor(self, serverkit, server_addresses) :
         if serverkit :
@@ -325,9 +287,8 @@ class SingleRoIBaseTracker_v2 :
             detector.connect()
         else :
             from .detector import Detector
-            detector = Detector(model_path="/home/pili/Desktop/fasterrcnn_model/tail_detection_model_v2_augmented_100ep.pth", device="cuda")
+            detector = Detector(model_path=self.model_path, device="cuda")
         return detector
-
 
     def compute_rois_matching_metrics(self, roi1, roi2):
         center1 = np.array([roi1.y, roi1.x])
@@ -353,9 +314,9 @@ class SingleRoIBaseTracker_v2 :
 
         return containment, size_ratio
 
-    def confidence_weighted_average(self, detection_pos, prediction_pos, containment, confidence, k=5.0, c0=0.4) :
+    def confidence_weighted_average(self, detection_pos, prediction_pos, containment) :
         misalignement = 1 - containment
-        alpha = 1 / (1 + np.exp(-k * (misalignement - c0)))
+        alpha = 1 / (1 + np.exp(-self.k * (misalignement - self.c0)))
         fused_pos = alpha * detection_pos + (1 - alpha) * prediction_pos
         return fused_pos
     
@@ -370,19 +331,4 @@ class SingleRoIBaseTracker_v2 :
         self.tracks.append([])
         self.logger.info("Filled placeholder data for tracker.")
 
-
-
-def sanity_check_pairwise_matrix(previous_points, current_points, threshold=4.0) :
-
-    from scipy.spatial.distance import pdist, squareform
-
-    # Compute pairwise distance
-    D_prev = squareform(pdist(previous_points))
-    D_curr = squareform(pdist(current_points))
-
-    # Compute error
-    error = np.mean(np.abs(D_curr - D_prev))
-
-    # Decision based on threshold
-    return error < threshold
     

@@ -18,7 +18,8 @@ class TrackingRunner() :
             image_reader,
             dirpath,
             runner_params,
-            tracker_params,
+            roi_tracker_params,
+            position_tracker_params,
     ) :
         """High level tracking
 
@@ -34,14 +35,14 @@ class TrackingRunner() :
         self.positions_config = positions_config
         self.log_dir_name = runner_params["log_dir_name"]
         self.log = runner_params["log"]
-        self.scaling_factor = tracker_params["scaling_factor"]
+        self.scaling_factor = roi_tracker_params["scaling_factor"]
         self.position_names = [config['Position'] for config in positions_config.values()]
         self.tracking_state_dict = {k:TrackingState.TRACKING_ON for k in self.position_names}
         self.trackers = {}
         self.stop_requested = False
         self.dirpath = Path(dirpath)
-        self.tracker_params = tracker_params
-        self.tracker_params["log"] = self.log
+        self.roi_tracker_params = roi_tracker_params
+        self.position_tracker_params = position_tracker_params
         self.reader = image_reader(dirpath=self.dirpath, log=self.log)
         for config_name in positions_config.keys() :
             with open(self.dirpath / config_name / runner_params["log_dir_name"] / "tracking_parameters.json", 'w') as json_file:
@@ -107,9 +108,11 @@ class TrackingRunner() :
         tracker = self.tracker_class(
             first_frame=image,
             rois=rois,
+            log=self.log,
             use_detection=use_detection,
             position_name=position_name,
-            tracker_params=self.tracker_params,
+            roi_tracker_params=self.roi_tracker_params,
+            position_tracker_params=self.position_tracker_params,
         )
         self.trackers[position_name] = tracker
 

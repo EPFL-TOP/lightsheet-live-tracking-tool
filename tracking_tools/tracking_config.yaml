@@ -1,15 +1,16 @@
-tracker:
+roi_tracker:
   window_length: 10
   grid_size: 40
-  num_points: 200
   scaling_factor: 2
-  border: False
-  num_neighbours: 4
   server_addresses: ['http://upoates-tethys.epfl.ch:8000/', 'http://paperino.epfl.ch:8000']
   base_kernel_size_xy: 41
   kernel_size_z: 5
-  enable_sanity_check: True
-  sanity_threshold: 32.0
+  containment_threshold: 0.4
+  k: 5.0
+  c0: 0.4
+  size_ratio_threshold: 0.3
+  score_threshold: 0.9
+  model_path: "/home/pili/Desktop/fasterrcnn_model/tail_detection_model_v2_augmented_100ep.pth"
 
 tracking_runner:
   timeout_ms: 400
@@ -17,5 +18,5 @@ tracking_runner:
   log_dir_name: "embryo_tracking"
 
 simulated_microscope:
-  max_timeout: 4
+  max_timeout: 1
 

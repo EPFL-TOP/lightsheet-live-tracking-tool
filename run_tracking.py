@@ -145,14 +145,15 @@ class Script:
             config_path = os.path.join(os.getcwd(), 'tracking_tools', 'tracking_config.yaml')
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
-        tracker_config = config['tracker']
-        tracker_config["pixel_size_xy"] = pixel_size_xy
-        tracker_config["pixel_size_z"] = pixel_size_z
-        tracker_config["serverkit"] = serverkit
-        tracker_config["scaling_factor"] = scaling_factor
+
+        roi_tracker_config = config['roi_tracker']
+        roi_tracker_config["serverkit"] = serverkit
+        roi_tracker_config["scaling_factor"] = scaling_factor
+        position_tracker_config = {}
+        position_tracker_config["pixel_size_xy"] = pixel_size_xy
+        position_tracker_config["pixel_size_z"] = pixel_size_z
         runner_config = config['tracking_runner']
         simulation_config = config['simulated_microscope']
-        
 
 
         from tracking_tools.tracking_runner.TrackingRunner import TrackingRunner
@@ -169,9 +170,13 @@ class Script:
             microscope = SimulatedMicroscopeInterface(position_names=[v['Position'] for v in position_config.values()], **simulation_config)
         else :
             microscope = MicroscopeInterface()
+
         self.microscope = microscope
+
         position_tracker = PositionTrackerSingleRoI_v2
+        
         image_reader = ImageReader
+
         self.runner = TrackingRunner(
             microscope_interface=microscope,
             position_tracker=position_tracker,
@@ -179,7 +184,8 @@ class Script:
             positions_config=position_config,
             dirpath=dirpath,
             runner_params=runner_config,
-            tracker_params=tracker_config,
+            roi_tracker_params=roi_tracker_config,
+            position_tracker_params=position_tracker_config,
         )
         self.runner.run()
 

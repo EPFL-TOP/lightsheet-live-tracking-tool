@@ -57,6 +57,13 @@ class Position3D:
     def to_position2D(self) -> Position2D :
         return Position2D(x=self.x, y=self.y)
     
+    def scale(self, scaling_factor, down=True, axes="xy") -> 'Position3D':
+        scale_func = lambda num : num / 2 ** scaling_factor if down else num * 2 ** scaling_factor
+        x = scale_func(self.x) if 'x' in axes else self.x
+        y = scale_func(self.y) if 'y' in axes else self.y
+        z = scale_func(self.z) if 'z' in axes else self.z
+        return Position3D(x=x, y=y, z=z)
+    
     def __add__(self, shift: Union['Position3D', 'Shift3D']) -> 'Position3D':
         if isinstance(shift, (Position3D, Shift3D)):
             return Position3D(x=self.x + shift.x, y=self.y + shift.y, z=self.z + shift.z)
@@ -111,6 +118,11 @@ class ROI:
     
     def to_position3D(self, z) -> Position3D :
         return Position3D(x=self.x, y=self.y, z=z)
+    
+    def scale(self, scaling_factor, down=True) -> 'ROI' :
+        scale_func = lambda num : num / 2 ** scaling_factor if down else num * 2 ** scaling_factor
+        return ROI(x=scale_func(self.x), y=scale_func(self.y), height=scale_func(self.height), width=scale_func(self.width), order=self.order)
+
     
     def __mul__(self, scalar: Union[int, float]) -> 'ROI' :
         return ROI(x=self.x * scalar, y=self.y * scalar, height=self.height * scalar, width=self.width * scalar, order=self.order)
