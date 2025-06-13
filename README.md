@@ -49,7 +49,12 @@ If you are using a **Viventis microscope**, an integration with **PyMCS** is ava
 To use this integration:
 
 1. Copy the `run_tracking.py` script from this repository into the `scripts/` folder of your PyMCS installation.
-2. Running the script will start a GUI similar to the other PyMCS scripts.
+2. ```bash
+    cd path/to/live/tracking/tool
+    source tracking-tool-venv/bin/activate  # On Windows: tracking-tool-venv\Scripts\activate
+    python path/to/PyMCS/scripts/run_tracking.py path/to/PyMCS
+    ```
+> Running the script will start a GUI similar to the other PyMCS scripts.
 
 
 ## Using `live-tracking-tool` Without PyMCS
@@ -76,13 +81,23 @@ This project provides two interactive tools to support the tracking workflow. Bo
 ### 1. **ROI Selection Tool – `bokeh_selection.py`**
 Used to **initialize the Regions of Interest (ROIs)** before tracking begins. This script allows you to manually select the areas in the image where tracking should occur. 
 >  This step is **required** to set up the tracking process.
+```bash
+cd path/to/live/tracking/tool
+source tracking-tool-venv/bin/activate  # On Windows: tracking-tool-venv\Scripts\activate
+python interactive_tools bokeh_selection.py
+```
+
 
 ### 2. **Tracking Monitor – `bokeh_visualization.py`**
 
 Used to **monitor the tracking process** in real-time. It visualizes current tracking data.
 
 > This tool is **optional** and is meant for live monitoring only.
-
+```bash
+cd path/to/live/tracking/tool
+source tracking-tool-venv/bin/activate  # On Windows: tracking-tool-venv\Scripts\activate
+python interactive_tools bokeh_visualization.py
+```
 
 ## Remote GPU
 
