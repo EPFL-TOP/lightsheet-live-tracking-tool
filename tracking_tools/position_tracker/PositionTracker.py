@@ -135,7 +135,7 @@ class PositionTrackerSingleRoI_v2 :
             dx_correction = min_x
         elif max_x > W:
             dx_correction = max_x - W
-        self.logger.info(f"Correction needed: dx={dx_correction}, dy={dy_correction}")
+        self.logger.info(f"[{self.position_name}] Correction needed: dx={dx_correction}, dy={dy_correction}")
 
         # Apply corrections to shift
         shift_px.y += dy_correction

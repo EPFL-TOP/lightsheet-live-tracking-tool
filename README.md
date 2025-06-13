@@ -99,6 +99,16 @@ source tracking-tool-venv/bin/activate  # On Windows: tracking-tool-venv\Scripts
 python interactive_tools bokeh_visualization.py
 ```
 
+## Local GPU
+To run the on a local GPU using the detection feature, the detector model weights must be placed at:
+
+```bash
+tracking_tool/weights/*.pth
+```
+**Note**: The weights folder must contain only one .pth file, as the current implementation automatically loads the first match.
+
+If you wish to use a different path for the weights, you can override the default location by setting the model_path parameter in your tracking_config.yaml file
+
 ## Remote GPU
 
 Remote GPU execution is supported using the [`imaging-server-kit`](https://github.com/Imaging-Server-Kit) package.

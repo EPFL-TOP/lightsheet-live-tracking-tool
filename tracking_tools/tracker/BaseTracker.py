@@ -28,6 +28,28 @@ class SingleRoIBaseTracker_v2 :
             score_threshold,
             model_path,
     ) :
+        """ROI Tracker class. Uses CoTracker and Faster-RCNN to track an ROI in a streaming video. Works in a sliding window manner, by only keeping window_length number of frames.
+        The compute_new_position function takes as input a new frame and return the new position of the tracked ROI.
+
+        Args:
+            first_frame (_type_): _description_
+            roi (_type_): _description_
+            scaling_factor (_type_): _description_
+            serverkit (_type_): _description_
+            server_addresses (_type_): _description_
+            window_length (_type_): _description_
+            grid_size (_type_): _description_
+            base_kernel_size_xy (_type_): _description_
+            kernel_size_z (_type_): _description_
+            log (_type_): _description_
+            use_detection (_type_): _description_
+            containment_threshold (_type_): _description_
+            k (_type_): _description_
+            c0 (_type_): _description_
+            size_ratio_threshold (_type_): _description_
+            score_threshold (_type_): _description_
+            model_path (_type_): _description_
+        """
         # Takes raw frames as input, handle processing (norm, scaling, projection), manage the sliding window
         # and manage the computation of the RoI position across frames
         self.scaling_factor = scaling_factor
@@ -37,7 +59,6 @@ class SingleRoIBaseTracker_v2 :
         self.kernel_size_z = kernel_size_z
         self.log = log
         self.current_frame = self._downsample(first_frame)
-        # self.current_frame = self._bin(first_frame)
         self.shape = self.current_frame.shape
         self.current_frame_proj = np.max(self.current_frame, axis=0)
         self.use_detection = use_detection
@@ -86,11 +107,18 @@ class SingleRoIBaseTracker_v2 :
         self.detected_points = [self.roi_init.to_position2D()]
 
     def compute_new_position(self, frame) :
+        """Compute the new position of the tracked ROI
+
+        Args:
+            frame (_type_): New frame
+
+        Returns:
+            _type_: Position of the tracked ROI
+        """
         if self.tracking_state != TrackingState.TRACKING_OFF :
             self.count += 1
 
             frame = self._downsample(frame)
-            # frame = self._bin(frame)
             self.current_frame = frame
             frame_proj = np.max(frame, axis=0)
             self.current_frame_proj = frame_proj
@@ -145,7 +173,6 @@ class SingleRoIBaseTracker_v2 :
         if self.count <= self.window_length :
             queries = self.queries_init
         else :
-            # Redefine a region aroud the last tracking point, and add the center point as part of the grid
             roi = self._get_past_roi(index=self.count-self.window_length)
             queries = self._initialize_queries(self.window_frames[0], roi)
 
@@ -172,14 +199,14 @@ class SingleRoIBaseTracker_v2 :
         previous_points = tracks[-2][:,::-1] # xy -> yx
         motions = current_points - previous_points # yx
         # Fit a model to the vector field using least square regression
-        X = np.hstack([previous_points, np.ones((previous_points.shape[0], 1))]) # add intercept (y, x, 1)
+        X = np.hstack([previous_points, np.ones((previous_points.shape[0], 1))]) # add intercept [y, x, 1]
         U = motions
         W, _, _, _ = np.linalg.lstsq(X, U, rcond=None)
         R = W[:2].T
         x = W[2]
         # Compute the new position
         last_tracked_point = last_tracked_point.to_array('yx') # yx
-        new_pos_yx = last_tracked_point + R @ last_tracked_point + x # yx
+        new_pos_yx = last_tracked_point + R @ last_tracked_point + x # yx, point + predicted motion
         new_pos_yx = Position2D(x=new_pos_yx[1], y=new_pos_yx[0])
         return new_pos_yx
     
@@ -214,7 +241,7 @@ class SingleRoIBaseTracker_v2 :
                 self.logger.info("Valid Detection")
             else :
                 self.logger.info("Invalid Detection")
-            
+        
         if fusion_valid :
             position_detected = roi_detected.to_position2D()
             position_predicted = roi_predicted.to_position2D()
@@ -266,10 +293,6 @@ class SingleRoIBaseTracker_v2 :
         image = image[:, ::2**self.scaling_factor, ::2**self.scaling_factor]
         return image
     
-    def _bin(self, image) : ### FOR TESTING
-        from scipy.ndimage import zoom
-        return zoom(image, (1, 1/2**self.scaling_factor, 1/2**self.scaling_factor), order=0)
-    
     def initialize_predictor(self, serverkit, server_addresses) :
         if serverkit :
             from .predictor import TrackerSK
@@ -287,7 +310,17 @@ class SingleRoIBaseTracker_v2 :
             detector.connect()
         else :
             from .detector import Detector
-            detector = Detector(model_path=self.model_path, device="cuda")
+            from pathlib import Path
+            if self.model_path == "default" :
+                tracking_tool_dir = Path(__file__).resolve().parent.parent
+                weights_dir = tracking_tool_dir / "weights"
+                pth_files = list(weights_dir.glob("*.pth"))
+                if not pth_files : 
+                    raise FileNotFoundError(f"No .pth files found in {weights_dir}")
+                weights_path = pth_files[0]
+            else :
+                weights_path = self.model_path
+            detector = Detector(model_path=weights_path, device="cuda")
         return detector
 
     def compute_rois_matching_metrics(self, roi1, roi2):

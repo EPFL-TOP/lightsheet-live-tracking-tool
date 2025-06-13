@@ -5,22 +5,6 @@ from skimage.filters import gaussian
 from skimage.morphology import erosion, disk
 from scipy.signal import medfilt
 
-def get_slice_mask(shape, region, nb_samples=10) :
-    region = np.asarray(region)
-    region = np.maximum(region, 0)
-    region = np.minimum(region, shape[0]-1)
-    sample_indices = np.linspace(region[0], region[1], nb_samples, dtype=np.uint16)
-    slice_mask = np.zeros(shape, dtype=bool)
-    slice_mask[sample_indices] = True
-    return slice_mask
-
-def sample_frame(frame, region, nb_samples) :
-    # Create mask and get the sampled slices
-    slice_mask = get_slice_mask(frame.shape, region=region, nb_samples=nb_samples)
-    sampled_frame = frame.copy()
-    sampled_frame[~slice_mask] = 0
-    return sampled_frame
-
 def get_box(shape, center_point, hws) :
     """Generate a mask in a box shape in 2D or 3D
 
@@ -88,12 +72,16 @@ def crop_image(image, center_point, hws, allow_oob=True) :
 
     # Crop image
     if len(shape) == 3 :
-        cropped = image[crop_start[0]:crop_end[0],
-                    crop_start[1]:crop_end[1],
-                    crop_start[2]:crop_end[2]]
+        cropped = image[
+            crop_start[0]:crop_end[0],
+            crop_start[1]:crop_end[1],
+            crop_start[2]:crop_end[2],
+        ]
     elif len(shape) == 2 :
-        cropped = image[crop_start[0]:crop_end[0],
-                    crop_start[1]:crop_end[1]]
+        cropped = image[
+            crop_start[0]:crop_end[0],
+            crop_start[1]:crop_end[1],
+        ]
 
     # Out of bound cropping allowed, pad the cropped image to respect the cropping region dimensions
     if allow_oob :
@@ -103,111 +91,7 @@ def crop_image(image, center_point, hws, allow_oob=True) :
         return np.pad(cropped, pad_width, mode='constant', constant_values=0)
     else :
         return cropped
-
-def normalize_video(video) :
-    """Normalize each frame in a video with values (0 - 255), converting the type to uint8.
-
-    Args:
-        video (_type_): Video to be normalized
-
-    Returns:
-        _type_: Normalized video
-    """
-    video_normalized = np.stack([
-        (((frame - frame.min()) / (frame.max() - frame.min())) * 255).astype(np.uint8)
-        for frame in video
-    ], axis=0)
-    return video_normalized
-
-def gray_to_rgb(video) :
-    """Convert a grayscale video to an rgb video, duplicating the grayscale channel of each frame. from shape (nb_frames, frame_shape) to shape (nb_frames, frame_shape, 3)
-    frame_shape can be anything. The whole shape will be duplicated.
-
-    Args:
-        video (_type_): Grayscale video
-
-    Returns:
-        _type_: RGB video
-    """
-    video_rgb = np.stack([
-        np.repeat(frame[..., np.newaxis], 3, axis=-1)
-        for frame in video
-    ], axis=0)
-    return video_rgb
-
-def create_masks_from_video(video, type='otsu') :
-    """Create masks for each frame in a video
-
-    Args:
-        video (_type_): The original video
-        type (str, optional): Threshold type, can be 'ostu' or 'mean'. Defaults to 'otsu'.
-
-    Returns:
-        _type_: The masks for each frame of the video.
-    """
-    if type == 'otsu' :
-        thresholds = [threshold_otsu(frame) for frame in video]
-    if type == 'mean' :
-        thresholds = [threshold_mean(frame) for frame in video]
-    masks = np.stack([
-        (frame > threshold).astype(bool)
-        for frame, threshold in zip(video, thresholds)
-    ])
-    return masks
-
-def mask_video(video, type='otsu') :
-    """Masks a video.
-
-    Args:
-        video (_type_): The original video
-        type (str, optional): The threshold type, can be 'otsu' or 'mean'. Defaults to 'otsu'.
-
-    Returns:
-        _type_: the masked video
-    """
-    masks = create_masks_from_video(video, type=type)
-    video = np.stack([
-        frame * mask
-        for frame, mask in zip(video, masks)
-    ], axis=0)
-    return video
-
-def get_window(z, start, window_len, channel=1, projection='max', projection_axis='z', normalize=True, to_rgb=True, threshold_type='None') :
-    """Get a window in a video
-
-    Args:
-        z (Sequence): The original video
-        start (_type_): Start index
-        window_len (_type_): Window length
-        channel (int, optional): The channel index, if the video contains multiple channels.. Defaults to 1.
-        projection (str, optional): The type of projection, can be 'max' or 'mean'. 'None' for no projection. Defaults to 'max'.
-        projection_axis (str, optional): The projection axis, can be 'x', 'y' or 'z'. Defaults to 'z'.
-        normalize (bool, optional): Normalize each frames with value (0 - 255) and dtype uint8. Defaults to True.
-        to_rgb (bool, optional): Convert grayscale video to rgb video. Defaults to True.
-        threshold_type (str, optional): The threshold type for masking, can be 'otsu' or 'mean'. 'None' for no masking. Defaults to 'None'.
-
-    Returns:
-        _type_: The video window.
-    """
-    ndims = z.ndim
-    if ndims > 4 : # Contains different channels
-        video =  z[start:start+window_len, channel, :, :, :]
-    else :
-        video =  z[start:start+window_len, :, :, :]
-    axis_to_idx = {'z':1, 'y':2, 'x':3}
-    if projection == 'mean' :
-        video = np.mean(video, axis=axis_to_idx[projection_axis])
-    elif projection == 'max' :
-        video = np.max(video, axis=axis_to_idx[projection_axis])
-    else :
-        video = video
-    if normalize :
-        video = normalize_video(video)
-    if threshold_type != 'None' :
-        video = mask_video(video, type=threshold_type) 
-    if to_rgb :
-        video = gray_to_rgb(video)
-    return video
+    
 
 def generate_grid(shape, grid_size, segm_mask=None) :
     """Generate points in a grid.
@@ -311,39 +195,3 @@ def generate_uniform_grid_in_region(image, center_point, hws, grid_size, median_
     thresholded = (filtered > threshold).astype(int)
     grid_points = generate_grid(image.shape, grid_size=grid_size, segm_mask=thresholded * segm_mask)
     return grid_points
-
-
-def generate_border_points_from_region(image, center_point, hws, kernel_size, num_points) :
-    """Generate points on the shape borders in a region of a 2D image
-
-    Args:
-        image (_type_): Input image
-        center_point (_type_): Center point of the region
-        hws (_type_): half width size of the region
-        num_points (_type_): number of points to be sampled on the border
-
-    Returns:
-        _type_: Generated points
-    """
-    ndims = image.ndim
-    if ndims > 2 :
-        # Convert to grayscale
-        image = image[...,0]
-    segm_mask = get_box(image.shape, center_point, hws)
-    filtered = filter_image(image, median_kernel=0, gaussian_kernel=kernel_size)
-    threshold = threshold_otsu(filtered)
-    thresholded = (filtered > threshold).astype(int)
-    # First erosion to avoid having points outside of the shape due to blurring
-    eroded = erosion(thresholded, disk(3))
-    border = eroded - erosion(eroded)
-    border_masked = border * segm_mask
-    grid_points = sample_points_in_binary_mask(border_masked, num_points=num_points)
-    return grid_points
-
-
-def downsample_image(image, scaling_factor) :
-    image = np.asarray(image)
-    if image.ndim == 3 :
-        return image[:,::2**scaling_factor, ::2**scaling_factor]
-    elif image.ndim == 2 :
-        return image[::2**scaling_factor, ::2**scaling_factor]

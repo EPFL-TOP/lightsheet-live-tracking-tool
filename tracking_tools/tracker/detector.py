@@ -23,6 +23,7 @@ class Detector :
             Detector.model = torchvision.models.detection.fasterrcnn_resnet50_fpn_v2(weights='FasterRCNN_ResNet50_FPN_V2_Weights.DEFAULT')
             in_features = Detector.model.roi_heads.box_predictor.cls_score.in_features
             Detector.model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+            self.logger.info(f'Initialize model running on device: {device},  with weights: {model_path}')
             if device==torch.device('cpu'):
                 checkpoint = torch.load(model_path, weights_only=True, map_location=torch.device('cpu'))
             else:

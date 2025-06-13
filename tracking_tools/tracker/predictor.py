@@ -11,7 +11,7 @@ class Tracker :
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.logger = init_logger(self.__class__.__name__)
         if Tracker.model is None :
-            print('Initialize model running on device: ', device)
+            self.logger.info(f'Initialize model running on device: {device}')
             # self.model = CoTrackerPredictor(checkpoint='../co-tracker/checkpoints/scaled_offline.pth')
             Tracker.model = torch.hub.load("facebookresearch/co-tracker", "cotracker3_offline")
             Tracker.model = Tracker.model.to(device)

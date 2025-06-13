@@ -10,7 +10,7 @@ roi_tracker:
   c0: 0.4
   size_ratio_threshold: 0.3
   score_threshold: 0.9
-  model_path: "/home/pili/Desktop/fasterrcnn_model/tail_detection_model_v2_augmented_100ep.pth"
+  model_path: "default" # "default" for default path: tracking_tools/weights/*.pth  if another path is given, it will override the default path. 
 
 tracking_runner:
   timeout_ms: 400
