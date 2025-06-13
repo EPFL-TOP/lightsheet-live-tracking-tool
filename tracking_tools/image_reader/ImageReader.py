@@ -1,6 +1,7 @@
 import tifffile
 from pathlib import Path
 from ..logger.logger import init_logger
+import numpy as np
 
 class ImageReader() :
     def __init__(self, dirpath, log) :
@@ -19,6 +20,8 @@ class ImageReader() :
             if self.log : 
                 self.logger.info(f"Read image {image_path}")
                 self.logger.info(f"Image shape : {image.shape}")
+            if image.ndim == 2 :
+                return image[np.newaxis, ...]
             return image
         except Exception as e:
             self.logger.error(f'Cannot read {image_path}: {e}')

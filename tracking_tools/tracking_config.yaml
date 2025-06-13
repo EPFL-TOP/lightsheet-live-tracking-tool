@@ -2,7 +2,7 @@ roi_tracker:
   window_length: 10
   grid_size: 40
   scaling_factor: 2
-  server_addresses: ['http://upoates-tethys.epfl.ch:8000/', 'http://paperino.epfl.ch:8000']
+  server_addresses: ['http://upoates-tethys.epfl.ch:8000/', 'http://paperino.epfl.ch:8000'] # List of server addresses for remote GPU execution.
   base_kernel_size_xy: 41
   kernel_size_z: 5
   containment_threshold: 0.4
