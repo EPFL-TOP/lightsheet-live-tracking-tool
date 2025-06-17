@@ -3,17 +3,25 @@ from tornado.ioloop import IOLoop
 from tkinter import filedialog
 from bokeh.io import curdoc
 from bokeh.plotting import figure
-from bokeh.models import ColumnDataSource, BoxEditTool, TapTool, LabelSet, Button, CheckboxGroup, TextInput, Div, Range1d, Slider, Select, RangeSlider, LinearColorMapper
+from bokeh.models import ColumnDataSource, BoxEditTool, TapTool, LabelSet, Button, CheckboxGroup, TextInput, Div, Range1d, Slider, Select, RangeSlider, LinearColorMapper, FileInput
+import base64
+from PIL import Image
+import io
 from bokeh.layouts import column, row
 from bokeh.events import SelectionGeometry
 from bokeh.server.server import Server
 import numpy as np
-import json, os, pathlib, glob
+import json, os, pathlib, glob, sys
 import tifffile
+import socket
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 try:
     from  training_tools import tail_detection_visu as tdv
 except ModuleNotFoundError: 
-    from  training_tools import tail_detection_visu as tdv
+    print("Module 'tail_detection_visu' not found. Ensure the training_tools package is installed or available in the PYTHONPATH.")
+
 updating = False
 initial_shape = ()
 detect_model = None
@@ -405,6 +413,38 @@ def make_document(doc):
     select_button = Button(label="Browse Image...", button_type="primary")
     select_button.on_click(open_file_dialog)
 
+
+
+    #_______________________________________________________
+    def load_image_from_b64(file_contents):
+        # File contents is a base64-encoded string
+        print('file_contents ',file_contents)
+        try:
+            file_bytes = base64.b64decode(file_contents)
+            print('file_bytes ',io.BytesIO(file_bytes))
+            image = Image.open(io.BytesIO(file_bytes))
+            status.text = f"Loaded image: {image.size}"
+            # do something with the image
+        except Exception as e:
+            status.text = f"Failed to load image: {e}"
+
+    #file_input = FileInput(accept=".png,.jpg,.jpeg,.tif,.tiff")
+    file_input = FileInput()
+    
+    #print("file_input.filename ",file_input.filename)
+    #print("file_input.value ",file_input.value)
+    file_input.title = "No file selected fff "  # Initialize with a default filename  
+
+    #_______________________________________________________
+    def file_selected(attr, old, new):
+        print('file_input.value ',file_input.value)
+        status.text = f"Selected file: {file_input.filename}"
+        load_image_from_b64(file_input.value)
+
+    file_input.on_change("filename", file_selected)
+
+
+
     #_______________________________________________________
     def open_file_dialog_model():
         try:
@@ -509,25 +549,30 @@ def make_document(doc):
     status_layout2 = row(mk_div(), model_status)
     
     layout = column(mk_div(),
-                    row(mk_div(),select_button,mk_div(), select_button_model), 
+                    row(mk_div(),select_button,mk_div(), select_button_model, file_input), 
                     row(p,column(checkbox_maxproj,dropdown_downscale, contrast_slider, dropdown_model,detect_button, checkbox_detection)), slider_layout, controls, status_layout,status_layout2)
     doc.title = 'Tracking selection'
     doc.add_root(layout)
 
+#_______________________________________________________
+def get_free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('', 0))
+        return s.getsockname()[1]
 
- 
 #_______________________________________________________
 def run_server():
+    port = get_free_port()
+    port = 5020
+    print(f"Using dynamic port: {port}")
     io_loop = IOLoop()
     server = Server({'/': make_document},
                     io_loop=io_loop,
-                    allow_websocket_origin=["localhost:5020"],
-                    port=5020)
-    server.start()                  # bind sockets & routes
-    io_loop.start()                 # enter the IOLoop
-
-
-
+                    allow_websocket_origin=[f"localhost:{port}"],
+                    port=port)
+    server.start()
+    print(f"Bokeh server running at http://localhost:{port}")
+    io_loop.start()
 
 
 if __name__ == '__main__':
@@ -536,4 +581,3 @@ if __name__ == '__main__':
     import threading
     thread = threading.Thread(target=run_server)
     thread.start()
-    print("Bokeh is now serving at http://localhost:5020/")
