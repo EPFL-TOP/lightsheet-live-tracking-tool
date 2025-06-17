@@ -29,26 +29,26 @@ class SingleRoIBaseTracker_v2 :
             model_path,
     ) :
         """ROI Tracker class. Uses CoTracker and Faster-RCNN to track an ROI in a streaming video. Works in a sliding window manner, by only keeping window_length number of frames.
-        The compute_new_position function takes as input a new frame and return the new position of the tracked ROI.
+        The compute_new_position() updates the tracker.
 
         Args:
-            first_frame (_type_): _description_
-            roi (_type_): _description_
-            scaling_factor (_type_): _description_
-            serverkit (_type_): _description_
-            server_addresses (_type_): _description_
-            window_length (_type_): _description_
-            grid_size (_type_): _description_
-            base_kernel_size_xy (_type_): _description_
-            kernel_size_z (_type_): _description_
-            log (_type_): _description_
-            use_detection (_type_): _description_
-            containment_threshold (_type_): _description_
-            k (_type_): _description_
-            c0 (_type_): _description_
-            size_ratio_threshold (_type_): _description_
-            score_threshold (_type_): _description_
-            model_path (_type_): _description_
+            first_frame (np.ndarray): The initialization frame
+            roi (dict): Dict conatining "x", "y", "width", "height, and "order" keys. The "order" key is not used, its goal is to extend the class to a multi ROI tracking.
+            scaling_factor (int): The image will be downsampled by 2**scaling_factor in the X and Y dimensions.
+            serverkit (Bool): Use remote inference via imaging-server-kit
+            server_addresses (List): List of the server addresses that the serverkit interface will try to connect to (Tries to connect to the first one, then the second one etc...)
+            window_length (int): Length of the sliding window.
+            grid_size (int): Number of points in one dimension to create the grid (e.g. a grid size of 40 will generate a grid of 40 * 40 = 1600 uniformly distributed points)
+            base_kernel_size_xy (int): Size of the full scale gaussian kernel in x and y for the filtering operations. Will be downscaled by the scaling factor
+            kernel_size_z (int): Size of the gaussian kernel in z
+            log (Bool): Print logs
+            use_detection (Bool): Use the detection model the sensor fusion logic
+            containment_threshold (float): Containment threshold for the detection model validation
+            k (float): Steepness parameter of the sigmoid function for the sensor fusion weight computation
+            c0 (float): Inflection point of the sigmoid function for the sensor fusion weight computation
+            size_ratio_threshold (float): Size ratio threshold for the detection model validation
+            score_threshold (float): Softmax score threshold for the detection model validation
+            model_path (string): Detection model weights path. "default" for the default path (tracking_tools/weights/*.pth) or a custom path.
         """
         # Takes raw frames as input, handle processing (norm, scaling, projection), manage the sliding window
         # and manage the computation of the RoI position across frames
@@ -107,17 +107,19 @@ class SingleRoIBaseTracker_v2 :
         self.detected_points = [self.roi_init.to_position2D()]
 
     def compute_new_position(self, frame) :
-        """Compute the new position of the tracked ROI
+        """Compute the new position of the ROI in the given image.
+        Make use of the dataclasses defined in tracking_tools/utils/structures.
 
         Args:
-            frame (_type_): New frame
+            frame (np.ndarray): New frame
 
         Returns:
-            _type_: Position of the tracked ROI
+            tuple: Position3D of the tracked ROI (Full scale), trackingState
         """
         if self.tracking_state != TrackingState.TRACKING_OFF :
             self.count += 1
 
+            # Process input frame
             frame = self._downsample(frame)
             self.current_frame = frame
             frame_proj = np.max(frame, axis=0)
@@ -125,6 +127,7 @@ class SingleRoIBaseTracker_v2 :
 
             self.update_rolling_window(frame_proj)
 
+            # Compute CoTracker3 tracks
             new_tracks, tracking_state = self.update_tracks()
             self.tracking_state = tracking_state
 
@@ -138,6 +141,7 @@ class SingleRoIBaseTracker_v2 :
                 return Position3D.invalid(), self.tracking_state # Placeholder
             
             else :
+                # Compute predicted ROI
                 position_yx_predicted = self.compute_predicted_position_yx_ls(new_tracks, last_tracked_point)
                 last_roi = self._get_past_roi(index=-1)
                 roi_predicted = ROI(
@@ -148,6 +152,7 @@ class SingleRoIBaseTracker_v2 :
                     order=1
                 )
                 self.predicted_points.append(position_yx_predicted)
+                # Compute the detected ROI
                 if self.use_detection :
                     roi_detected, score, returnStatus = self.compute_detected_roi(self.current_frame_proj)
                     self.detected_points.append(roi_detected.to_position2D())
@@ -155,9 +160,13 @@ class SingleRoIBaseTracker_v2 :
                     self.detected = False
                     roi_detected = ROI.invalid(order=1) # Placeholder
                     score = 0                           # Placeholder
+
+                # Fuse positions and compute z position
                 position_yx, new_roi = self.fuse_positions_yx(roi_predicted, roi_detected, score)
                 self.rois_list.append([new_roi])
+
                 position_z = self.compute_new_position_z(new_roi)
+
                 new_position = position_yx.to_position3D(z=position_z)
             self.tracked_points.append(new_position)
             return new_position.scale(scaling_factor=self.scaling_factor, down=False, axes="xy"), self.tracking_state
@@ -170,6 +179,11 @@ class SingleRoIBaseTracker_v2 :
         self.window_frames = self.window_frames[-self.window_length:]
 
     def update_tracks(self) :
+        """Generate new query points and run the CoTracker3 model
+
+        Returns:
+            tuple: Returns the CoTracker3 predicted tracks and tracking state (One of TRACKING_ON, TRACKING_OFF, WAIT_FOR_NEXT_TIME_POINT)
+        """
         if self.count <= self.window_length :
             queries = self.queries_init
         else :
@@ -195,6 +209,15 @@ class SingleRoIBaseTracker_v2 :
     
     
     def compute_predicted_position_yx_ls(self, tracks, last_tracked_point) :
+        """Fit a linear regression model to the tracks and predict a position
+
+        Args:
+            tracks (_type_): _description_
+            last_tracked_point (_type_): _description_
+
+        Returns:
+            _type_: _description_
+        """
         current_points = tracks[-1][:,::-1]  # xy -> yx
         previous_points = tracks[-2][:,::-1] # xy -> yx
         motions = current_points - previous_points # yx
@@ -206,11 +229,20 @@ class SingleRoIBaseTracker_v2 :
         x = W[2]
         # Compute the new position
         last_tracked_point = last_tracked_point.to_array('yx') # yx
-        new_pos_yx = last_tracked_point + R @ last_tracked_point + x # yx, point + predicted motion
+        new_pos_yx = last_tracked_point + R @ last_tracked_point + x # yx, predicted point = point + predicted motion
         new_pos_yx = Position2D(x=new_pos_yx[1], y=new_pos_yx[0])
         return new_pos_yx
     
     def compute_detected_roi(self, frame) :
+        """Run the Faster-RCNN model to predict an ROI in a frame 
+
+        Args:
+            frame (np.ndarray): Input frame (2D)
+
+        Returns:
+            Tuple: Detected ROI, softmax score of the detection, returnStatus of the model
+            returnStatus one of SUCESS indicating a detected ROI or NO_OP indicating no detection.
+        """
         prediction, returnStatus = self.detector._run_model(frame)
         scores = prediction['scores']
         if len(scores) > 0 :
@@ -231,11 +263,22 @@ class SingleRoIBaseTracker_v2 :
 
     
     def fuse_positions_yx(self, roi_predicted, roi_detected, score) :
+        """Validate the detection and fuses the predicted and detected ROIs
+
+        Args:
+            roi_predicted (ROI): Prediction ROI, from CoTracker3
+            roi_detected (ROI): Detction ROI, from Faster-RCNN
+            score (float): softmax score of the detection
+
+        Returns:
+            tuple: Fused position xy, fuse ROI.
+        """
         fusion_valid = False
         # Check if detection is present, and valid
         if self.detected :
             containement, size_ratio = self.compute_rois_matching_metrics(roi_predicted, roi_detected)
             self.logger.info(f"Detection validation : model score :{score}, containment: {containement}, size_ratio: {size_ratio}")
+            # Validation conditions
             if (score > self.score_threshold) and (containement > self.containment_threshold) and (size_ratio > self.size_ratio_threshold):
                 fusion_valid = True
                 self.logger.info("Valid Detection")
@@ -260,29 +303,66 @@ class SingleRoIBaseTracker_v2 :
 
 
     def compute_new_position_z(self, roi) :
+        """Computes the position in z given an ROI, using the center of mass method
+
+        Args:
+            roi (ROI): ROI used to crop the image
+
+        Returns:
+            float: center of mass in z
+        """
+        # Build the bounding box (ROI in xy and full dimension in z)
         D, H, W = self.current_frame.shape
         position_yx = roi.to_position2D()
         hws = [roi.height / 2, roi.width / 2]
         center_point_z_tracking = position_yx.to_position3D(z=D//2).to_array(order='zyx')
         hws_z_tracking = np.array([D//2, *hws])
+
+        # Crop
         frame_cropped = crop_image(self.current_frame, center_point_z_tracking, hws_z_tracking)
+
+        # Filter (Gaussian blurring)
         frame_cropped_filtered = filter_image(frame_cropped, median_kernel=0, gaussian_kernel_xy=self.kernel_size_xy, gaussian_kernel_z=self.kernel_size_z)
+
+        # Binarize
         binary = threshold_image(frame_cropped_filtered)
-        # Compute center of mass in z
+
+        # center of mass in z
         com_z = center_of_mass(binary)[0]
         return com_z
 
     def _initialize_queries(self, frame, roi) : 
+        """Generate query points given a frame and an ROI
+
+        Args:
+            frame (np.ndarray): Input frame (2D)
+            roi (ROI): Input ROI
+
+        Returns:
+            np.ndarray: Nx2 array of points coordinates
+        """
+        # Build bounding box
         center_point = roi.to_position2D().to_array(order='yx')
         hws = [roi.height / 2, roi.width / 2]
+
         points = generate_uniform_grid_in_region(frame, center_point, hws, grid_size=self.grid_size, gaussian_kernel=self.kernel_size_xy)
+
         if len(points) == 0:
             self.logger.warning(f"No query points generated for RoI.")
             points = np.empty((0, 2))  # Ensure it stays consistent
             self.tracking_state = TrackingState.WAIT_FOR_NEXT_TIME_POINT
+
         return points
     
     def _normalize_percentile(self, video_batch) :
+        """Normalize a video using the 1st and 99th percentiles. Converts to uint8
+
+        Args:
+            video_batch (np.ndarray): video N*H*W
+
+        Returns:
+            np.nadarray: Normalized video
+        """
         q1, q99 = np.quantile(video_batch, [0.01, 0.99])
         value_range = q99 - q1
         normalized_video = np.clip((video_batch - q1) / value_range, 0, 1)
@@ -312,8 +392,8 @@ class SingleRoIBaseTracker_v2 :
             from .detector import Detector
             from pathlib import Path
             if self.model_path == "default" :
-                tracking_tool_dir = Path(__file__).resolve().parent.parent
-                weights_dir = tracking_tool_dir / "weights"
+                parent_dir = Path(__file__).resolve().parent.parent.parent
+                weights_dir = parent_dir / "weights"
                 pth_files = list(weights_dir.glob("*.pth"))
                 if not pth_files : 
                     raise FileNotFoundError(f"No .pth files found in {weights_dir}")
@@ -324,6 +404,15 @@ class SingleRoIBaseTracker_v2 :
         return detector
 
     def compute_rois_matching_metrics(self, roi1, roi2):
+        """Computes size ratio and containment of two ROIs
+
+        Args:
+            roi1 (ROI): _description_
+            roi2 (ROI): _description_
+
+        Returns:
+            tuple: containment, size_ratio
+        """
         center1 = np.array([roi1.y, roi1.x])
         hws1 = np.array([roi1.height / 2, roi1.width / 2])
         center2 = np.array([roi2.y, roi2.x])
@@ -348,6 +437,17 @@ class SingleRoIBaseTracker_v2 :
         return containment, size_ratio
 
     def confidence_weighted_average(self, detection_pos, prediction_pos, containment) :
+        """Compute the confidence weighted average.
+        Compute alpha using a sogmoid function
+
+        Args:
+            detection_pos (Posiiton2D): Detection position
+            prediction_pos (Position2D): Prediction position
+            containment (float): ROI containment
+
+        Returns:
+            Position2D: The fused position
+        """
         misalignement = 1 - containment
         alpha = 1 / (1 + np.exp(-self.k * (misalignement - self.c0)))
         fused_pos = alpha * detection_pos + (1 - alpha) * prediction_pos
