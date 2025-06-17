@@ -391,9 +391,9 @@ class SingleRoIBaseTracker_v2 :
         else :
             from .detector import Detector
             from pathlib import Path
+            import os
             if self.model_path == "default" :
-                parent_dir = Path(__file__).resolve().parent.parent.parent
-                weights_dir = parent_dir / "weights"
+                weights_dir = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "weights")))
                 pth_files = list(weights_dir.glob("*.pth"))
                 if not pth_files : 
                     raise FileNotFoundError(f"No .pth files found in {weights_dir}")
