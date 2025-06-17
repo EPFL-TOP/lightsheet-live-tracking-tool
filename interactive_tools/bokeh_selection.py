@@ -37,7 +37,12 @@ def make_document(doc):
     downscale=['0','1','2','3','4','5']
     dropdown_downscale  = Select(value=downscale[0], title='Downscaling', options=downscale)
 
-    default_model_path=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "weights"))
+    try:
+        base_path = os.path.dirname(__file__)
+    except NameError:
+        base_path = os.path.dirname(os.path.abspath(sys.argv[0]))
+        
+    default_model_path=os.path.abspath(os.path.join(base_path, "..", "weights"))
     model_detect=[]
     if os.path.isdir(default_model_path):
         models = glob.glob(os.path.join(default_model_path,'*.pth'))
