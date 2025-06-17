@@ -3,7 +3,7 @@ from tornado.ioloop import IOLoop
 from tkinter import filedialog
 from bokeh.io import curdoc
 from bokeh.plotting import figure
-from bokeh.models import ColumnDataSource, BoxEditTool, TapTool, LabelSet, Button, CheckboxGroup, TextInput, Div, Range1d, Slider, Select, RangeSlider, LinearColorMapper, FileInput
+from bokeh.models import ColumnDataSource, BoxEditTool, TapTool, LabelSet, Button, CheckboxGroup, CustomJS, TextInput, Div, Range1d, Slider, Select, RangeSlider, LinearColorMapper, FileInput
 import base64
 from PIL import Image
 import io
@@ -37,7 +37,7 @@ def make_document(doc):
     downscale=['0','1','2','3','4','5']
     dropdown_downscale  = Select(value=downscale[0], title='Downscaling', options=downscale)
 
-    default_model_path=r'C:\Viventis\PyMCS\v2.0.0.2_modified\models'
+    default_model_path=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "weights"))
     model_detect=[]
     if os.path.isdir(default_model_path):
         models = glob.glob(os.path.join(default_model_path,'*.pth'))
@@ -430,7 +430,8 @@ def make_document(doc):
 
     #file_input = FileInput(accept=".png,.jpg,.jpeg,.tif,.tiff")
     file_input = FileInput()
-    
+    div = Div(text="<h1>FileInput Values:</h1><p>filename:<p>base64 value:")
+
     #print("file_input.filename ",file_input.filename)
     #print("file_input.value ",file_input.value)
     file_input.title = "No file selected fff "  # Initialize with a default filename  
@@ -441,9 +442,16 @@ def make_document(doc):
         status.text = f"Selected file: {file_input.filename}"
         load_image_from_b64(file_input.value)
 
-    file_input.on_change("filename", file_selected)
+    #file_input.on_change("filename", file_selected)
 
 
+
+    callback = CustomJS(args=dict(div=div, file_input=file_input), code="""
+        div.text = "<h1>FileInput Values:</h1><p>filename: " + file_input.filename
+                + "<p>b64 value: " + file_input.value
+    """)
+
+    file_input.js_on_change('filename', callback)
 
     #_______________________________________________________
     def open_file_dialog_model():
@@ -549,7 +557,7 @@ def make_document(doc):
     status_layout2 = row(mk_div(), model_status)
     
     layout = column(mk_div(),
-                    row(mk_div(),select_button,mk_div(), select_button_model, file_input), 
+                    row(mk_div(),select_button,mk_div(), select_button_model, file_input, div), 
                     row(p,column(checkbox_maxproj,dropdown_downscale, contrast_slider, dropdown_model,detect_button, checkbox_detection)), slider_layout, controls, status_layout,status_layout2)
     doc.title = 'Tracking selection'
     doc.add_root(layout)
