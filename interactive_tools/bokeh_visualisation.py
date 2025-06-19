@@ -100,9 +100,9 @@ def make_document(doc):
     p_shifts.line('t','y',line_width=2, source=shift_mu_source, legend_label='y', line_color='blue')
     p_shifts.line('t','z',line_width=2, source=shift_mu_source, legend_label='z', line_color='green')
 
-    p_trajectory_xy.circle('x', 'y', size=8, color=color_mapper_trajectory, source=trajectory_source)
-    p_trajectory_xz.circle('x', 'z', size=8, color=color_mapper_trajectory, source=trajectory_source)
-    p_trajectory_yz.circle('y', 'z', size=8, color=color_mapper_trajectory, source=trajectory_source)
+    p_trajectory_xy.scatter('x', 'y', size=8, color=color_mapper_trajectory, source=trajectory_source)
+    p_trajectory_xz.scatter('x', 'z', size=8, color=color_mapper_trajectory, source=trajectory_source)
+    p_trajectory_yz.scatter('y', 'z', size=8, color=color_mapper_trajectory, source=trajectory_source)
 
     def mk_div(**kwargs):
         return Div(text='<div style="background-color: white; width: 20px; height: 1px;"></div>', **kwargs)
@@ -378,9 +378,9 @@ def make_document(doc):
         for i, (img_array, rois, pts) in enumerate(zip(images, rois_per_frame, points)):
             img = Image.fromarray(img_array).convert("RGB")
             draw = ImageDraw.Draw(img)
-            #for roi in rois:
-            #    draw.rectangle(roi, outline="blue", width=2)
-            #draw.text((5, 5), f"Frame {i}", fill="white")
+            for roi in rois:
+                draw.rectangle(roi, outline="blue", width=2)
+            draw.text((5, 5), f"Frame {i}", fill="white")
             for x, y in pts:
                 r = 3
                 draw.ellipse((x - r, y - r, x + r, y + r), fill="red")
