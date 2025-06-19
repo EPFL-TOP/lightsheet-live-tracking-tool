@@ -358,7 +358,15 @@ def make_document(doc):
             y = rects_source.data['y'][i]
             width = rects_source.data['width'][i]
             height = rects_source.data['height'][i]
-            rois.append((x-width/2., y-height/2., x + width/2., y + height/2.))
+            local_rois=[]
+            for j in range(len(x)):
+                x_val = x[j]
+                y_val = y[j]
+                width_val = width[j]
+                height_val = height[j]
+                if width_val > 0 and height_val > 0:
+                    local_rois.append((x_val - width_val / 2., y_val - height_val / 2., x_val + width_val / 2., y_val + height_val / 2.))
+            rois.append(local_rois)
         points=[]
         for i in range(len(points_source.data['x'])):
             x = points_source.data['x'][i]
