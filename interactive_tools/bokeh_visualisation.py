@@ -220,7 +220,6 @@ def make_document(doc):
         if not reload:
             image_source.data = dict(image=[images_ds[0]], x=[x_ds[0]], y=[y_ds[0]], dw=[dw_ds[0]], dh=[dh_ds[0]])
         
-        slider.end = len(images_ds)-1
 
 
 
@@ -249,6 +248,7 @@ def make_document(doc):
         shifts_x, shifts_y, shifts_z = [],[],[]
         scale_factor = 1
 
+        n_tp=0
         for tp in mp_list:
             tp=str(tp)
             try:
@@ -266,9 +266,12 @@ def make_document(doc):
                 shifts_x.append(data_log[tp]["shift_um"]["x"])
                 shifts_y.append(data_log[tp]["shift_um"]["y"])
                 shifts_z.append(data_log[tp]["shift_um"]["z"])
+                n_tp+=1
             except KeyError:
                 print('no time point---',tp,'----')
 
+
+        slider.end = n_tp-1
         rects_source.data = dict(x=roi_x, 
                                  y=roi_y, 
                                  width=roi_width, 
