@@ -373,6 +373,7 @@ def make_document(doc):
         points=[]
         for i in range(len(points_source.data['x'])):
             x = points_source.data['x'][i]
+            print("points_source.data['y'][i] ",points_source.data['y'][i])
             y = images[0].shape[0]-points_source.data['y'][i]
             pts = list(zip(x, y))
             points.append(pts)
