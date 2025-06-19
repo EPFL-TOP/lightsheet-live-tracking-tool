@@ -313,9 +313,12 @@ def make_document(doc):
                 x_tracks.append(track[0][-1][:,0].tolist())
                 y_tracks.append((data_pos["shape"][1]/scale_factor-track[0][0][:,1]).tolist())
                 first=False
-            print('track ',track)
-            x_tracks.append(track[0][-1][:,0].tolist())
-            y_tracks.append((data_pos["shape"][1]/scale_factor-track[0][-1][:,1]).tolist())
+            if len(track[0])==0:
+                x_tracks.append([])
+                y_tracks.append([])
+            else:
+                x_tracks.append(track[0][-1][:,0].tolist())
+                y_tracks.append((data_pos["shape"][1]/scale_factor-track[0][-1][:,1]).tolist())
 
         points_source.data = dict(x=x_tracks, y=y_tracks)
 
