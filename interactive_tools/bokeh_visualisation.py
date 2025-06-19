@@ -353,6 +353,8 @@ def make_document(doc):
     #_______________________________________________________
     def save_movie():
         images=images_source.data['image']
+        for i in range(len(images)):
+            images[i] = np.flip(images[i], axis=0)
         rois_per_frame=[]
         for i in range(len(rects_source.data['x'])):
             x = rects_source.data['x'][i]
@@ -362,7 +364,7 @@ def make_document(doc):
             local_rois=[]
             for j in range(len(x)):
                 x_val = x[j]
-                y_val = y[j]
+                y_val = images[0].shape[0]-y[j]
                 width_val = width[j]
                 height_val = height[j]
                 if width_val > 0 and height_val > 0:
@@ -371,7 +373,7 @@ def make_document(doc):
         points=[]
         for i in range(len(points_source.data['x'])):
             x = points_source.data['x'][i]
-            y = points_source.data['y'][i]
+            y = images[0].shape[0]-points_source.data['y'][i]
             pts = list(zip(x, y))
             points.append(pts)
         frames = []
