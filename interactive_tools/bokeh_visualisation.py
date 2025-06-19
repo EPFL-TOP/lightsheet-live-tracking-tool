@@ -313,7 +313,7 @@ def make_document(doc):
                 x_tracks.append(track[0][-1][:,0].tolist())
                 y_tracks.append((data_pos["shape"][1]/scale_factor-track[0][0][:,1]).tolist())
                 first=False
-            if len(track[0])==0:
+            if len(track)==0:
                 x_tracks.append([])
                 y_tracks.append([])
             else:
