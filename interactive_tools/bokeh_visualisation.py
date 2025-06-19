@@ -351,13 +351,32 @@ def make_document(doc):
     #_______________________________________________________
     def save_movie():
         images=images_source.data['image']
-        rois=rects_source.data['x']
-        points=points_source.data['x']
+        #rois = [(20 + i, 30 + i, 80 + i, 90 + i) for i in range(num_frames)]  # (x0, y0, x1, y1)
+        rois=[]
+        for i in range(len(rects_source.data['x'])):
+            x = rects_source.data['x'][i]
+            y = rects_source.data['y'][i]
+            width = rects_source.data['width'][i]
+            height = rects_source.data['height'][i]
+            rois.append((x-width/2., y-height/2., x + width/2., y + height/2.))
+        points=[]
+        for i in range(len(points_source.data['x'])):
+            x = points_source.data['x'][i]
+            y = points_source.data['y'][i]
+            pts = list(zip(x, y))
+            points.append(pts)
         frames = []
         for i, (img_array, roi, pts) in enumerate(zip(images, rois, points)):
             img = Image.fromarray(img_array).convert("RGB")
             draw = ImageDraw.Draw(img)
+            draw.rectangle(roi, outline="blue", width=2)
+            draw.text((5, 5), f"Frame {i}", fill="white")
+            for x, y in pts:
+                r = 3
+                draw.ellipse((x - r, y - r, x + r, y + r), fill="red")
+           
             frames.append(img)
+
 
         frames[0].save("timelapse.gif", save_all=True, append_images=frames[1:], duration=200, loop=0)
 
