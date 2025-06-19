@@ -13,6 +13,8 @@ import numpy as np
 import json, os, pathlib
 import tifffile
 import glob, sys, pickle
+from PIL import Image, ImageDraw
+import imageio
 
 last_tp = -1
 
@@ -347,6 +349,22 @@ def make_document(doc):
     contrast_slider.on_change('value', update_contrast)
 
     #_______________________________________________________
+    def save_movie():
+        images=images_source.data['image']
+        rois=rects_source.data['x']
+        points=points_source.data['x']
+        frames = []
+        for i, (img_array, roi, pts) in enumerate(zip(images, rois, points)):
+            img = Image.fromarray(img_array).convert("RGB")
+            draw = ImageDraw.Draw(img)
+            frames.append(img)
+
+        frames[0].save("timelapse.gif", save_all=True, append_images=frames[1:], duration=200, loop=0)
+
+    button_save = Button(label="Save movie", button_type="success")
+    button_save.on_click(save_movie)
+
+    #_______________________________________________________
     def open_file_dialog():
         try:
             root = tk.Tk()
@@ -389,7 +407,7 @@ def make_document(doc):
     select_layout = row(mk_div(), select_button, mk_div(), dropdown_position)
     slider_layout = row(mk_div(), slider)
     text_layout = row(mk_div(), status)
-    reload_layout = row(mk_div(), btn_reload)
+    reload_layout = row(mk_div(), btn_reload, button_save)
     
     left_col  = column(select_layout, p_img, slider_layout, reload_layout, text_layout, row(mk_div(),contrast_slider))
     trajectory_row = row(p_trajectory_xy, p_trajectory_xz, p_trajectory_yz)
@@ -398,6 +416,8 @@ def make_document(doc):
 
     doc.title = 'Tracking visualisation'
     doc.add_root(layout)
+
+
 
 #_______________________________________________________
 def run_server():
