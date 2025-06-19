@@ -381,7 +381,7 @@ def make_document(doc):
             img = Image.fromarray(img_array).convert("RGB")
             draw = ImageDraw.Draw(img)
             for roi in rois:
-                draw.rectangle(roi, outline="blue", width=2)
+                draw.rectangle(roi, outline="red", width=2)
             draw.text((5, 5), f"Frame {i}", fill="white")
             for x, y in pts:
                 r = 3
