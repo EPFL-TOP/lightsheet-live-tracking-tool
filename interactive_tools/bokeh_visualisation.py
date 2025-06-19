@@ -348,6 +348,8 @@ def make_document(doc):
     contrast_slider = RangeSlider(start=0, end=255, value=(0, 255), step=1, title="Contrast", width=150)
     contrast_slider.on_change('value', update_contrast)
 
+
+
     #_______________________________________________________
     def save_movie():
         images=images_source.data['image']
@@ -379,17 +381,26 @@ def make_document(doc):
             #for roi in rois:
             #    draw.rectangle(roi, outline="blue", width=2)
             #draw.text((5, 5), f"Frame {i}", fill="white")
-            #for x, y in pts:
-            #    r = 3
-            #    draw.ellipse((x - r, y - r, x + r, y + r), fill="red")
+            for x, y in pts:
+                r = 3
+                draw.ellipse((x - r, y - r, x + r, y + r), fill="red")
            
             frames.append(img)
 
-
-        frames[0].save("timelapse.gif", save_all=True, append_images=frames[1:], duration=200, loop=0)
+        frames[0].save("timelapse.gif", save_all=True, append_images=frames[1:], duration=100, loop=0)
         print("Saved timelapse_multi_rois.gif")
+
+
+        #_______________________________________________________
+    def save_movie_short():
+        global detect_model
+        button_save.label = "Processing"
+        button_save.button_type = "danger"
+  
+        curdoc().add_next_tick_callback(save_movie)
+
     button_save = Button(label="Save movie", button_type="success")
-    button_save.on_click(save_movie)
+    button_save.on_click(save_movie_short)
 
     #_______________________________________________________
     def open_file_dialog():
