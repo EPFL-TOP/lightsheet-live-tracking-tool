@@ -387,10 +387,11 @@ def make_document(doc):
            
             frames.append(img)
 
-        frames[0].save("timelapse.gif", save_all=True, append_images=frames[1:], duration=100, loop=0)
-        print("Saved timelapse_multi_rois.gif")
+        name="{}-{}.gif".format(os.path.split(status.text.replace("Selected folder: ",""))[-1], dropdown_position.value.replace(" ", "_"))
+        print("Saved  movie as ",name)
         button_save.label = "Save movie"
         button_save.button_type = "success"
+        frames[0].save(name, save_all=True, append_images=frames[1:], duration=100, loop=0)
         #status.text = "Movie saved as timelapse_multi_rois.gif"
 
         #_______________________________________________________
