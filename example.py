@@ -59,7 +59,7 @@ roi_tracker_config = {
     "size_ratio_threshold": 0.3,
     "score_threshold": 0.9,
     "model_path": "default",
-    "serverkit": True,
+    "serverkit": True,  # Choose wether to use imageing-server-kit
 }
 
 position_config = search_JSON_files(dirpath, runner_config["log_dir_name"])

@@ -72,7 +72,7 @@ To start tracking:
 1. Create a `TrackingRunner` instance with your tracking config.
 2. Call its `.run()` method.
 
-You can find a working example in the [**Examples section**](#example).
+You can find a working example [`example.py`](example.py).
 
 ## Interactive visualizations
 
@@ -103,7 +103,7 @@ python interactive_tools bokeh_visualization.py
 To run the on a local GPU using the detection feature, the detector model weights must be placed at:
 
 ```bash
-tracking_tool/weights/*.pth
+weights/*.pth
 ```
 **Note**: The weights folder must contain only one .pth file, as the current implementation automatically loads the first match.
 
@@ -117,12 +117,10 @@ Remote GPU execution is supported using the [`imaging-server-kit`](https://githu
 
 To run the server:
 
-1. Install `imaging-server-kit` version **0.0.12** or higher on the remote machine.
-    ```bash
-    pip install imaging-server-kit==0.0.12
-    ```
-2. Ensure that the machine has a compatible **PyTorch** installation.
-3. Run the main server script (**[file coming soon]**) on the GPU-enabled machine.
+1. Ensure that the machine has compatible **PyTorch** and **imaging-server-kit** installations.
+2. Run the main server script [`serverkit_main.py`](serverkit_main.py) on the GPU-enabled machine.
+
+> The server script defaults to using the detection model. Make sure the model weights are located in the same directory as the script.
 
 > The default port is **8000**.
 
@@ -136,7 +134,5 @@ To access the remote GPU server from your local machine:
 
 Once configured, all model inference will be offloaded to the remote GPU server.
 
-A usage example is available in the [**Examples section**](#example).
+A usage example is available in [`example.py`](example.py)
 
-## Example
-Coming soon
