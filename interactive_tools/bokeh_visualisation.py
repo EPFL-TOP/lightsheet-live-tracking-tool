@@ -379,9 +379,9 @@ def make_document(doc):
             #for roi in rois:
             #    draw.rectangle(roi, outline="blue", width=2)
             draw.text((5, 5), f"Frame {i}", fill="white")
-            for x, y in pts:
-                r = 3
-                draw.ellipse((x - r, y - r, x + r, y + r), fill="red")
+            #for x, y in pts:
+            #    r = 3
+            #    draw.ellipse((x - r, y - r, x + r, y + r), fill="red")
            
             frames.append(img)
 
