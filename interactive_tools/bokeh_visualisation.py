@@ -378,7 +378,7 @@ def make_document(doc):
             draw = ImageDraw.Draw(img)
             #for roi in rois:
             #    draw.rectangle(roi, outline="blue", width=2)
-            draw.text((5, 5), f"Frame {i}", fill="white")
+            #draw.text((5, 5), f"Frame {i}", fill="white")
             #for x, y in pts:
             #    r = 3
             #    draw.ellipse((x - r, y - r, x + r, y + r), fill="red")
@@ -387,7 +387,7 @@ def make_document(doc):
 
 
         frames[0].save("timelapse.gif", save_all=True, append_images=frames[1:], duration=200, loop=0)
-
+        print("Saved timelapse_multi_rois.gif")
     button_save = Button(label="Save movie", button_type="success")
     button_save.on_click(save_movie)
 
