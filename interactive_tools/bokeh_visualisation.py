@@ -13,6 +13,8 @@ import numpy as np
 import json, os, pathlib
 import tifffile
 import glob, sys, pickle
+from PIL import Image, ImageDraw
+import imageio
 
 last_tp = -1
 
@@ -98,9 +100,9 @@ def make_document(doc):
     p_shifts.line('t','y',line_width=2, source=shift_mu_source, legend_label='y', line_color='blue')
     p_shifts.line('t','z',line_width=2, source=shift_mu_source, legend_label='z', line_color='green')
 
-    p_trajectory_xy.circle('x', 'y', size=8, color=color_mapper_trajectory, source=trajectory_source)
-    p_trajectory_xz.circle('x', 'z', size=8, color=color_mapper_trajectory, source=trajectory_source)
-    p_trajectory_yz.circle('y', 'z', size=8, color=color_mapper_trajectory, source=trajectory_source)
+    p_trajectory_xy.scatter('x', 'y', size=8, color=color_mapper_trajectory, source=trajectory_source)
+    p_trajectory_xz.scatter('x', 'z', size=8, color=color_mapper_trajectory, source=trajectory_source)
+    p_trajectory_yz.scatter('y', 'z', size=8, color=color_mapper_trajectory, source=trajectory_source)
 
     def mk_div(**kwargs):
         return Div(text='<div style="background-color: white; width: 20px; height: 1px;"></div>', **kwargs)
@@ -220,7 +222,6 @@ def make_document(doc):
         if not reload:
             image_source.data = dict(image=[images_ds[0]], x=[x_ds[0]], y=[y_ds[0]], dw=[dw_ds[0]], dh=[dh_ds[0]])
         
-        slider.end = len(images_ds)-1
 
 
 
@@ -249,6 +250,7 @@ def make_document(doc):
         shifts_x, shifts_y, shifts_z = [],[],[]
         scale_factor = 1
 
+        n_tp=0
         for tp in mp_list:
             tp=str(tp)
             try:
@@ -266,9 +268,12 @@ def make_document(doc):
                 shifts_x.append(data_log[tp]["shift_um"]["x"])
                 shifts_y.append(data_log[tp]["shift_um"]["y"])
                 shifts_z.append(data_log[tp]["shift_um"]["z"])
+                n_tp+=1
             except KeyError:
                 print('no time point---',tp,'----')
 
+
+        slider.end = n_tp-1
         rects_source.data = dict(x=roi_x, 
                                  y=roi_y, 
                                  width=roi_width, 
@@ -313,8 +318,12 @@ def make_document(doc):
                 x_tracks.append(track[0][-1][:,0].tolist())
                 y_tracks.append((data_pos["shape"][1]/scale_factor-track[0][0][:,1]).tolist())
                 first=False
-            x_tracks.append(track[0][-1][:,0].tolist())
-            y_tracks.append((data_pos["shape"][1]/scale_factor-track[0][-1][:,1]).tolist())
+            if len(track)==0:
+                x_tracks.append([])
+                y_tracks.append([])
+            else:
+                x_tracks.append(track[0][-1][:,0].tolist())
+                y_tracks.append((data_pos["shape"][1]/scale_factor-track[0][-1][:,1]).tolist())
 
         points_source.data = dict(x=x_tracks, y=y_tracks)
 
@@ -338,6 +347,62 @@ def make_document(doc):
 
     contrast_slider = RangeSlider(start=0, end=255, value=(0, 255), step=1, title="Contrast", width=150)
     contrast_slider.on_change('value', update_contrast)
+
+
+
+    #_______________________________________________________
+    def save_movie():
+        images=images_source.data['image']
+        rois_per_frame=[]
+        for i in range(len(rects_source.data['x'])):
+            x = rects_source.data['x'][i]
+            y = rects_source.data['y'][i]
+            width = rects_source.data['width'][i]
+            height = rects_source.data['height'][i]
+            local_rois=[]
+            for j in range(len(x)):
+                x_val = x[j]
+                y_val = y[j]
+                width_val = width[j]
+                height_val = height[j]
+                if width_val > 0 and height_val > 0:
+                    local_rois.append((x_val - width_val / 2., y_val - height_val / 2., x_val + width_val / 2., y_val + height_val / 2.))
+            rois_per_frame.append(local_rois)
+        points=[]
+        for i in range(len(points_source.data['x'])):
+            x = points_source.data['x'][i]
+            y = points_source.data['y'][i]
+            pts = list(zip(x, y))
+            points.append(pts)
+        frames = []
+        for i, (img_array, rois, pts) in enumerate(zip(images, rois_per_frame, points)):
+            img = Image.fromarray(img_array).convert("RGB")
+            draw = ImageDraw.Draw(img)
+            for roi in rois:
+                draw.rectangle(roi, outline="blue", width=2)
+            draw.text((5, 5), f"Frame {i}", fill="white")
+            for x, y in pts:
+                r = 3
+                draw.ellipse((x - r, y - r, x + r, y + r), fill="red")
+           
+            frames.append(img)
+
+        frames[0].save("timelapse.gif", save_all=True, append_images=frames[1:], duration=100, loop=0)
+        print("Saved timelapse_multi_rois.gif")
+        button_save.label = "Save movie"
+        button_save.button_type = "success"
+        #status.text = "Movie saved as timelapse_multi_rois.gif"
+
+        #_______________________________________________________
+    def save_movie_short():
+        global detect_model
+        button_save.label = "Processing"
+        button_save.button_type = "danger"
+  
+        curdoc().add_next_tick_callback(save_movie)
+
+    button_save = Button(label="Save movie", button_type="success")
+    button_save.on_click(save_movie_short)
 
     #_______________________________________________________
     def open_file_dialog():
@@ -382,7 +447,7 @@ def make_document(doc):
     select_layout = row(mk_div(), select_button, mk_div(), dropdown_position)
     slider_layout = row(mk_div(), slider)
     text_layout = row(mk_div(), status)
-    reload_layout = row(mk_div(), btn_reload)
+    reload_layout = row(mk_div(), btn_reload, button_save)
     
     left_col  = column(select_layout, p_img, slider_layout, reload_layout, text_layout, row(mk_div(),contrast_slider))
     trajectory_row = row(p_trajectory_xy, p_trajectory_xz, p_trajectory_yz)
@@ -391,6 +456,8 @@ def make_document(doc):
 
     doc.title = 'Tracking visualisation'
     doc.add_root(layout)
+
+
 
 #_______________________________________________________
 def run_server():

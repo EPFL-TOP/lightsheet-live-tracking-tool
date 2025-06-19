@@ -5,7 +5,7 @@ from tracking_tools.microscope_interface.MicroscopeInterface import SimulatedMic
 from pathlib import Path
 
 dirpath = Path("/home/pili/Desktop/automatic-tail-tracking/Tail detection/data/long_tracking_tests/20250515_141408_Experiment/")
-
+dirpath = Path("/Users/helsens/Software/github/EPFL-TOP/lightsheet-live-tracking-tool/20250515_141408_Experiment/")
 ### Helper function to retrieve the initialization ROIs
 def search_JSON_files(dirpath, log_dir_name) :
     import glob
