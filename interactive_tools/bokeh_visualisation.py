@@ -351,8 +351,7 @@ def make_document(doc):
     #_______________________________________________________
     def save_movie():
         images=images_source.data['image']
-        #rois = [(20 + i, 30 + i, 80 + i, 90 + i) for i in range(num_frames)]  # (x0, y0, x1, y1)
-        rois=[]
+        rois_per_frame=[]
         for i in range(len(rects_source.data['x'])):
             x = rects_source.data['x'][i]
             y = rects_source.data['y'][i]
@@ -366,7 +365,7 @@ def make_document(doc):
                 height_val = height[j]
                 if width_val > 0 and height_val > 0:
                     local_rois.append((x_val - width_val / 2., y_val - height_val / 2., x_val + width_val / 2., y_val + height_val / 2.))
-            rois.append(local_rois)
+            rois_per_frame.append(local_rois)
         points=[]
         for i in range(len(points_source.data['x'])):
             x = points_source.data['x'][i]
@@ -374,10 +373,11 @@ def make_document(doc):
             pts = list(zip(x, y))
             points.append(pts)
         frames = []
-        for i, (img_array, roi, pts) in enumerate(zip(images, rois, points)):
+        for i, (img_array, rois, pts) in enumerate(zip(images, rois_per_frame, points)):
             img = Image.fromarray(img_array).convert("RGB")
             draw = ImageDraw.Draw(img)
-            draw.rectangle(roi, outline="blue", width=2)
+            for roi in rois:
+                draw.rectangle(roi, outline="blue", width=2)
             draw.text((5, 5), f"Frame {i}", fill="white")
             for x, y in pts:
                 r = 3
