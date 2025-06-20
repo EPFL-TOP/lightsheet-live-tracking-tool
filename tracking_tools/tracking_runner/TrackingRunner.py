@@ -44,11 +44,13 @@ class TrackingRunner() :
         self.roi_tracker_params = roi_tracker_params
         self.position_tracker_params = position_tracker_params
         self.reader = image_reader(dirpath=self.dirpath, log=self.log)
+
         for config_name in positions_config.keys() :
             with open(self.dirpath / config_name / runner_params["log_dir_name"] / "tracking_parameters.json", 'w') as json_file:
                 to_save = dict()
                 to_save['scaling_factor'] = self.scaling_factor
                 json.dump(to_save, json_file, indent=4)
+                
         # Set default logger
         self.logger = init_logger("TrackingRunner")
         self.to_save = {}

@@ -142,7 +142,7 @@ def threshold_image(image, type='otsu') :
         type (str, optional): Threshold type. Can be 'otsu' or 'mean'. Defaults to 'otsu'.
 
     Returns:
-        _type_: Thresholded binary image.
+        _type_: Binary image.
     """
     if type=='otsu' :
         threshold = threshold_otsu(image)

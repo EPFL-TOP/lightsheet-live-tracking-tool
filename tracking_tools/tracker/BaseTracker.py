@@ -28,7 +28,7 @@ class SingleRoIBaseTracker_v2 :
             score_threshold,
             model_path,
     ) :
-        """ROI Tracker class. Uses CoTracker and Faster-RCNN to track an ROI in a streaming video. Works in a sliding window manner, by only keeping window_length number of frames.
+        """ROI Tracker class. Uses CoTracker and Faster-RCNN to track an ROI in a streaming video.
         The compute_new_position() updates the tracker.
 
         Args:
