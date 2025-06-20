@@ -353,6 +353,8 @@ def make_document(doc):
     #_______________________________________________________
     def save_movie():
         images=images_source.data['image']
+        for i in range(len(images)):
+            images[i] = np.flip(images[i], axis=0)
         rois_per_frame=[]
         for i in range(len(rects_source.data['x'])):
             x = rects_source.data['x'][i]
@@ -362,7 +364,7 @@ def make_document(doc):
             local_rois=[]
             for j in range(len(x)):
                 x_val = x[j]
-                y_val = y[j]
+                y_val = images[0].shape[0]-y[j]
                 width_val = width[j]
                 height_val = height[j]
                 if width_val > 0 and height_val > 0:
@@ -371,7 +373,7 @@ def make_document(doc):
         points=[]
         for i in range(len(points_source.data['x'])):
             x = points_source.data['x'][i]
-            y = points_source.data['y'][i]
+            y = [images[0].shape[0]-points_source.data['y'][i][j] for j in range(len(points_source.data['y'][i]))]
             pts = list(zip(x, y))
             points.append(pts)
         frames = []
@@ -379,7 +381,7 @@ def make_document(doc):
             img = Image.fromarray(img_array).convert("RGB")
             draw = ImageDraw.Draw(img)
             for roi in rois:
-                draw.rectangle(roi, outline="blue", width=2)
+                draw.rectangle(roi, outline="red", width=2)
             draw.text((5, 5), f"Frame {i}", fill="white")
             for x, y in pts:
                 r = 3
@@ -387,10 +389,11 @@ def make_document(doc):
            
             frames.append(img)
 
-        frames[0].save("timelapse.gif", save_all=True, append_images=frames[1:], duration=100, loop=0)
-        print("Saved timelapse_multi_rois.gif")
+        name="{}-{}.gif".format(os.path.split(status.text.replace("Selected folder: ",""))[-1], dropdown_position.value.replace(" ", "_"))
+        print("Saved  movie as ",name)
         button_save.label = "Save movie"
         button_save.button_type = "success"
+        frames[0].save(name, save_all=True, append_images=frames[1:], duration=100, loop=0)
         #status.text = "Movie saved as timelapse_multi_rois.gif"
 
         #_______________________________________________________
