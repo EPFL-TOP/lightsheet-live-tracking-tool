@@ -164,7 +164,7 @@ def make_document(doc):
             max_proj = np.max(arr_down, axis=0)
             out_name = os.path.join(dir_path,"embryo_tracking","max_proj")
 
-            out_name = os.path.join(out_name,os.path.split(img)[1].replace('.tif', '_downscale_maxproj.tif'))
+            out_name = os.path.join(out_name,os.path.split(img)[1].replace('.tif', '_maxproj.tif'))
             print("-------",out_name)
             tifffile.imwrite(out_name, max_proj)
 
@@ -173,12 +173,15 @@ def make_document(doc):
     def load_images(dir_path, reload=False):
         out_name = os.path.join(dir_path,"embryo_tracking","max_proj")
         if not os.path.isdir(out_name):
-            os.mkdir(out_name)
-            img_list=glob.glob(os.path.join(dir_path,"*.tif"))
-            create_images(dir_path, img_list)
+            raise IsADirectoryError(f"{out_name} is not a directory")
+        #     os.mkdir(out_name)
+        #     img_list=glob.glob(os.path.join(dir_path,"*.tif"))
+        #     create_images(dir_path, img_list)
 
         img_list=glob.glob(os.path.join(out_name,"*.tif"))
         img_list = sorted(img_list)
+        if len(img_list) == 0 :
+            raise ValueError("img_list is empty")
         print('nb images max proj: ',len(img_list))
         images_ds=[]
         x_ds=[]
