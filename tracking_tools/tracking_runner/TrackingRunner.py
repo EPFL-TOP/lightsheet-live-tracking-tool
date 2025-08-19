@@ -33,6 +33,8 @@ class TrackingRunner() :
         self.tracker_class = position_tracker
         self.timeout_ms = runner_params["timeout_ms"]
         self.positions_config = positions_config
+        if self.positions_config == {} :
+            raise ValueError(f"position_config must not be empty : {self.positions_config}")
         self.log_dir_name = runner_params["log_dir_name"]
         self.log = runner_params["log"]
         self.scaling_factor = roi_tracker_params["scaling_factor"]
@@ -66,7 +68,7 @@ class TrackingRunner() :
             if self.log and not timeout:
                 self.logger.info(f"Waiting for the next timepoint and position")
             position_name, time_point, timeout = self.microscope.wait_for_pause(timeout_ms=self.timeout_ms)
-            if timeout :
+            if timeout : 
                 continue
             if position_name not in self.position_names :
                 self.microscope.continue_from_pause()

@@ -20,7 +20,9 @@ class ImageReader() :
             if self.log : 
                 self.logger.info(f"Read image {image_path}")
                 self.logger.info(f"Image shape : {image.shape}")
+            # Convert 2D images to 3D by adding an axis
             if image.ndim == 2 :
+                self.logger.info("Converting 2D image to 3D")
                 return image[np.newaxis, ...]
             return image
         except Exception as e:

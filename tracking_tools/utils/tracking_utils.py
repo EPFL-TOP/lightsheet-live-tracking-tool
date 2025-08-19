@@ -70,6 +70,9 @@ def crop_image(image, center_point, hws, allow_oob=True) :
     crop_start = np.maximum(start, 0)
     crop_end = np.minimum(end, shape)
 
+    # Ensure each dimension is at least 1, mainly to support cases where the hws is 0 in one dimension
+    crop_end = np.maximum(crop_end, crop_start + 1)
+
     # Crop image
     if len(shape) == 3 :
         cropped = image[
