@@ -453,7 +453,7 @@ def make_document(doc):
 
     callback = CustomJS(args=dict(div=div, file_input=file_input), code="""
         div.text = "<h1>FileInput Values:</h1><p>filename: " + file_input.filename
-                + "<p>b64 value: " + file_input.value
+                + "<p>b64 value: " 
     """)
 
     file_input.js_on_change('filename', callback)
