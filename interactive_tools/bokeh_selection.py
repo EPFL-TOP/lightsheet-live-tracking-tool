@@ -303,7 +303,9 @@ def make_document(doc):
     #________________________________________________________________________________________________
     def update_mask(attr, old, new) :
         working = working_source.data["image"][0]
-        mask = tutils.filter_and_threshold(working)
+        base_kernel = 41
+        scaling_factor = 2 ** int(dropdown_downscale.value)
+        mask = tutils.filter_and_threshold(working, gaussian_kernel=base_kernel//scaling_factor)
         mask_rgba = binary2rgba(mask)
         alpha_slider_value = float(mask_alpha_slider.value)
         mask_rgba_source.data = dict(
