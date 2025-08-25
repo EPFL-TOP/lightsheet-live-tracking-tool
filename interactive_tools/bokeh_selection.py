@@ -22,21 +22,26 @@ try:
 except ModuleNotFoundError: 
     print("Module 'tail_detection_visu' not found. Ensure the training_tools package is installed or available in the PYTHONPATH.")
 
-updating = False
-initial_shape = ()
-detect_model = None
+try:
+    from  tracking_tools.utils import tracking_utils as tutils
+except ModuleNotFoundError: 
+    print("Module 'tail_detection_visu' not found. Ensure the training_tools package is installed or available in the PYTHONPATH.")
+
 
 #_______________________________________________________
 def make_document(doc):
+    #### SHARED VARIABLES ######
+    updating = False
+    detect_model = None
 
-    arr_global = None
-
-    checkbox_maxproj = CheckboxGroup(labels=["Max projection"], active=[1])
-    checkbox_detection = CheckboxGroup(labels=["Use detection"], active=[1])
-
+    ####### GENERAL WIDGETS ##########
+    # Checkboxes
+    checkbox_maxproj = CheckboxGroup(labels=["Max projection"], active=[])
+    checkbox_detection = CheckboxGroup(labels=["Use detection"], active=[])
+    
+    # Dropdowns
     downscale=['0','1','2','3','4','5']
     dropdown_downscale  = Select(value=downscale[0], title='Downscaling', options=downscale)
-
     try:
         base_path = os.path.dirname(__file__)
     except NameError:
@@ -49,26 +54,75 @@ def make_document(doc):
         model_detect=[os.path.split(model)[-1].replace('.pth','') for model in models]
     dropdown_model  = Select(value=downscale[0], title='Detect Model', options=model_detect)
 
-    # Initial dummy image
-    initial_img = np.random.randint(0, 255, (1000, 1000), dtype=np.uint8)[::-1]
+    # Sliders
+    contrast_slider = RangeSlider(start=0, end=255, value=(0, 255), step=1, title="Contrast", width=150)
+    slice_slider = Slider(start=0, end=0, value=0, step=1, title="z-slice", width=250)
+    mask_alpha_slider = Slider(start=0, end=1, value=0, step=0.01, title="Mask opacity", width=200)
+    points_alpha_slider = Slider(start=0, end=1, value=0, step=0.01, title="Points opacity", width=200)
 
-    # Image data source (for dynamic updates)
-    image_source = ColumnDataSource(data=dict(
-        image=[initial_img], x=[0], y=[0], dw=[initial_img.shape[1]], dh=[initial_img.shape[0]]
-    ))
+    # Buttons
+    btn_save = Button(label="Save Tracking RoIs", button_type="success")
+    btn_down = Button(label="Move Down")
+    btn_up = Button(label="Move Up")
+    btn_delete = Button(label="Delete Selected", button_type="danger")
+    select_image_button = Button(label="Browse Image...", button_type="primary")
+    select_model_button = Button(label="Browse Model Folder...", button_type="primary")
+    detect_button = Button(label="Run detect model", button_type="primary")
 
-    images_source = ColumnDataSource(data=dict(
-        image=[initial_img], x=[0], y=[0], dw=[initial_img.shape[1]], dh=[initial_img.shape[0]]
-    ))
+    # Fileinputs
+    file_input = FileInput()
 
-    image_max_source = ColumnDataSource(data=dict(
-        image=[initial_img], x=[0], y=[0], dw=[initial_img.shape[1]], dh=[initial_img.shape[0]]
-    ))
-
+    # Texts
     status = Div(text="")
     model_status = Div(text=f"Selected model path: {default_model_path}")
+    
 
-    # Figure setup
+
+    ############ DATA SOURCES #############
+    # Initial dummy image
+    initial_img = np.random.randint(0, 255, (10, 1000, 1000), dtype=np.uint8)[::-1]
+
+    # Loaded (original) image datasource
+    original_source = ColumnDataSource(data=dict(
+        image=[initial_img], x=[0], y=[0], dw=[initial_img.shape[2]], dh=[initial_img.shape[1]]
+    ))
+
+    # Displayed image data source 
+    displayed_source = ColumnDataSource(data=dict(
+        image=[initial_img[0]], x=[0], y=[0], dw=[initial_img.shape[1]], dh=[initial_img.shape[0]]
+    ))
+
+    # Working image data source (image used for processings)
+    working_source = ColumnDataSource(data=dict(
+        image=[initial_img[0]], x=[0], y=[0], dw=[initial_img.shape[1]], dh=[initial_img.shape[0]]
+    ))
+
+    # Maximum projection data source
+    maxproj_source = ColumnDataSource(data=dict(
+        image=[initial_img[0]], x=[0], y=[0], dw=[initial_img.shape[1]], dh=[initial_img.shape[0]]
+    ))
+
+    # Mask data source
+    mask_rgba_source = ColumnDataSource(data=dict(
+        image=[], x=[], y=[], dw=[], dh=[], alpha=[]
+    ))
+
+    # Points data source
+    points_source = ColumnDataSource(data=dict(
+        x=[], y=[], alpha=[], color=[], radius=[]
+    ))
+
+    # Selection and detection rectangles setup
+    select_rectangle_source = ColumnDataSource(data=dict(
+        x=[], y=[], width=[], height=[], index=[], label_x=[], label_y=[]
+    ))
+
+    detect_rectangle_source = ColumnDataSource(data=dict(
+        x=[], y=[], width=[], height=[], score=[], label_x=[], label_y=[]
+    ))
+
+
+    ########## FIGURE SETUP ############
     p = figure(
         title="RoIs tracking selector",
         x_range=(0, initial_img.shape[1]), y_range=(0, initial_img.shape[0]),
@@ -77,101 +131,354 @@ def make_document(doc):
         width=800, height=800
 
     )
+
     # Display image from source
     color_mapper = LinearColorMapper(palette="Greys256", low=0, high=255)
-    p.image('image', x='x', y='y', dw='dw', dh='dh', source=image_source,  color_mapper=color_mapper)
+    p.image('image', x='x', y='y', dw='dw', dh='dh', source=displayed_source,  color_mapper=color_mapper)
 
-    source = ColumnDataSource(data=dict(
-        x=[], y=[], width=[], height=[], index=[], label_x=[], label_y=[]
-    ))
+    labels = LabelSet(
+        x='label_x', y='label_y', text='index', source=select_rectangle_source,
+        text_baseline='middle', text_align='left', text_color='white'
+    )
 
-    source_detect = ColumnDataSource(data=dict(
-        x=[], y=[], width=[], height=[], score=[], label_x=[], label_y=[]
-    ))
+    labels_detect = LabelSet(
+        x='label_x', y='label_y', text='score', source=detect_rectangle_source,
+        text_baseline='middle', text_align='left', text_color='white'
+    )
 
-    rect_glyph = p.rect(
-        'x', 'y', 'width', 'height', source=source,
+    # RGBA mask for threshold overlay
+    mask_glyph = p.image_rgba(
+        "image", "x", "y", "dw", "dh", alpha="alpha", source=mask_rgba_source
+    )
+
+
+    rect_glyph_select = p.rect(
+        'x', 'y', 'width', 'height', source=select_rectangle_source,
         fill_alpha=0.2, fill_color='blue', line_color='red', line_width=2
     )
 
     rect_glyph_detect = p.rect(
-        'x', 'y', 'width', 'height', source=source_detect,
+        'x', 'y', 'width', 'height', source=detect_rectangle_source,
         line_color='white', line_width=2, fill_alpha=0
     )
 
-
-    box_edit = BoxEditTool(renderers=[rect_glyph], num_objects=100)
-    p.add_tools(box_edit)
-    p.toolbar.active_drag = box_edit
-
-    tap = TapTool(renderers=[rect_glyph])
-    p.add_tools(tap)
-    p.toolbar.active_tap = tap
-
-    labels = LabelSet(
-        x='label_x', y='label_y', text='index', source=source,
-        text_baseline='middle', text_align='left', text_color='white'
+    # Points overlay
+    points_glyph = p.circle(
+        "x", "y", "radius",
+        fill_alpha = "alpha", 
+        line_alpha = "alpha",
+        selection_alpha= "alpha",
+        nonselection_alpha = "alpha", 
+        color = "color", 
+        source=points_source,
     )
-    labels_detect = LabelSet(
-        x='label_x', y='label_y', text='score', source=source_detect,
-        text_baseline='middle', text_align='left', text_color='white'
-    )
+
     p.add_layout(labels)
     p.add_layout(labels_detect)
 
-    slider = Slider(start=0, end=0, value=0, step=1, title="z-slice", width=250)
-  
+    # Edit tools
+    box_edit = BoxEditTool(renderers=[rect_glyph_select], num_objects=100)
+    p.add_tools(box_edit)
+    p.toolbar.active_drag = box_edit
 
-    #___________________________________________________________________________________________
-    def mk_div(**kwargs):
-        return Div(text='<div style="background-color: white; width: 20px; height: 1px;"></div>', **kwargs)
+    tap = TapTool(renderers=[rect_glyph_select])
+    p.add_tools(tap)
+    p.toolbar.active_tap = tap
 
+    ############## CORE FUNCTIONS ##############
+    #_______________________________________________________________________________________________
+    def downscale_image(image, scaling_factor) :
+        output = image[::scaling_factor, ::scaling_factor]
+        # print(f"Downscaling image : {image.shape} -> {output.shape}")
+        return output
+    
+    #_______________________________________________________________________________________________
+    def normalize_image(image) :
+        # MinMax normalization and conversion to uint8
+        max_value = np.max(image)
+        min_value = np.min(image)
+        range = max_value - min_value
+        normalized = (image - min_value) / range
+        normalized = (normalized * 255).astype(np.uint8)
+        return normalized
+    
+    #_______________________________________________________________________________________________
+    def binary2rgba(binary, color=(0, 255, 255), alpha=255):
+        h, w = binary.shape
+        r, g, b = color
+        rgba = np.zeros((h, w), dtype=np.uint32)
+
+        # Fill RGBA Mask :  alpha     red     green    blue
+        #                  xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx 
+        rgba[binary.astype(bool)] = (alpha << 24) | (r << 16) | (g << 8) | b
+        return np.flip(rgba, axis=0)
+    
+    
+    #_______________________________________________________________________________________________
+    def update_working(attr, old, new) :
+        original = original_source.data["image"][0]
+        # Maximum porojection
+        if 0 in checkbox_maxproj.active :
+            working = np.max(original, axis=0)
+        else :
+            slice_nb = slice_slider.value
+            working = original[slice_nb]
+        # Downscale image
+        scaling_factor = 2 ** int(dropdown_downscale.value)
+        if scaling_factor > 1 :
+            working = downscale_image(working, scaling_factor)
+
+        # Update data source
+        working_source.data = dict(
+            image=[working], x=[0], y=[0], dw=[working.shape[1]], dh=[working.shape[0]]
+        )
+
+
+
+    #_______________________________________________________________________________________________
+    def update_display(attr, old, new) :
+        print("in update_display")
+        working = working_source.data["image"][0]
+        # Normalize image
+        displayed = normalize_image(working)
+        # Flip image
+        displayed = np.flip(displayed, axis=0)
+        # Fill data source
+        displayed_source.data = dict(
+            image=[displayed], x=[0], y=[0], dw=[displayed.shape[1]], dh=[displayed.shape[0]]
+        )
+        # Update figure range
+        x_range = Range1d(start=0, end=displayed.shape[0])
+        y_range = Range1d(start=0, end=displayed.shape[1])
+        p.x_range=x_range
+        p.y_range=y_range
+
+    
+    #_______________________________________________________________________________________________
+    def update_mask_and_points(attr, old, new) :
+        print("in NEW mask and point update")
+        working = working_source.data["image"][0]
+        d = select_rectangle_source.data
+
+        # Only runs if rectangles are selected
+        if d["x"] == [] :
+            # Clear data sources
+            points_source.data = dict(
+                x=[], y=[], color=[], fill_alpha=[], line_alpha=[], radius=[],
+            )
+            mask_rgba_source.data = dict(
+                image=[], x=[], y=[], dw=[], dh=[]
+            )
+            return
+
+        xs, ys = [], []
+        mask = None
+        for x, y, width, height, index in zip(d["x"], d["y"], d["width"], d["height"], d["index"]) :
+            center_point = (working.shape[0] - y, x) # Flip rectangles y coordinates (because bokeh coordinate system flips y)
+            hws = (height/2, width/2)
+            points, mask = tutils.generate_uniform_grid_in_region(working, center_point, hws, return_mask=True, grid_size=40) ### TODO : Dynamic kernel size
+            points[:,1] = working.shape[0] - points[:,1] # Re-flip y coordinates for display
+            xs.extend(points[:,0].tolist())
+            ys.extend(points[:,1].tolist())
+        
+        n_new = len(xs)
+
+        # Update point source
+        points_source.data = dict(
+            x=xs,
+            y=ys,
+            color=["red"] * n_new,
+            fill_alpha=[1] * n_new,
+            line_alpha=[1] * n_new,
+            radius=[1] * n_new,
+        )
+
+        # Update mask source
+        mask_rgba = binary2rgba(mask)
+        mask_rgba_source.data = dict(
+            image=[mask_rgba], x=[0], y=[0], dw=[mask_rgba.shape[1]], dh=[mask_rgba.shape[0]]
+        )
+
+
+    #________________________________________________________________________________________________
+    def update_mask(attr, old, new) :
+        working = working_source.data["image"][0]
+        mask = tutils.filter_and_threshold(working)
+        mask_rgba = binary2rgba(mask)
+        alpha_slider_value = float(mask_alpha_slider.value)
+        mask_rgba_source.data = dict(
+            image=[mask_rgba], x=[0], y=[0], dw=[mask_rgba.shape[1]], dh=[mask_rgba.shape[0]], alpha=[alpha_slider_value]
+        )
+
+    #_______________________________________________________________________________________________
+    def update_mask_alpha(attr, old, new) :
+        alpha_slider_value = float(mask_alpha_slider.value)
+        mask_rgba_source.data["alpha"] = [alpha_slider_value]
+
+    #________________________________________________________________________________________________
+    def update_points(attr, old, new) :
+        working = working_source.data["image"][0]
+        d = select_rectangle_source.data
+
+        # Only runs if rectangles are selected
+        if d["x"] == [] :
+            # Clear data sources
+            points_source.data = dict(
+                x=[], y=[], color=[], fill_alpha=[], line_alpha=[], radius=[],
+            )
+            return
+
+        xs, ys = [], []
+        for x, y, width, height, index in zip(d["x"], d["y"], d["width"], d["height"], d["index"]) :
+            center_point = (working.shape[0] - y, x) # Flip rectangles y coordinates (because bokeh coordinate system flips y)
+            hws = (height/2, width/2)
+            points = tutils.generate_uniform_grid_in_region(working, center_point, hws, return_mask=False, grid_size=40) ### TODO : Dynamic kernel size
+            points[:,1] = working.shape[0] - points[:,1] # Re-flip y coordinates for display
+            xs.extend(points[:,0].tolist())
+            ys.extend(points[:,1].tolist())
+        
+        n_new = len(xs)
+
+        slider_alpha_value = float(points_alpha_slider.value)
+        initial_radius = 8
+        scaling_factor = 2 ** int(dropdown_downscale.value)
+        radius = initial_radius / scaling_factor
+
+        # Update point source
+        points_source.data = dict(
+            x=xs,
+            y=ys,
+            color=["red"] * n_new,
+            alpha=[slider_alpha_value] * n_new,
+            radius=[radius] * n_new,
+        )
+
+    #_______________________________________________________________________________________________
+    def update_points_alpha(attr, old, new) :
+        slider_alpha_value = float(points_alpha_slider.value)
+        n_points = len(points_source.data["x"])
+        if n_points == 0 :
+            points_source.data["alpha"] = []
+        else :
+            points_source.data["alpha"] = [slider_alpha_value] * n_points
+
+
+    #_______________________________________________________________________________________________
+    def update_original(arr) :
+        # Gets 3D array
+        original_source.data = dict(
+            image=[arr], x=[0], y=[0], dw=[arr.shape[2]], dh=[arr.shape[1]]
+        )
+        slice_slider.value = 0
+        # Set the maximum slider value to the number of slices
+        slice_slider.end = arr.shape[0] - 1
+
+        # Remove the rectangles
+        detect_rectangle_source.data = dict(
+            x=[], y=[], width=[], height=[], score=[], label_x=[], label_y=[]
+        )
+        select_rectangle_source.data = dict(
+            x=[], y=[], width=[], height=[], score=[], label_x=[], label_y=[]
+        )
+
+
+    #_______________________________________________________________________________________________
+    def open_file_dialog():
+        try:
+            root = tk.Tk()
+            root.attributes('-topmost', True)
+            root.withdraw()
+            root.update()  # sometimes needed to actually apply the topmost flag
+            file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.tif;*.tiff")])
+            root.destroy()
+            return file_path
+
+        except Exception as e:
+            status.text = f"Error: {e}"
+
+    #________________________________________________________________________________________________
+    def load_image():
+        file_path = open_file_dialog()
+        if not file_path :
+            status.text = "No file selected"
+            return
+        status.text = f"Selected image: {file_path}"
+
+        try:
+            im = np.array(tifffile.imread(file_path))
+            # Handle 2D images as 3D images with depth = 1
+            if im.ndim == 2 :
+                im = im[np.newaxis, ...]
+            update_original(im)
+
+        except Exception as e:
+            status.text = f"Error loading image: {e}"
+
+
+
+
+    #_____________________________________________________________________________________________
+    def downscale_rectangles(scaling_multiplier) :
+        data = select_rectangle_source.data
+        new_data = dict(
+            x=[], y=[], width=[],  height=[], index=data["index"], label_x=[], label_y=[]
+        )
+        for x, y, width, height, label_x, label_y in zip(data["x"], data["y"], data["width"], data["height"], data["label_x"], data["label_y"]) :
+            new_data["x"].append(x * scaling_multiplier)
+            new_data["y"].append(y * scaling_multiplier)
+            new_data["width"].append(width * scaling_multiplier)
+            new_data["height"].append(height * scaling_multiplier)
+            new_data["label_x"].append(label_x * scaling_multiplier)
+            new_data["label_y"].append(label_y * scaling_multiplier)
+        
+        # print(select_rectangle_source.data)
+        select_rectangle_source.data = new_data
+        # print("------------")
+        # print(select_rectangle_source.data)
+
+
+    #______________________________________________________________________________________________
+    def update_rectangles(attr, old, new) :
+        diff = int(old) - int(new)
+        scaling_multiplier = 2 ** diff
+        downscale_rectangles(scaling_multiplier)
+        detect_rectangle_source.data = dict(
+            x=[], y=[], width=[], height=[], score=[], label_x=[], label_y=[]
+        )
+
+
+        
     #___________________________________________________________________________________________
-    def select_y_range(attr, old, new):
-        if len(checkbox_maxproj.active)==2:
-                image_source.data = {'image':image_max_source.data['image'], 
-                            'x':image_max_source.data['x'],
-                            'y':image_max_source.data['y'],
-                            'dw':image_max_source.data['dw'],
-                            'dh':image_max_source.data['dh']}
-                slider.start=0
-                slider.end=0
-                slider.value=0
-                
-        else:
-            slider.start=0
-            slider.end=len(images_source.data['images'])-1
-            slider.value=0
-            time_point = slider.value
-            image_source.data = {'image':[images_source.data['images'][time_point]], 
-                                'x':[images_source.data['x'][time_point]],
-                                'y':[images_source.data['y'][time_point]],
-                                'dw':[images_source.data['dw'][time_point]],
-                                'dh':[images_source.data['dh'][time_point]]}
-    checkbox_maxproj.on_change('active', select_y_range)
+    def update_contrast(attr, old, new):
+        low, high = new 
+        color_mapper.low = low
+        color_mapper.high = high
 
     #_______________________________________________________
-    def downscale_image(image, n=4, order=0, verbose=False) :
-        from scipy.ndimage import zoom
-        initial_shape = image.shape
-        for _ in range(n) :
-            if image.ndim==3:
-                image = zoom(image, (1, 1/2, 1/2), order=order)
-            else:
-                image = zoom(image, (1/2, 1/2), order=order)
+    def select_roi_callback(event):
+        if isinstance(event, SelectionGeometry):
+            if event.geometry["type"]!='rect':return
 
-        final_shape = image.shape
-        if verbose :
-            print(f'Lowered resolution from {initial_shape} to {final_shape}')
-        return image
+            data_rect = dict(
+                x= select_rectangle_source.data['x']+[event.geometry['x0'] + (event.geometry['x1']-event.geometry['x0'])/2. ],
+                y= select_rectangle_source.data['y']+[event.geometry['y0'] + (event.geometry['y1']-event.geometry['y0'])/2.],
+                width= select_rectangle_source.data['width']+[event.geometry['x1']-event.geometry['x0']],
+                height= select_rectangle_source.data['height']+[event.geometry['y1']-event.geometry['y0']],
+                index=select_rectangle_source.data['index']+["none"],
+                label_x=select_rectangle_source.data['label_x']+[event.geometry['x0']],
+                label_y=select_rectangle_source.data['label_y']+[event.geometry['y0']]
+                )
+
+            select_rectangle_source.data = data_rect
+
 
     #_______________________________________________________
     def update_labels(attr, old, new):
-        global updating
+        nonlocal updating
         if updating:
             return
         updating = True
-        d = source.data
+        d = select_rectangle_source.data
         xs, ys, ws, hs = d.get('x', []), d.get('y', []), d.get('width', []), d.get('height', [])
         idxs, lx, ly = [], [], []
         for i, (x, y, w, h) in enumerate(zip(xs, ys, ws, hs)):
@@ -179,73 +486,64 @@ def make_document(doc):
             lx.append(x - w/2)
             ly.append(y + h/2)
         # assign full dict back to source to trigger UI update
-        source.data = dict(
+        select_rectangle_source.data = dict(
             x=xs, y=ys, width=ws, height=hs,
             index=idxs, label_x=lx, label_y=ly
         )
         updating = False
 
-    dsource = source  # alias to avoid confusion
-    dsource.on_change('data', update_labels)
-
-    #_______________________________________________________
+    #__________________________________________________________________________________________
     def delete_selected():
-        inds = source.selected.indices
+        inds = select_rectangle_source.selected.indices
         print('inds   ',inds)
         if not inds:
             return
-        data = dict(source.data)
+        data = dict(select_rectangle_source.data)
         for i in sorted(inds, reverse=True):
             for key in data:
                 data[key].pop(i)
-        source.data = data
-        source.selected.indices = []
+        select_rectangle_source.data = data
+        select_rectangle_source.selected.indices = []
 
-    btn_delete = Button(label="Delete Selected", button_type="danger")
-    btn_delete.on_click(delete_selected)
 
-    #_______________________________________________________
+    #______________________________________________________
     def move_up():
-        inds = source.selected.indices
+        inds = select_rectangle_source.selected.indices
         if len(inds) != 1:
             return
         i = inds[0]
         if i == 0:
             return
-        data = dict(source.data)
+        data = dict(select_rectangle_source.data)
         for key in ['x', 'y', 'width', 'height']:
             data[key][i], data[key][i-1] = data[key][i-1], data[key][i]
-        source.data = data
-        source.selected.indices = [i-1]
+        select_rectangle_source.data = data
+        select_rectangle_source.selected.indices = [i-1]
 
-    btn_up = Button(label="Move Up")
-    btn_up.on_click(move_up)
 
     #_______________________________________________________
     def move_down():
-        inds = source.selected.indices
+        inds = select_rectangle_source.selected.indices
         if len(inds) != 1:
             return
         i = inds[0]
-        if i == len(source.data['x']) - 1:
+        if i == len(select_rectangle_source.data['x']) - 1:
             return
-        data = dict(source.data)
+        data = dict(select_rectangle_source.data)
         for key in ['x', 'y', 'width', 'height']:
             data[key][i], data[key][i+1] = data[key][i+1], data[key][i]
-        source.data = data
-        source.selected.indices = [i+1]
+        select_rectangle_source.data = data
+        select_rectangle_source.selected.indices = [i+1]
 
-    btn_down = Button(label="Move Down")
-    btn_down.on_click(move_down)
 
 
     #_______________________________________________________
     def save_rectangles():
-        global initial_shape
-        global arr_global
-        print('intititititititit  ', initial_shape)
+
+        initial_shape = original_source.data["image"][0].shape[1:]
+        print('Initial shape : ', initial_shape)
         scaling = 2 ** int(dropdown_downscale.value)
-        data = source.data
+        data = select_rectangle_source.data
         out = []
 
         print(status.text.split("Selected image: "))
@@ -261,8 +559,8 @@ def make_document(doc):
             out.append({'x': x*scaling, 'y': initial_shape[0] - y*scaling, 'width': w*scaling, 'height': h*scaling, 'order': i+1})
 
         use_detection = False
-        if len(checkbox_detection.active)==2: use_detection = True
-        outdict = {'channel':channel, 'shape':arr_global.shape, 'RoIs':out, 'detection':use_detection}
+        if 0 in checkbox_detection.active: use_detection = True
+        outdict = {'channel':channel, 'shape':original_source.data["image"][0].shape, 'RoIs':out, 'detection':use_detection}
         out_dirname = os.path.join(dirname, "embryo_tracking")
         if not os.path.isdir(out_dirname):
             os.mkdir(out_dirname)
@@ -270,195 +568,9 @@ def make_document(doc):
             json.dump(outdict, f, indent=2)
         print("Saved: ",os.path.join(out_dirname,"tracking_RoIs.json"))
 
-    btn_save = Button(label="Save Tracking RoIs", button_type="success")
-    btn_save.on_click(save_rectangles)
-
-    #_______________________________________________________
-    def select_roi_callback(event):
-        if isinstance(event, SelectionGeometry):
-            if event.geometry["type"]!='rect':return
-
-            data_rect = dict(
-                x= source.data['x']+[event.geometry['x0'] + (event.geometry['x1']-event.geometry['x0'])/2. ],
-                y= source.data['y']+[event.geometry['y0'] + (event.geometry['y1']-event.geometry['y0'])/2.],
-                width= source.data['width']+[event.geometry['x1']-event.geometry['x0']],
-                height= source.data['height']+[event.geometry['y1']-event.geometry['y0']],
-                index=source.data['index']+["none"],
-                label_x=source.data['label_x']+[event.geometry['x0']],
-                label_y=source.data['label_y']+[event.geometry['y0']]
-                )
-
-            source.data = data_rect
-    p.on_event(SelectionGeometry, select_roi_callback)
-
-    #_______________________________________________________
-    def load_image(file_path):
-        global arr_global
-        try:
-            im =  tifffile.imread(file_path)
-            arr_global = np.array(im)
-            source.data = {}
-            source_detect.data={}
 
 
-            slider.value = 0
-            fill_source_image()
-        except Exception as e:
-            status.text = f"Error loading image: {e}"
-
-
-
-    #_______________________________________________________
-    def fill_source_image():
-            global arr_global
-            global initial_shape
-            
-            if arr_global.ndim == 3 :
-                initial_shape = arr_global.shape[1:]
-            else :
-                initial_shape = arr_global.shape
-            arr=downscale_image(arr_global, int(dropdown_downscale.value))
-            images_dict={'images':[], 'x':[], 'y':[], 'dw':[], 'dh':[]}
-            img=None
-            if arr.ndim==3:
-                print(arr.shape)
-                img=arr[slider.value]
-                slider.end = arr.shape[0]-1
-                max_proj = np.max(arr, axis=0)
-
-                for image in arr:
-                    max_value = np.max(image)
-                    min_value = np.min(image)
-                    intensity_normalized = (image - min_value)/(max_value-min_value)*255
-                    intensity_normalized = intensity_normalized.astype(np.uint8)
-                    intensity_normalized = np.flip(intensity_normalized,0)
-                    images_dict['images'].append(intensity_normalized)
-                    images_dict['x'].append(0)
-                    images_dict['y'].append(0)
-                    images_dict['dw'].append(intensity_normalized.shape[1])
-                    images_dict['dh'].append(intensity_normalized.shape[0])
-                images_source.data = images_dict
-
-            if arr.ndim==2:
-                print(arr.shape)
-                img=arr
-                slider.end = 0
-                max_proj = img
-                max_value = np.max(max_proj)
-                min_value = np.min(max_proj)
-                max_proj_norm = (max_proj - min_value)/(max_value-min_value)*255
-                max_proj_norm = max_proj_norm.astype(np.uint8)
-                max_proj_norm = np.flip(max_proj_norm,0)
-                images_source.data = dict(images=[max_proj_norm], x=[0], y=[0], dw=[max_proj_norm.shape[1]], dh=[max_proj_norm.shape[0]])
-
-
-            max_value = np.max(img)
-            min_value = np.min(img)
-            intensity_normalized = (img - min_value)/(max_value-min_value)*255
-            intensity_normalized = intensity_normalized.astype(np.uint8)
-            intensity_normalized = np.flip(intensity_normalized,0)
-
-            max_value = np.max(max_proj)
-            min_value = np.min(max_proj)
-            max_proj_norm = (max_proj - min_value)/(max_value-min_value)*255
-            max_proj_norm = max_proj_norm.astype(np.uint8)
-            max_proj_norm = np.flip(max_proj_norm,0)
-
-            image_source.data = dict(image=[intensity_normalized], x=[0], y=[0], dw=[intensity_normalized.shape[1]], dh=[intensity_normalized.shape[0]])
-            x_range = Range1d(start=0, end=intensity_normalized.shape[0])
-            y_range = Range1d(start=0, end=intensity_normalized.shape[1])
-            p.x_range=x_range
-            p.y_range=y_range
-
-            image_max_source.data = {'image':[max_proj_norm], 'x':[0], 'y':[0], 'dw':[max_proj_norm.shape[1]],'dh':[max_proj_norm.shape[0]]}
-            images_dict = {'images':[], 'x':[],'y':[],'dw':[],'dh':[]}
-
-            source.data = dict(x=[], y=[], width=[], height=[], index=[], label_x=[], label_y=[])
-            source_detect.data=dict(x=[], y=[], width=[], height=[], score=[], label_x=[], label_y=[])
-
-            if len(checkbox_maxproj.active)==2:
-                image_source.data = dict(image_max_source.data)
-                slider.end=0
-
-    #___________________________________________________________________________________________
-    def update_images(attr, old, new):
-        fill_source_image()
-    dropdown_downscale.on_change('value', update_images)
-
-
-    #___________________________________________________________________________________________
-    def callback_slider(attr, old, new):
-        if len(checkbox_maxproj.active)==2:return
-        time_point = slider.value
-        image_source.data = {'image':[images_source.data['images'][time_point]], 
-                            'x':[images_source.data['x'][time_point]],
-                            'y':[images_source.data['y'][time_point]],
-                            'dw':[images_source.data['dw'][time_point]],
-                            'dh':[images_source.data['dh'][time_point]]}
-    slider.on_change('value', callback_slider)
-
-    #_______________________________________________________
-    def open_file_dialog():
-        try:
-            root = tk.Tk()
-            root.attributes('-topmost', True)
-            root.withdraw()
-            root.update()  # sometimes needed to actually apply the topmost flag
-            file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.tif;*.tiff")])
-            root.destroy()
-
-            if file_path:
-                status.text = f"Selected image: {file_path}"
-                load_image(file_path)
-            else:
-                status.text = "No file selected."
-        except Exception as e:
-            status.text = f"Error: {e}"
-
-    select_button = Button(label="Browse Image...", button_type="primary")
-    select_button.on_click(open_file_dialog)
-
-
-
-    #_______________________________________________________
-    def load_image_from_b64(file_contents):
-        # File contents is a base64-encoded string
-        print('file_contents ',file_contents)
-        try:
-            file_bytes = base64.b64decode(file_contents)
-            print('file_bytes ',io.BytesIO(file_bytes))
-            image = Image.open(io.BytesIO(file_bytes))
-            status.text = f"Loaded image: {image.size}"
-            # do something with the image
-        except Exception as e:
-            status.text = f"Failed to load image: {e}"
-
-    #file_input = FileInput(accept=".png,.jpg,.jpeg,.tif,.tiff")
-    file_input = FileInput()
-    div = Div(text="<h1>FileInput Values:</h1><p>filename:<p>base64 value:")
-
-    #print("file_input.filename ",file_input.filename)
-    #print("file_input.value ",file_input.value)
-    file_input.title = "No file selected fff "  # Initialize with a default filename  
-
-    #_______________________________________________________
-    def file_selected(attr, old, new):
-        print('file_input.value ',file_input.value)
-        status.text = f"Selected file: {file_input.filename}"
-        load_image_from_b64(file_input.value)
-
-    #file_input.on_change("filename", file_selected)
-
-
-
-    callback = CustomJS(args=dict(div=div, file_input=file_input), code="""
-        div.text = "<h1>FileInput Values:</h1><p>filename: " + file_input.filename
-                + "<p>b64 value: " + file_input.value
-    """)
-
-    file_input.js_on_change('filename', callback)
-
-    #_______________________________________________________
+    #_________________________________________________________________________________________________
     def open_file_dialog_model():
         try:
             root = tk.Tk()
@@ -484,21 +596,33 @@ def make_document(doc):
         except Exception as e:
             status.text = f"Error: {e}"
 
-    select_button_model = Button(label="Browse Model Folder...", button_type="primary")
-    select_button_model.on_click(open_file_dialog_model)
 
 
     #_______________________________________________________
+    def choose_model_detect(attr, old, new):
+        print('loading model: ', dropdown_model.value)
+        nonlocal detect_model
+        detect_model = tdv.DetectModel()
+        model_path = model_status.text.replace("Selected model path: ","")
+        # print(model_path)
+        print(os.path.join(model_path,dropdown_model.value+'.pth'))
+        detect_model.load_model_detect(os.path.join(model_path,dropdown_model.value+'.pth'), 2, 'cpu')
+
+    #_______________________________________________________
     def test_model_detect_long():
-        global detect_model
-        image = image_max_source.data["image"][0].copy()
-        image_flip = np.flip(image,0)
-        image_flip_cp = image_flip.copy()
-        tifffile.imwrite('test_flip.tif',image_flip_cp)
-        tifffile.imwrite('test.tif',image)
-        print('flip ',image_flip.shape)
-        print('flimageip ',image.shape)
-        image_pp = tdv.preprocess_image_pytorch(image_flip_cp).to(detect_model.device)
+        nonlocal detect_model
+        scaling_factor = 2 ** int(dropdown_downscale.value)
+        image = original_source.data["image"][0].copy()
+        image = np.max(image, axis=0)
+        image = downscale_image(image, scaling_factor)
+        print(image.shape)
+        # image_flip = np.flip(image,0)
+        # image_flip_cp = image_flip.copy()
+        # tifffile.imwrite('test_flip.tif',image_flip_cp)
+        # tifffile.imwrite('test.tif',image)
+        # print('flip ',image_flip.shape)
+        # print('flimageip ',image.shape)
+        image_pp = tdv.preprocess_image_pytorch(image).to(detect_model.device)
         labels = detect_model.get_predictions(image_pp)
 
         x=[]
@@ -518,14 +642,14 @@ def make_document(doc):
             label_x.append(x_min+(x_max-x_min)/2)
             label_y.append(image.shape[1]-(y_min+10))
 
-        source_detect.data=dict(x=x, y=y, width=width, height=height, score=score, label_x=label_x, label_y=label_y)
+        detect_rectangle_source.data=dict(x=x, y=y, width=width, height=height, score=score, label_x=label_x, label_y=label_y)
         detect_button.label = "Run detect model"
         detect_button.button_type = "primary"
-        print(source_detect.data)
+        print(detect_rectangle_source.data)
 
     #_______________________________________________________
     def test_model_detect():
-        global detect_model
+        nonlocal detect_model
         detect_button.label = "Processing"
         detect_button.button_type = "danger"
   
@@ -534,38 +658,53 @@ def make_document(doc):
     detect_button = Button(label="Run detect model", button_type="primary")
     detect_button.on_click(test_model_detect)
 
-    #_______________________________________________________
-    def choose_model_detect(attr, old, new):
-        print('loading model: ', dropdown_model.value)
-        global detect_model
-        detect_model = tdv.DetectModel()
-        model_path = model_status.text.replace("Selected model path: ","")
-        print(model_path)
-        print(os.path.join(model_path,dropdown_model.value+'.pth'))
-        detect_model.load_model_detect(os.path.join(model_path,dropdown_model.value+'.pth'), 2, 'cpu')
 
+    ########## CALLBACKS #########
     dropdown_model.on_change('value', choose_model_detect)
-
-   #___________________________________________________________________________________________
-    def update_contrast(attr, old, new):
-        low, high = new 
-        color_mapper.low = low
-        color_mapper.high = high
-
-    contrast_slider = RangeSlider(start=0, end=255, value=(0, 255), step=1, title="Contrast", width=150)
+    select_model_button.on_click(open_file_dialog_model)
+    btn_save.on_click(save_rectangles)
+    btn_down.on_click(move_down)
+    btn_up.on_click(move_up)
+    btn_delete.on_click(delete_selected)
+    select_rectangle_source.on_change('data', update_labels, update_points)
+    p.on_event(SelectionGeometry, select_roi_callback)
     contrast_slider.on_change('value', update_contrast)
+    dropdown_downscale.on_change("value", update_rectangles, update_working)
+    select_image_button.on_click(load_image)
+    working_source.on_change("data", update_display, update_mask, update_points)
+    original_source.on_change("data", update_working)
+    slice_slider.on_change("value", update_working)
+    checkbox_maxproj.on_change("active", update_working)
+    mask_alpha_slider.on_change("value", update_mask_alpha)
+    points_alpha_slider.on_change("value", update_points_alpha)
 
-    # Layout all widgets
+
+
+    ########## LAYOUT ##########
+    #___________________________________________________________________________________________
+    def mk_div(**kwargs):
+        return Div(text='<div style="background-color: white; width: 20px; height: 1px;"></div>', **kwargs)
+        
     controls = row(mk_div(),btn_up, btn_down, btn_delete, btn_save)
-    slider_layout = row(mk_div(),slider)
+    slider_layout = row(mk_div(),slice_slider)
     status_layout = row(mk_div(), status)
     status_layout2 = row(mk_div(), model_status)
-    
-    layout = column(mk_div(),
-                    row(mk_div(),select_button,mk_div(), select_button_model, file_input, div), 
-                    row(p,column(checkbox_maxproj,dropdown_downscale, contrast_slider, dropdown_model,detect_button, checkbox_detection)), slider_layout, controls, status_layout,status_layout2)
+
+    div = Div(text="<h1>FileInput Values:</h1><p>filename:<p>base64 value:")
+
+    layout = column(
+        mk_div(),           
+        row(
+            mk_div(),select_image_button,mk_div(), select_model_button, file_input, div
+        ), 
+        row(
+            p,column(checkbox_maxproj,dropdown_downscale, contrast_slider, dropdown_model,detect_button, checkbox_detection, mask_alpha_slider, points_alpha_slider)
+        ), 
+        slider_layout, controls, status_layout,status_layout2)
     doc.title = 'Tracking selection'
     doc.add_root(layout)
+
+
 
 #_______________________________________________________
 def get_free_port():
@@ -576,7 +715,7 @@ def get_free_port():
 #_______________________________________________________
 def run_server():
     port = get_free_port()
-    port = 5020
+    port = 5021
     print(f"Using dynamic port: {port}")
     io_loop = IOLoop()
     server = Server({'/': make_document},
