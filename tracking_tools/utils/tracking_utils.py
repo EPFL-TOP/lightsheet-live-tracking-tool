@@ -70,6 +70,9 @@ def crop_image(image, center_point, hws, allow_oob=True) :
     crop_start = np.maximum(start, 0)
     crop_end = np.minimum(end, shape)
 
+    # Ensure each dimension is at least 1, mainly to support cases where the hws is 0 in one dimension
+    crop_end = np.maximum(crop_end, crop_start + 1)
+
     # Crop image
     if len(shape) == 3 :
         cropped = image[
@@ -142,7 +145,7 @@ def threshold_image(image, type='otsu') :
         type (str, optional): Threshold type. Can be 'otsu' or 'mean'. Defaults to 'otsu'.
 
     Returns:
-        _type_: Thresholded binary image.
+        _type_: Binary image.
     """
     if type=='otsu' :
         threshold = threshold_otsu(image)
@@ -166,8 +169,28 @@ def sample_points_in_binary_mask(binary, num_points=20) :
     sampled_points = coords[:,indices]
     return sampled_points.transpose(1,0)[:,::-1]
 
+def filter_and_threshold(image, median_kernel=0, gaussian_kernel=11, threshold_type='otsu') :
+    """Fitler an image with median and gaussian filtering, and thresholds it
 
-def generate_uniform_grid_in_region(image, center_point, hws, grid_size, median_kernel=0, gaussian_kernel=11, threshold_type='otsu') :
+    Args:
+        image (_type_): _description_
+        median_kernel (int, optional): _description_. Defaults to 0.
+        gaussian_kernel (int, optional): _description_. Defaults to 11.
+        threshold_type (str, optional): _description_. Defaults to 'otsu'.
+
+    Returns:
+        _type_: The binary mask
+    """
+    
+    filtered = filter_image(image, median_kernel=median_kernel, gaussian_kernel_xy=gaussian_kernel, gaussian_kernel_z=None)
+    if threshold_type == 'otsu' :
+        threshold = threshold_otsu(filtered)
+    elif threshold_type == 'mean' :
+        threshold = threshold_mean(filtered)
+    thresholded = (filtered > threshold).astype(int)
+    return thresholded
+
+def generate_uniform_grid_in_region(image, center_point, hws, grid_size, median_kernel=0, gaussian_kernel=11, threshold_type='otsu', return_mask=False) :
     """Generates points in a grid in a box.
 
     Args:
@@ -187,11 +210,8 @@ def generate_uniform_grid_in_region(image, center_point, hws, grid_size, median_
         # Convert to grayscale
         image = image[...,0]
     segm_mask = get_box(image.shape, center_point, hws)
-    filtered = filter_image(image, median_kernel=median_kernel, gaussian_kernel_xy=gaussian_kernel, gaussian_kernel_z=None)
-    if threshold_type == 'otsu' :
-        threshold = threshold_otsu(filtered)
-    elif threshold_type == 'mean' :
-        threshold = threshold_mean(filtered)
-    thresholded = (filtered > threshold).astype(int)
+    thresholded = filter_and_threshold(image, median_kernel, gaussian_kernel, threshold_type)
     grid_points = generate_grid(image.shape, grid_size=grid_size, segm_mask=thresholded * segm_mask)
+    if return_mask :
+        return grid_points, thresholded
     return grid_points

@@ -33,6 +33,8 @@ class TrackingRunner() :
         self.tracker_class = position_tracker
         self.timeout_ms = runner_params["timeout_ms"]
         self.positions_config = positions_config
+        if self.positions_config == {} :
+            raise ValueError(f"position_config must not be empty : {self.positions_config}")
         self.log_dir_name = runner_params["log_dir_name"]
         self.log = runner_params["log"]
         self.scaling_factor = roi_tracker_params["scaling_factor"]
@@ -44,11 +46,13 @@ class TrackingRunner() :
         self.roi_tracker_params = roi_tracker_params
         self.position_tracker_params = position_tracker_params
         self.reader = image_reader(dirpath=self.dirpath, log=self.log)
+
         for config_name in positions_config.keys() :
             with open(self.dirpath / config_name / runner_params["log_dir_name"] / "tracking_parameters.json", 'w') as json_file:
                 to_save = dict()
                 to_save['scaling_factor'] = self.scaling_factor
                 json.dump(to_save, json_file, indent=4)
+                
         # Set default logger
         self.logger = init_logger("TrackingRunner")
         self.to_save = {}
@@ -64,7 +68,7 @@ class TrackingRunner() :
             if self.log and not timeout:
                 self.logger.info(f"Waiting for the next timepoint and position")
             position_name, time_point, timeout = self.microscope.wait_for_pause(timeout_ms=self.timeout_ms)
-            if timeout :
+            if timeout : 
                 continue
             if position_name not in self.position_names :
                 self.microscope.continue_from_pause()

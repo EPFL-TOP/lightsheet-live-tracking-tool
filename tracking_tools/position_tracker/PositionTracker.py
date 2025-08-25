@@ -17,6 +17,17 @@ class PositionTrackerSingleRoI_v2 :
         roi_tracker_params,
         position_tracker_params,
     ) :
+        """Tracks a position in a streaming video, shift cpmputation and unit conversion
+
+        Args:
+            first_frame (np.ndarray): Initialization frame
+            rois (list): list of ROIs to tracks. The current implementation only supports one ROI
+            log (Bool): Log 
+            use_detection (Bool): Use detection nad sensor fusion
+            position_name (String): Position name
+            roi_tracker_params (dict): Dict containing the parameters of the ROI Tracker
+            position_tracker_params (dict): Dict contianing the parameters of the Position Tracker
+        """
 
         # If roi is a list, take the first element
         if isinstance(rois, list) :
@@ -74,6 +85,7 @@ class PositionTrackerSingleRoI_v2 :
         
         new_position, tracking_state = self.base_tracker.compute_new_position(frame)
         self.positions.append(new_position)
+
         # Update tracking state
         self.tracking_state = tracking_state
         self.tracking_state_list.append(self.tracking_state)
@@ -108,6 +120,7 @@ class PositionTrackerSingleRoI_v2 :
     
     def compute_shift_px(self, new_position, roi):
         D, H, W = self.shape
+
         # Compute base shift
         ref_position = self.ref_position
         shift_px = Shift3D.from_positions(new_position, Position3D(x=ref_position.x, y=ref_position.y, z=D//2))
@@ -115,9 +128,11 @@ class PositionTrackerSingleRoI_v2 :
         # Compute ROI bounds after shift
         half_height = roi.height / 2
         half_width = roi.width / 2
+
         # Projected ROI center after shift
         projected_y = new_position.y - shift_px.y
         projected_x = new_position.x - shift_px.x
+        
         # ROI corners in the image after applying shift
         min_y = projected_y - half_height
         max_y = projected_y + half_height

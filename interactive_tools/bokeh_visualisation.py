@@ -3,7 +3,7 @@ from tornado.ioloop import IOLoop
 from tkinter import filedialog
 from bokeh.io import curdoc
 from bokeh.plotting import figure
-from bokeh.models import ColumnDataSource, BoxEditTool, TapTool, LabelSet, Button, CheckboxGroup, TextInput, Div, Range1d, Slider, Select, RangeSlider, LinearColorMapper
+from bokeh.models import ColumnDataSource, BoxEditTool, TapTool, LabelSet, Button, CheckboxGroup, TextInput, Div, Range1d, Slider, Select, RangeSlider, LinearColorMapper, Span
 from bokeh.layouts import column, row
 from bokeh.events import SelectionGeometry
 from bokeh.server.server import Server
@@ -29,6 +29,7 @@ def make_document(doc):
     shift_mu_source = ColumnDataSource(data=dict(z=[], y=[], x=[], t=[]))
 
     trajectory_source = ColumnDataSource(data=dict(z=[], y=[], x=[], t=[]))
+    trajectory_highlight_source = ColumnDataSource(data=dict(x=[], y=[], z=[]))
     
     rects_source = ColumnDataSource(data=dict(x=[], y=[], width=[], height=[], index=[], label_x=[], label_y=[], time_point=[], tracking_point=[]))
     rect_source  = ColumnDataSource(data=dict(x=[], y=[], width=[], height=[], index=[], label_x=[], label_y=[]))
@@ -95,14 +96,26 @@ def make_document(doc):
         fill_alpha=0.2, fill_color='blue', line_color='red', line_width=2
     )
 
-
+    # Shift values
     p_shifts.line('t','x',line_width=2, source=shift_mu_source, legend_label='x', line_color='red')
     p_shifts.line('t','y',line_width=2, source=shift_mu_source, legend_label='y', line_color='blue')
     p_shifts.line('t','z',line_width=2, source=shift_mu_source, legend_label='z', line_color='green')
+    # Vertical bar
+    vline = Span(location=slider.value, dimension="height", line_color="black", line_width=2, line_dash="dashed")
+    p_shifts.add_layout(vline)
+    # Shifts tectz display
+    shifts_text = Div(text="")
 
+    # Trajectory value
     p_trajectory_xy.scatter('x', 'y', size=8, color=color_mapper_trajectory, source=trajectory_source)
     p_trajectory_xz.scatter('x', 'z', size=8, color=color_mapper_trajectory, source=trajectory_source)
     p_trajectory_yz.scatter('y', 'z', size=8, color=color_mapper_trajectory, source=trajectory_source)
+    # Trajectory highlights
+    p_trajectory_xy.circle("x", "y", size=10, line_color="red", fill_color="red", line_width=2, source=trajectory_highlight_source)
+    p_trajectory_yz.circle("y", "z", size=10, line_color="red", fill_color="red", line_width=2, source=trajectory_highlight_source)
+    p_trajectory_xz.circle("x", "z", size=10, line_color="red", fill_color="red", line_width=2, source=trajectory_highlight_source)
+    
+
 
     def mk_div(**kwargs):
         return Div(text='<div style="background-color: white; width: 20px; height: 1px;"></div>', **kwargs)
@@ -111,15 +124,15 @@ def make_document(doc):
     #___________________________________________________________________________________________
     def callback_slider(attr, old, new):
         time_point = slider.value
+
+        # Update image
         image_source.data = {'image':[images_source.data['image'][time_point]], 
                             'x':[images_source.data['x'][time_point]],
                             'y':[images_source.data['y'][time_point]],
                             'dw':[images_source.data['dw'][time_point]],
                             'dh':[images_source.data['dh'][time_point]]}
         
-
-
-        
+        # Update ROI
         if time_point>-1:
             rect_source.data = dict(
             x=rects_source.data['x'][time_point], 
@@ -129,10 +142,28 @@ def make_document(doc):
             index=[0], label_x=[0], label_y=[0]
             )
 
+        # Update query point
         point_source.data = dict(
             x=points_source.data['x'][time_point],
             y=points_source.data['y'][time_point]
         )
+
+        # Update shifts vertical bar
+        vline.location = time_point
+
+        # Update displyed shift text
+        shifts_text.text = (
+            f"x (&micro;m): {shift_mu_source.data["x"][slider.value]}<br>"
+            f"y (&micro;m): {shift_mu_source.data["y"][slider.value]}<br>"
+            f"z (&micro;m): {shift_mu_source.data["z"][slider.value]}"
+        )
+
+        # Update trajectory point highlight
+        trajectory_highlight_source.data = {
+            "x": [trajectory_source.data["x"][time_point]],
+            "y": [trajectory_source.data["y"][time_point]],
+            "z": [trajectory_source.data["z"][time_point]],
+        }
 
     slider.on_change('value', callback_slider)
 
@@ -164,7 +195,7 @@ def make_document(doc):
             max_proj = np.max(arr_down, axis=0)
             out_name = os.path.join(dir_path,"embryo_tracking","max_proj")
 
-            out_name = os.path.join(out_name,os.path.split(img)[1].replace('.tif', '_downscale_maxproj.tif'))
+            out_name = os.path.join(out_name,os.path.split(img)[1].replace('.tif', '_maxproj.tif'))
             print("-------",out_name)
             tifffile.imwrite(out_name, max_proj)
 
@@ -173,12 +204,15 @@ def make_document(doc):
     def load_images(dir_path, reload=False):
         out_name = os.path.join(dir_path,"embryo_tracking","max_proj")
         if not os.path.isdir(out_name):
-            os.mkdir(out_name)
-            img_list=glob.glob(os.path.join(dir_path,"*.tif"))
-            create_images(dir_path, img_list)
+            raise IsADirectoryError(f"{out_name} is not a directory")
+        #     os.mkdir(out_name)
+        #     img_list=glob.glob(os.path.join(dir_path,"*.tif"))
+        #     create_images(dir_path, img_list)
 
         img_list=glob.glob(os.path.join(out_name,"*.tif"))
         img_list = sorted(img_list)
+        if len(img_list) == 0 :
+            raise ValueError("img_list is empty")
         print('nb images max proj: ',len(img_list))
         images_ds=[]
         x_ds=[]
@@ -300,7 +334,17 @@ def make_document(doc):
         shifts_um_cumsum_y = np.cumsum(np.array(shifts_y),axis=0)
         shifts_um_cumsum_z = np.cumsum(np.array(shifts_z),axis=0)
         shift_mu_source.data = dict(x=shifts_x, y=shifts_y, z=shifts_z, t=[i for i in range(0,len(shifts_x))])
+        shifts_text.text = (
+            f"x (&micro;m): {shift_mu_source.data["x"][slider.value]}<br>"
+            f"y (&micro;m): {shift_mu_source.data["y"][slider.value]}<br>"
+            f"z (&micro;m): {shift_mu_source.data["z"][slider.value]}"
+        )
         trajectory_source.data = dict(x=shifts_um_cumsum_x, y=shifts_um_cumsum_y, z=shifts_um_cumsum_z, t=np.arange(len(shifts_um_cumsum_x)))
+        trajectory_highlight_source.data = {
+            "x": [trajectory_source.data["x"][slider.value]],
+            "y": [trajectory_source.data["y"][slider.value]],
+            "z": [trajectory_source.data["z"][slider.value]],
+        }
         n_points = len(shifts_um_cumsum_x)
         color_mapper_trajectory['transform'].low = 0
         color_mapper_trajectory['transform'].high = n_points - 1
@@ -454,7 +498,8 @@ def make_document(doc):
     
     left_col  = column(select_layout, p_img, slider_layout, reload_layout, text_layout, row(mk_div(),contrast_slider))
     trajectory_row = row(p_trajectory_xy, p_trajectory_xz, p_trajectory_yz)
-    right_col = column(p_shifts, trajectory_row)
+    shifts_row = row(p_shifts, shifts_text)
+    right_col = column(shifts_row, trajectory_row)
     layout = row(left_col, right_col)
 
     doc.title = 'Tracking visualisation'
