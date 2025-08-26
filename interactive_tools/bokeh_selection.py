@@ -597,10 +597,9 @@ def make_document(doc):
 
     #_______________________________________________________
     def _get_parent():
-        """Create a minimal invisible parent window to anchor the dialog (fixes macOS bottom-left bug)."""
         win = tk.Toplevel(_root)
-        win.overrideredirect(True)  # remove window decorations
-        win.geometry("1x1+200+200")  # tiny and off to the side
+        win.overrideredirect(True)
+        win.geometry("1x1+200+200")
         win.lift()
         win.attributes("-topmost", True)
         win.focus_force()
@@ -652,41 +651,11 @@ def make_document(doc):
 
 
     
-    #_________________________________________________________________________________________________
-    def open_file_dialog_model():
-        try:
-            root = tk.Tk()
-            root.attributes('-topmost', True)
-            root.withdraw()
-            #root.update()
-            dir_path = filedialog.askdirectory(parent=root)
-            #root.destroy()
-
-            if dir_path:
-                model_detect=[]
-                if os.path.isdir(dir_path):
-                    models = glob.glob(os.path.join(dir_path,'*.pth'))
-                    model_detect=[os.path.split(model)[-1].replace('.pth','') for model in models]
-                dropdown_model.options = model_detect
-                model_status.text = f"Selected model path: {dir_path}"
-                
-                if len(model_detect)==0:
-                    model_status.text = f"No models in selected model path: {dir_path}"
-
-            else:
-                status.text = "No directory selected."
-        except Exception as e:
-            status.text = f"Error: {e}"
-
-
-
-
+  
 
     ########## CALLBACKS #########
     dropdown_model.on_change('value', choose_model_detect)
-    #select_model_button.on_click(open_file_dialog_model)
     select_model_button.on_click(select_folder)
-
     btn_save.on_click(save_rectangles)
     btn_down.on_click(move_down)
     btn_up.on_click(move_up)
@@ -695,10 +664,7 @@ def make_document(doc):
     p.on_event(SelectionGeometry, select_roi_callback)
     contrast_slider.on_change('value', update_contrast)
     dropdown_downscale.on_change("value", update_rectangles, update_working)
-
-    #select_image_button.on_click(load_image)
     select_image_button.on_click(select_file)
-
     working_source.on_change("data", update_display, update_mask, update_points)
     original_source.on_change("data", update_working)
     slice_slider.on_change("value", update_working)
