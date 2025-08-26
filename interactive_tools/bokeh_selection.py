@@ -330,11 +330,13 @@ def make_document(doc):
             )
             return
 
+        base_kernel = 41
+        scaling_factor = 2 ** int(dropdown_downscale.value)
         xs, ys = [], []
         for x, y, width, height, index in zip(d["x"], d["y"], d["width"], d["height"], d["index"]) :
             center_point = (working.shape[0] - y, x) # Flip rectangles y coordinates (because bokeh coordinate system flips y)
             hws = (height/2, width/2)
-            points = tutils.generate_uniform_grid_in_region(working, center_point, hws, return_mask=False, grid_size=40) ### TODO : Dynamic kernel size
+            points = tutils.generate_uniform_grid_in_region(working, center_point, hws, return_mask=False, grid_size=40, gaussian_kernel=base_kernel//scaling_factor) ### TODO : Dynamic kernel size
             points[:,1] = working.shape[0] - points[:,1] # Re-flip y coordinates for display
             xs.extend(points[:,0].tolist())
             ys.extend(points[:,1].tolist())
