@@ -3,7 +3,7 @@ from tornado.ioloop import IOLoop
 from tkinter import filedialog
 from bokeh.io import curdoc
 from bokeh.plotting import figure
-from bokeh.models import ColumnDataSource, BoxEditTool, TapTool, LabelSet, Button, CheckboxGroup, CustomJS, TextInput, Div, Range1d, Slider, Select, RangeSlider, LinearColorMapper, FileInput
+from bokeh.models import ColumnDataSource, BoxEditTool, TapTool, LabelSet, Button, CheckboxGroup, CustomJS, TextInput, Div, Range1d, Slider, Select, RangeSlider, LinearColorMapper, FileInput, PreText
 import base64
 from PIL import Image
 import io
@@ -382,41 +382,6 @@ def make_document(doc):
         )
 
 
-    #_______________________________________________________________________________________________
-    def open_file_dialog():
-        try:
-            root = tk.Tk()
-            root.attributes('-topmost', True)
-            root.withdraw()
-            root.update()  # sometimes needed to actually apply the topmost flag
-            file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.tif;*.tiff")])
-            root.destroy()
-            return file_path
-
-        except Exception as e:
-            status.text = f"Error: {e}"
-
-    #________________________________________________________________________________________________
-    def load_image():
-        file_path = open_file_dialog()
-        if not file_path :
-            status.text = "No file selected"
-            return
-        status.text = f"Selected image: {file_path}"
-
-        try:
-            im = np.array(tifffile.imread(file_path))
-            # Handle 2D images as 3D images with depth = 1
-            if im.ndim == 2 :
-                im = im[np.newaxis, ...]
-            update_original(im)
-
-        except Exception as e:
-            status.text = f"Error loading image: {e}"
-
-
-
-
     #_____________________________________________________________________________________________
     def downscale_rectangles(scaling_multiplier) :
         data = select_rectangle_source.data
@@ -436,7 +401,6 @@ def make_document(doc):
         # print("------------")
         # print(select_rectangle_source.data)
 
-
     #______________________________________________________________________________________________
     def update_rectangles(attr, old, new) :
         diff = int(old) - int(new)
@@ -446,8 +410,6 @@ def make_document(doc):
             x=[], y=[], width=[], height=[], score=[], label_x=[], label_y=[]
         )
 
-
-        
     #___________________________________________________________________________________________
     def update_contrast(attr, old, new):
         low, high = new 
@@ -470,7 +432,6 @@ def make_document(doc):
                 )
 
             select_rectangle_source.data = data_rect
-
 
     #_______________________________________________________
     def update_labels(attr, old, new):
@@ -520,7 +481,6 @@ def make_document(doc):
         select_rectangle_source.data = data
         select_rectangle_source.selected.indices = [i-1]
 
-
     #_______________________________________________________
     def move_down():
         inds = select_rectangle_source.selected.indices
@@ -534,8 +494,6 @@ def make_document(doc):
             data[key][i], data[key][i+1] = data[key][i+1], data[key][i]
         select_rectangle_source.data = data
         select_rectangle_source.selected.indices = [i+1]
-
-
 
     #_______________________________________________________
     def save_rectangles():
@@ -568,33 +526,6 @@ def make_document(doc):
             json.dump(outdict, f, indent=2)
         print("Saved: ",os.path.join(out_dirname,"tracking_RoIs.json"))
 
-
-
-    #_________________________________________________________________________________________________
-    def open_file_dialog_model():
-        try:
-            root = tk.Tk()
-            root.attributes('-topmost', True)
-            root.withdraw()
-            root.update()
-            dir_path = filedialog.askdirectory(parent=root)
-            root.destroy()
-
-            if dir_path:
-                model_detect=[]
-                if os.path.isdir(dir_path):
-                    models = glob.glob(os.path.join(dir_path,'*.pth'))
-                    model_detect=[os.path.split(model)[-1].replace('.pth','') for model in models]
-                dropdown_model.options = model_detect
-                model_status.text = f"Selected model path: {dir_path}"
-                
-                if len(model_detect)==0:
-                    model_status.text = f"No models in selected model path: {dir_path}"
-
-            else:
-                status.text = "No directory selected."
-        except Exception as e:
-            status.text = f"Error: {e}"
 
 
 
@@ -658,10 +589,104 @@ def make_document(doc):
     detect_button = Button(label="Run detect model", button_type="primary")
     detect_button.on_click(test_model_detect)
 
+    output = PreText(text="No file selected")
+    select = Select(title="Files in folder:", value=None, options=[])
+
+    _root = tk.Tk()
+    _root.withdraw()
+
+    #_______________________________________________________
+    def _get_parent():
+        """Create a minimal invisible parent window to anchor the dialog (fixes macOS bottom-left bug)."""
+        win = tk.Toplevel(_root)
+        win.overrideredirect(True)  # remove window decorations
+        win.geometry("1x1+200+200")  # tiny and off to the side
+        win.lift()
+        win.attributes("-topmost", True)
+        win.focus_force()
+        return win
+
+    #_______________________________________________________
+    def select_file():
+        parent = _get_parent()
+        filename = filedialog.askopenfilename(parent=parent)
+        parent.destroy()
+
+        if not filename:
+            output.text = "No file selected"
+            return
+
+        try:
+            im = np.array(tifffile.imread(filename))
+            # Handle 2D images as 3D images with depth = 1
+            if im.ndim == 2 :
+                im = im[np.newaxis, ...]
+            update_original(im)
+
+        except Exception as e:
+            status.text = f"Error loading image: {e}"
+
+
+
+
+    #_______________________________________________________
+    def select_folder():
+        parent = _get_parent()
+        folder = filedialog.askdirectory(parent=parent)
+        parent.destroy()
+
+        if folder:
+            model_detect=[]
+            if os.path.isdir(folder):
+                models = glob.glob(os.path.join(folder,'*.pth'))
+                model_detect=[os.path.split(model)[-1].replace('.pth','') for model in models]
+            dropdown_model.options = model_detect
+            model_status.text = f"Selected model path: {folder}"
+            
+            if len(model_detect)==0:
+                model_status.text = f"No models in selected model path: {folder}"
+
+        else:
+            status.text = "No directory selected."
+
+
+
+    
+    #_________________________________________________________________________________________________
+    def open_file_dialog_model():
+        try:
+            root = tk.Tk()
+            root.attributes('-topmost', True)
+            root.withdraw()
+            #root.update()
+            dir_path = filedialog.askdirectory(parent=root)
+            #root.destroy()
+
+            if dir_path:
+                model_detect=[]
+                if os.path.isdir(dir_path):
+                    models = glob.glob(os.path.join(dir_path,'*.pth'))
+                    model_detect=[os.path.split(model)[-1].replace('.pth','') for model in models]
+                dropdown_model.options = model_detect
+                model_status.text = f"Selected model path: {dir_path}"
+                
+                if len(model_detect)==0:
+                    model_status.text = f"No models in selected model path: {dir_path}"
+
+            else:
+                status.text = "No directory selected."
+        except Exception as e:
+            status.text = f"Error: {e}"
+
+
+
+
 
     ########## CALLBACKS #########
     dropdown_model.on_change('value', choose_model_detect)
-    select_model_button.on_click(open_file_dialog_model)
+    #select_model_button.on_click(open_file_dialog_model)
+    select_model_button.on_click(select_folder)
+
     btn_save.on_click(save_rectangles)
     btn_down.on_click(move_down)
     btn_up.on_click(move_up)
@@ -670,7 +695,10 @@ def make_document(doc):
     p.on_event(SelectionGeometry, select_roi_callback)
     contrast_slider.on_change('value', update_contrast)
     dropdown_downscale.on_change("value", update_rectangles, update_working)
-    select_image_button.on_click(load_image)
+
+    #select_image_button.on_click(load_image)
+    select_image_button.on_click(select_file)
+
     working_source.on_change("data", update_display, update_mask, update_points)
     original_source.on_change("data", update_working)
     slice_slider.on_change("value", update_working)
@@ -690,12 +718,11 @@ def make_document(doc):
     status_layout = row(mk_div(), status)
     status_layout2 = row(mk_div(), model_status)
 
-    div = Div(text="<h1>FileInput Values:</h1><p>filename:<p>base64 value:")
 
     layout = column(
         mk_div(),           
         row(
-            mk_div(),select_image_button,mk_div(), select_model_button, file_input, div
+            mk_div(),select_image_button,mk_div(), select_model_button, 
         ), 
         row(
             p,column(checkbox_maxproj,dropdown_downscale, contrast_slider, dropdown_model,detect_button, checkbox_detection, mask_alpha_slider, points_alpha_slider)
@@ -703,8 +730,6 @@ def make_document(doc):
         slider_layout, controls, status_layout,status_layout2)
     doc.title = 'Tracking selection'
     doc.add_root(layout)
-
-
 
 #_______________________________________________________
 def get_free_port():
@@ -717,7 +742,7 @@ def run_server():
     port = get_free_port()
     port = 5021
     print(f"Using dynamic port: {port}")
-    io_loop = IOLoop()
+    io_loop = IOLoop.current()
     server = Server({'/': make_document},
                     io_loop=io_loop,
                     allow_websocket_origin=[f"localhost:{port}"],
@@ -726,10 +751,10 @@ def run_server():
     print(f"Bokeh server running at http://localhost:{port}")
     io_loop.start()
 
-
+#_______________________________________________________
 if __name__ == '__main__':
-    #run_server()
+    run_server()
     #to run a detached server
-    import threading
-    thread = threading.Thread(target=run_server)
-    thread.start()
+    #import threading
+    #thread = threading.Thread(target=run_server)
+    #thread.start()
