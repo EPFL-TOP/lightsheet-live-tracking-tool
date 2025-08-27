@@ -624,6 +624,7 @@ def make_document(doc):
             # Handle 2D images as 3D images with depth = 1
             if im.ndim == 2 :
                 im = im[np.newaxis, ...]
+            status.text = f"Selected image: {filename}"
             update_original(im)
 
         except Exception as e:
