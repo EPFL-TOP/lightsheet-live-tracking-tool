@@ -31,7 +31,7 @@ def make_document(doc):
     trajectory_source = ColumnDataSource(data=dict(z=[], y=[], x=[], t=[]))
     trajectory_highlight_source = ColumnDataSource(data=dict(x=[], y=[], z=[]))
     
-    rects_source = ColumnDataSource(data=dict(x=[], y=[], width=[], height=[], index=[], label_x=[], label_y=[], time_point=[], tracking_point=[]))
+    rects_source = ColumnDataSource(data=dict(x=[], y=[], width=[], height=[], index=[], label_x=[], label_y=[], time_point=[], tracks_idx=[]))
     rect_source  = ColumnDataSource(data=dict(x=[], y=[], width=[], height=[], index=[], label_x=[], label_y=[]))
 
     points_source = ColumnDataSource(data=dict(x=[], y=[]))
@@ -134,18 +134,29 @@ def make_document(doc):
         
         # Update ROI
         if time_point>-1:
+            # rect_source.data = dict(
+            # x=rects_source.data['x'][time_point], 
+            # y=rects_source.data['y'][time_point], 
+            # width=rects_source.data['width'][time_point], 
+            # height=rects_source.data['height'][time_point],
+            # index=[0], label_x=[0], label_y=[0]
+            # )
+
             rect_source.data = dict(
-            x=rects_source.data['x'][time_point], 
-            y=rects_source.data['y'][time_point], 
-            width=rects_source.data['width'][time_point], 
-            height=rects_source.data['height'][time_point],
-            index=[0], label_x=[0], label_y=[0]
+                x=[rects_source.data['x'][time_point][i] for i in range(len(rects_source.data['x'][time_point]))], 
+                y=[rects_source.data['y'][time_point][i] for i in range(len(rects_source.data['y'][time_point]))], 
+                width=rects_source.data['width'][time_point], 
+                height=rects_source.data['height'][time_point], 
+                index=rects_source.data['index'][time_point], 
+                label_x=rects_source.data['label_x'][time_point], 
+                label_y=rects_source.data['label_y'][time_point]
             )
 
         # Update query point
+        tracks_idx = rects_source.data["tracks_idx"][time_point]
         point_source.data = dict(
-            x=points_source.data['x'][time_point],
-            y=points_source.data['y'][time_point]
+            x=points_source.data['x'][tracks_idx],
+            y=points_source.data['y'][tracks_idx]
         )
 
         # Update shifts vertical bar
@@ -279,7 +290,7 @@ def make_document(doc):
 
         roi_x,roi_y = [],[]
         roi_width,roi_height = [],[]
-        roi_index, roi_timepoint, tracking_point =[],[],[]
+        roi_index, roi_timepoint, tracks_idx =[],[],[]
         roi_label_x,roi_label_y = [],[]
         shifts_x, shifts_y, shifts_z = [],[],[]
         scale_factor = 1
@@ -297,7 +308,7 @@ def make_document(doc):
                 roi_label_x.append([roi["x"]-roi["width"] for roi in data_log[tp]["roi"]])
                 roi_label_y.append([roi["y"]+roi["height"] for roi in data_log[tp]["roi"]])
                 roi_timepoint.append(tp)
-                tracking_point.append(data_log[tp]["tracks_id"])
+                tracks_idx.append(data_log[tp]["tracks_id"])
 
                 shifts_x.append(data_log[tp]["shift_um"]["x"])
                 shifts_y.append(data_log[tp]["shift_um"]["y"])
@@ -316,7 +327,7 @@ def make_document(doc):
                                  label_x=roi_label_x, 
                                  label_y=roi_label_y, 
                                  time_point=roi_timepoint, 
-                                 tracking_point=tracking_point)
+                                 tracks_idx=tracks_idx)
 
         rect_source.data = dict(
             x=[rects_source.data['x'][0][i] for i in range(len(rects_source.data['x'][0]))], 
@@ -358,17 +369,27 @@ def make_document(doc):
 
         first=True
         for track in tracks:
-            if first:
-                x_tracks.append(track[0][-1][:,0].tolist())
-                y_tracks.append((data_pos["shape"][1]/scale_factor-track[0][0][:,1]).tolist())
-                first=False
-            if len(track)==0:
-                x_tracks.append([])
-                y_tracks.append([])
-            else:
-                x_tracks.append(track[0][-1][:,0].tolist())
-                y_tracks.append((data_pos["shape"][1]/scale_factor-track[0][-1][:,1]).tolist())
+            x_all_rois = []
+            y_all_rois = []
+            for roi_points in track :
+                if first:
+                    xs = roi_points[-1][:,0].tolist()
+                    ys = (data_pos["shape"][1]/scale_factor-roi_points[0][:,1]).tolist()
+                if len(roi_points)==0:
+                    xs  = None
+                    ys = None
+                else:
+                    xs = roi_points[-1][:,0].tolist()
+                    ys = (data_pos["shape"][1]/scale_factor-roi_points[-1][:,1]).tolist()
+                
+                x_all_rois.extend(xs)
+                y_all_rois.extend(ys)
 
+            x_tracks.append(x_all_rois)
+            y_tracks.append(y_all_rois)
+
+            first=False
+            
         points_source.data = dict(x=x_tracks, y=y_tracks)
 
         point_source.data = dict(
