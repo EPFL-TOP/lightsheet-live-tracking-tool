@@ -95,9 +95,8 @@ class TrackingRunner() :
                 self.stop()
                 continue
             
-            # If tracker for position do not exist, create tracker
+            # If tracker for position do not exist, skip
             if position_name not in self.trackers.keys() :
-                # self.initialize_tracker(position_name, time_point, image)
                 self.microscope.continue_from_pause()
             else :
                 if self.tracking_state_dict[position_name] != TrackingState.TRACKING_OFF :
