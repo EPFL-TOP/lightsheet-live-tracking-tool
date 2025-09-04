@@ -4,7 +4,49 @@ import sys
 import json
 import logging
 import yaml
+import threading
+from tornado.ioloop import IOLoop
+from bokeh.server.server import Server
+import subprocess
+
 LAUNCH_DIR = os.getcwd()
+
+def run_script_gui(PYMCSDIR):
+    python_interpreter = sys.executable
+    script_gui = os.path.join(PYMCSDIR, "gui", "script_gui.py")
+    script_name = os.path.splitext(os.path.basename(os.path.abspath(__file__)))[0]
+
+    print("Launching script_gui:", script_gui)
+    os.spawnl(os.P_WAIT, python_interpreter, python_interpreter, script_gui, script_name)
+
+
+def run_server(PYMCSDIR):
+    from interactive_tools import bokeh_selection
+
+    port = 5021
+    io_loop = IOLoop.current()
+    server = Server({'/': bokeh_selection.make_document},
+                    io_loop=io_loop,
+                    allow_websocket_origin=[f"localhost:{port}"],
+                    port=port)
+    server.start()
+    print(f"Bokeh server running at http://localhost:{port}")
+
+    threading.Thread(target=run_script_gui, args=(PYMCSDIR,), daemon=True).start()
+    io_loop.start()
+
+def run_panel(PYMCSDIR):
+
+    process = subprocess.Popen(
+        ["panel", "serve", "interactive_tools/panel_app.py", "--dev", "--show", "--port", "5021"],
+    )
+    port = 5021
+
+    print(f"Bokeh server running at http://localhost:{port}")
+    io_loop = IOLoop.current()
+
+    threading.Thread(target=run_script_gui, args=(PYMCSDIR,), daemon=True).start()
+    io_loop.start()
 
 # executed if script started from terminal
 if __name__ == "__main__":
@@ -14,17 +56,25 @@ if __name__ == "__main__":
     print('python interpreter : ',python_interpreter)
     if LAUNCH_DIR not in sys.path:
         sys.path.insert(0, LAUNCH_DIR)
-    from interactive_tools import bokeh_selection
-    import threading
-    thread = threading.Thread(target=bokeh_selection.run_server)
-    thread.start()
-    print("Bokeh is now serving at http://localhost:5020/")
-    #script_gui = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "gui", "script_gui.py"))
-    script_gui = os.path.join(PYMCSDIR, "gui", "script_gui.py")
-    print('script_gui  ',script_gui)
-    script_name = os.path.splitext(os.path.basename(os.path.abspath(__file__)))[0]
-    os.spawnl(os.P_WAIT, python_interpreter, python_interpreter, script_gui, script_name)
-    sys.exit()
+
+    #run_server(PYMCSDIR)
+    run_panel(PYMCSDIR)
+
+
+    #from interactive_tools import bokeh_selection
+    ##import threading
+    ##thread = threading.Thread(target=bokeh_selection.run_server)
+    ##thread.start()
+    #bokeh_selection.run_server()
+
+
+    #print("Bokeh is now serving at http://localhost:5020/")
+    ##script_gui = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "gui", "script_gui.py"))
+    #script_gui = os.path.join(PYMCSDIR, "gui", "script_gui.py")
+    #print('script_gui  ',script_gui)
+    #script_name = os.path.splitext(os.path.basename(os.path.abspath(__file__)))[0]
+    #os.spawnl(os.P_WAIT, python_interpreter, python_interpreter, script_gui, script_name)
+    #sys.exit()
 
 
 # Script with user interface must implement a Script class.

@@ -3,7 +3,7 @@ from tornado.ioloop import IOLoop
 from tkinter import filedialog
 from bokeh.io import curdoc
 from bokeh.plotting import figure
-from bokeh.models import ColumnDataSource, BoxEditTool, TapTool, LabelSet, Button, CheckboxGroup, CustomJS, TextInput, Div, Range1d, Slider, Select, RangeSlider, LinearColorMapper, FileInput, PreText
+from bokeh.models import ColumnDataSource, BoxEditTool, TapTool, LabelSet, Button, CheckboxGroup, PolyDrawTool, TextInput, Div, Range1d, Slider, Select, RangeSlider, LinearColorMapper, FileInput, PreText
 import base64
 from PIL import Image
 import io
@@ -122,6 +122,7 @@ def make_layout():
     ))
 
 
+
     ########## FIGURE SETUP ############
     p = figure(
         title="RoIs tracking selector",
@@ -185,7 +186,44 @@ def make_layout():
     p.add_tools(tap)
     p.toolbar.active_tap = tap
 
+
+    polygone_source = ColumnDataSource(data=dict(xs=[], ys=[]))
+
+    polygone_renderer = p.patches("xs", "ys", source=polygone_source,
+                        fill_alpha=0.9, fill_color="lightblue",
+                        line_color="black", line_width=7)
+
+    polygone_draw = PolyDrawTool(renderers=[polygone_renderer], drag=False)
+    #p.add_tools(polygone_draw)
+    p.toolbar.active_tap = polygone_draw
     ############## CORE FUNCTIONS ##############
+
+    def draw_polygone(attr, old, new) :
+        print("in draw_polygone")
+        d = polygone_source.data
+        if d["xs"] == [] :
+            return
+        xs = d["xs"][-1]
+        ys = d["ys"][-1]
+        print(xs, ys)
+    #    polygone_source.data = dict(xs=[xs], ys=[ys])
+    #    print(xs, ys)
+    polygone_source.on_change('data', draw_polygone)
+
+    def debug_event(attr, old, new):
+        print(f"Change detected: {attr}")
+        print("old:", old)
+        print("new:", new)
+
+    polygone_source.on_change("data", debug_event)
+
+
+
+    def on_geom(event):
+        print("Geometry event:", event.geometry)
+
+    p.on_event(SelectionGeometry, on_geom)
+
     #_______________________________________________________________________________________________
     def downscale_image(image, scaling_factor) :
         output = image[::scaling_factor, ::scaling_factor]
