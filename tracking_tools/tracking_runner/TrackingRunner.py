@@ -61,7 +61,13 @@ class TrackingRunner() :
         # Enable pause after position
         self.microscope.pause_after_position()
         # Run main tracking loop
-        # Inititalize timeout to False for logging
+
+        # Initialize trackers before main loop
+        self.logger.info(f"Initializing trackers")
+        for position_name in self.position_names :
+            self.initialize_tracker(position_name)
+        
+        self.logger.info(f"Main tracking loop")
         timeout = False
         while not self.stop_requested :
             
@@ -89,7 +95,7 @@ class TrackingRunner() :
             
             # If tracker for position do not exist, create tracker
             if position_name not in self.trackers.keys() :
-                self.initialize_tracker(position_name, time_point, image)
+                # self.initialize_tracker(position_name, time_point, image)
                 self.microscope.continue_from_pause()
             else :
                 if self.tracking_state_dict[position_name] != TrackingState.TRACKING_OFF :
@@ -99,15 +105,17 @@ class TrackingRunner() :
         self.microscope.no_pause_after_position()
         self.microscope.disconnect()
 
-    def initialize_tracker(self, position_name, time_point, image) :
+    def initialize_tracker(self, position_name, image=None, time_point=None) :
         PosSetting = [name for name in self.positions_config.keys() if position_name in name][0]
         use_detection = self.positions_config[PosSetting]['use_detection']
         # Append starting point
-        with open(self.dirpath / PosSetting / self.log_dir_name / "tracking_parameters.json", "r") as json_file:
-            to_save = json.load(json_file)
-        to_save['starting_time_point'] = time_point
-        with open(self.dirpath / PosSetting / self.log_dir_name / "tracking_parameters.json", 'w') as json_file:
-            json.dump(to_save, json_file, indent=4)
+        if time_point :
+            with open(self.dirpath / PosSetting / self.log_dir_name / "tracking_parameters.json", "r") as json_file:
+                to_save = json.load(json_file)
+            to_save['starting_time_point'] = time_point
+            with open(self.dirpath / PosSetting / self.log_dir_name / "tracking_parameters.json", 'w') as json_file:
+                json.dump(to_save, json_file, indent=4)
+        # Initialize tracker
         rois = self.positions_config[PosSetting]['RoIs']
         tracker = self.tracker_class(
             first_frame=image,
