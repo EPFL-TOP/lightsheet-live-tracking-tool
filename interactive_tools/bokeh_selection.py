@@ -194,7 +194,7 @@ def make_layout():
                         line_color="black", line_width=7)
 
     polygone_draw = PolyDrawTool(renderers=[polygone_renderer], drag=False)
-    p.add_tools(polygone_draw)
+    #p.add_tools(polygone_draw)
     p.toolbar.active_tap = polygone_draw
     ############## CORE FUNCTIONS ##############
 
