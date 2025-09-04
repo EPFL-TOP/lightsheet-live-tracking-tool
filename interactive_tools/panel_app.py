@@ -1,8 +1,8 @@
 from bokeh.application import Application
 from bokeh.application.handlers.function import FunctionHandler
 import panel as pn
-from interactive_tools.bokeh_visualisation import make_layout as bokeh_visualisation
-from interactive_tools.bokeh_selection import make_layout as bokeh_selection
+from bokeh_visualisation import make_layout as bokeh_visualisation
+from bokeh_selection import make_layout as bokeh_selection
 
 pn.extension()
 
