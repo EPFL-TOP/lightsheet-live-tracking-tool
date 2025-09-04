@@ -58,9 +58,6 @@ class SingleRoIBaseTracker_v2 :
         self.kernel_size_xy = base_kernel_size_xy // (2**scaling_factor)
         self.kernel_size_z = kernel_size_z
         self.log = log
-        self.current_frame = self._downsample(first_frame)
-        self.shape = self.current_frame.shape
-        self.current_frame_proj = np.max(self.current_frame, axis=0)
         self.use_detection = use_detection
         self.containment_threshold = containment_threshold
         self.k = k
@@ -72,27 +69,27 @@ class SingleRoIBaseTracker_v2 :
         roi = ROI(**roi)
         # Downscale RoI
         self.roi_init = roi.scale(scaling_factor=self.scaling_factor, down=True)
-        self.center_point_init = self.roi_init.to_position3D(z=self.shape[0]//2)
-        # Set default logger
-        self.logger = init_logger(self.__class__.__name__)
-        self.logger.info(f"Initialized {self.__class__.__name__}")
-        param_lines = [f"  {k}: {v}" for k, v in vars(self).items()
-                if not k.startswith('_') and k in ["scaling_factor", "window_length", "grid_size",
-                                                    "shape", "kernel_size_xy", "kernel_size_z",
-                                                    "use_detection", "serverkit", "k", "c0", "containment_threshold",
-                                                    "score_threshold", "size_ratio_threshold"]]
-        param_block = "\n".join(param_lines)
-        self.logger.info(f"Initialized a new ROI tracker: \nParameters:\n{param_block}")
-        self.count = 1
-        # Initialize rolling window
-        current_frame_proj = np.max(self.current_frame, axis=0)
-        self.window_frames = [current_frame_proj]
-        # Initialize queries
-        self.queries_init = self._initialize_queries(current_frame_proj, self.roi_init)
-        self.tracks = []
-        # Initialize tracked points
-        self.tracked_points = [copy.copy(self.center_point_init)]
-        self.tracking_state = TrackingState.TRACKING_ON
+
+        # Initialize rolling window, queries, tracked points
+        if first_frame :
+            # Initialize window
+            self.current_frame = self._downsample(first_frame)
+            self.shape = self.current_frame.shape
+            self.center_point_init = self.roi_init.to_position3D(z=self.shape[0]//2)
+            self.current_frame_proj = np.max(self.current_frame, axis=0)
+            self.window_frames = [self.current_frame_proj]
+            # Initialize queries
+            self.queries_init = self._initialize_queries(self.current_frame_proj, self.roi_init)
+            self.tracks = []
+            # Initialize tracked points
+            self.tracked_points = [copy.copy(self.center_point_init)]
+            self.tracking_state = TrackingState.TRACKING_ON
+            self.count = 1
+        else :
+            self.window_frames = []
+            self.tracking_state = TrackingState.WAIT_FOR_NEXT_TIME_POINT
+            self.count = 0
+       
         self.detected = False
 
         # Initialize model
@@ -106,6 +103,17 @@ class SingleRoIBaseTracker_v2 :
         self.predicted_points = [self.roi_init.to_position2D()]
         self.detected_points = [self.roi_init.to_position2D()]
 
+        # Set default logger
+        self.logger = init_logger(self.__class__.__name__)
+        self.logger.info(f"Initialized {self.__class__.__name__}")
+        param_lines = [f"  {k}: {v}" for k, v in vars(self).items()
+                if not k.startswith('_') and k in ["scaling_factor", "window_length", "grid_size",
+                                                    "shape", "kernel_size_xy", "kernel_size_z",
+                                                    "use_detection", "serverkit", "k", "c0", "containment_threshold",
+                                                    "score_threshold", "size_ratio_threshold"]]
+        param_block = "\n".join(param_lines)
+        self.logger.info(f"Initialized a new ROI tracker: \nParameters:\n{param_block}")
+
     def compute_new_position(self, frame) :
         """Compute the new position of the ROI in the given image.
         Make use of the dataclasses defined in tracking_tools/utils/structures.
@@ -118,6 +126,22 @@ class SingleRoIBaseTracker_v2 :
         """
         if self.tracking_state != TrackingState.TRACKING_OFF :
             self.count += 1
+
+            # If first frame, process it and return 0 shift
+            if self.window_frames == [] :
+                # Initialize window
+                self.current_frame = self._downsample(frame)
+                self.shape = self.current_frame.shape
+                self.center_point_init = self.roi_init.to_position3D(z=self.shape[0]//2)
+                self.current_frame_proj = np.max(self.current_frame, axis=0)
+                self.window_frames = [self.current_frame_proj]
+                # Initialize queries
+                self.queries_init = self._initialize_queries(self.current_frame_proj, self.roi_init)
+                self.tracks = [np.empty((0, 2))]
+                # Initialize tracked points
+                self.tracked_points = [copy.copy(self.center_point_init)]
+                self.tracking_state = TrackingState.TRACKING_ON
+                return Position3D.invalid(), TrackingState.WAIT_FOR_NEXT_TIME_POINT # Placeholder return
 
             # Process input frame
             frame = self._downsample(frame)
@@ -502,9 +526,6 @@ class MultiRoIBaseTracker :
         self.kernel_size_xy = base_kernel_size_xy // (2**scaling_factor)
         self.kernel_size_z = kernel_size_z
         self.log = log
-        self.current_frame = self._downsample(first_frame)
-        self.shape = self.current_frame.shape
-        self.current_frame_proj = np.max(self.current_frame, axis=0)
         self.use_detection = False ############# NO detection for multi roi
         self.containment_threshold = containment_threshold
         self.k = k
@@ -514,35 +535,29 @@ class MultiRoIBaseTracker :
         self.model_path = model_path
 
         # Convert to ROI dataclass, downscale rois
-        self.rois = [ROI(**roi).scale(scaling_factor=self.scaling_factor, down=True) for roi in rois]
-
-        # Set default logger
-        self.logger = init_logger(self.__class__.__name__)
-        self.logger.info(f"Initialized {self.__class__.__name__}")
-        param_lines = [f"  {k}: {v}" for k, v in vars(self).items()
-                if not k.startswith('_') and k in ["scaling_factor", "window_length", "grid_size",
-                                                    "shape", "kernel_size_xy", "kernel_size_z",
-                                                    "use_detection", "serverkit", "k", "c0", "containment_threshold",
-                                                    "score_threshold", "size_ratio_threshold"]]
-        param_block = "\n".join(param_lines)
-        self.logger.info(f"Initialized a new ROI tracker: \nParameters:\n{param_block}")
-        self.count = 1
+        self.rois = [ROI(**roi).scale(scaling_factor=self.scaling_factor, down=True) for roi in rois]      
 
         if use_detection == True :
             self.logger.warning("Detection set to False, not supported for MultiROI")
 
-        # Initialize rolling window
-        current_frame_proj = np.max(self.current_frame, axis=0)
-        self.window_frames = [current_frame_proj]
-
-        # Initialize queries
-        self.queries_init, self.queries_lengths_init = self._initialize_queries(current_frame_proj, self.rois)
-        self.tracks = []
-
-        # Initialize tracked points
-        self.tracked_points = [[roi.to_position3D(z=self.shape[0]//2) for roi in self.rois]]
-        self.tracking_state = TrackingState.TRACKING_ON
-        self.detected = False
+        # Initialize rolling window, queries, tracked points
+        if first_frame :
+            # Initialize window
+            self.current_frame = self._downsample(first_frame)
+            self.shape = self.current_frame.shape
+            self.current_frame_proj = np.max(self.current_frame, axis=0)
+            self.window_frames = [self.current_frame_proj]
+            # Initialize queries
+            self.queries_init, self.queries_lengths_init = self._initialize_queries(self.current_frame_proj, self.rois)
+            self.tracks = []
+            # Initialize tracked points
+            self.tracked_points = [[roi.to_position3D(z=self.shape[0]//2) for roi in self.rois]]
+            self.tracking_state = TrackingState.TRACKING_ON
+            self.count = 1
+        else :
+            self.window_frames = []
+            self.tracking_state = TrackingState.WAIT_FOR_NEXT_TIME_POINT
+            self.count = 0
 
         # Initialize model
         self.predictor = self.initialize_predictor(serverkit, server_addresses=server_addresses)
@@ -554,6 +569,18 @@ class MultiRoIBaseTracker :
         self.rois_list = [self.rois]
         self.predicted_points = [[roi.to_position2D() for roi in self.rois]]
         # self.detected_points = [self.roi_init.to_position2D()]  #### DETECTION NOT TRIVIAL FOR MULTI ROI
+        self.detected = False
+
+        # Set default logger
+        self.logger = init_logger(self.__class__.__name__)
+        self.logger.info(f"Initialized {self.__class__.__name__}")
+        param_lines = [f"  {k}: {v}" for k, v in vars(self).items()
+                if not k.startswith('_') and k in ["scaling_factor", "window_length", "grid_size",
+                                                    "shape", "kernel_size_xy", "kernel_size_z",
+                                                    "use_detection", "serverkit", "k", "c0", "containment_threshold",
+                                                    "score_threshold", "size_ratio_threshold"]]
+        param_block = "\n".join(param_lines)
+        self.logger.info(f"Initialized a new ROI tracker: \nParameters:\n{param_block}")
 
     def compute_new_positions(self, frame) :
         """Compute the new position of the ROIs in the given image.
@@ -567,6 +594,22 @@ class MultiRoIBaseTracker :
         """
         if self.tracking_state != TrackingState.TRACKING_OFF :
             self.count += 1
+
+            # If first frame, process it and return 0 shift
+            if self.window_frames == [] :
+                # Initialize window
+                self.current_frame = self._downsample(frame)
+                self.shape = self.current_frame.shape
+                self.current_frame_proj = np.max(self.current_frame, axis=0)
+                self.window_frames = [self.current_frame_proj]
+                # Initialize queries
+                self.queries_init, self.queries_lengths_init = self._initialize_queries(self.current_frame_proj, self.rois)
+                self.tracks = [np.empty((0, 2))]
+                # Initialize tracked points
+                self.tracked_points = [[roi.to_position3D(z=self.shape[0]//2) for roi in self.rois]]
+                self.tracking_state = TrackingState.TRACKING_ON
+                self.detected = False
+                return Position3D.invalid(), TrackingState.WAIT_FOR_NEXT_TIME_POINT # Placeholder return
 
             # Process input frame
             frame = self._downsample(frame)
@@ -824,6 +867,7 @@ class MultiRoIBaseTracker :
 
             if len(points) == 0:
                 self.logger.warning(f"No query points generated for RoI {roi.order}.")
+                total_points.append(np.empty((0, 2)))
             else :
                 total_points.append(points)
                 queries_lengths.append(len(points))

@@ -33,12 +33,22 @@ class PositionTrackerSingleRoI_v2 :
         if isinstance(rois, list) :
             self.roi = rois[0]
 
-        self.shape = first_frame.shape
         self.scaling_factor = roi_tracker_params["scaling_factor"]
         self.position_name = position_name
         self.pixel_size_xy = position_tracker_params["pixel_size_xy"]
         self.pixel_size_z = position_tracker_params["pixel_size_z"]
         self.log = log
+
+        if first_frame :
+            self.shape = first_frame.shape
+            self.positions = [Position3D(x=self.roi['x'], y=self.roi['y'], z=self.shape[0]//2)]
+            self.ref_position = Position3D(x=self.roi['x'], y=self.roi['y'], z=self.shape[0]//2)
+            self.tracking_state = self.base_tracker.tracking_state
+        else :
+            self.shape = None
+            self.positions = None
+            self.ref_position = None
+            self.tracking_state = TrackingState.WAIT_FOR_NEXT_TIME_POINT
 
         # Initialize Tracker
         base_tracker_params = {k:v for k, v in roi_tracker_params.items() if k not in ["pixel_size_xy", "pixel_size_z"]}
@@ -52,10 +62,7 @@ class PositionTrackerSingleRoI_v2 :
         self.base_tracker = self.initialize_tracker(base_tracker_params)
 
         # Initialize tracking vars
-        self.tracking_state = self.base_tracker.tracking_state
         self.tracking_state_list = [self.tracking_state]
-        self.positions = [Position3D(x=self.roi['x'], y=self.roi['y'], z=self.shape[0]//2)]
-        self.ref_position = Position3D(x=self.roi['x'], y=self.roi['y'], z=self.shape[0]//2)
         self.ref_position_list = [copy.copy(self.ref_position)]
         self.shifts_px = []
         self.shifts_um = []
@@ -71,6 +78,16 @@ class PositionTrackerSingleRoI_v2 :
 
 
     def compute_shift_um(self, frame) :
+        # if first frame initialize pos_tracker and base_tracker and return 0 shift
+        if self.shape == None :
+            self.shape = frame.shape
+            self.positions = [Position3D(x=self.roi['x'], y=self.roi['y'], z=self.shape[0]//2)]
+            self.ref_position = Position3D(x=self.roi['x'], y=self.roi['y'], z=self.shape[0]//2)
+            new_positions, tracking_state = self.base_tracker.compute_new_position(frame)
+            self.shifts_px.append(Shift3D(x=0, y=0, z=0))
+            self.shifts_um.append(Shift3D(x=0, y=0, z=0))
+            return Shift3D(x=0, y=0, z=0), TrackingState.WAIT_FOR_NEXT_TIME_POINT
+
         # Check for frame shape 
         if frame.shape != self.shape :
             self.logger.warning(f"Image shape is not {self.shape}, Skipping image")
@@ -202,8 +219,8 @@ class PositionTrackerSingleRoI_v2 :
 class PositionTrackerMultiROI :
     def __init__(
         self,
-        first_frame,
         rois,
+        first_frame,
         log,
         use_detection,
         position_name,
@@ -223,12 +240,23 @@ class PositionTrackerMultiROI :
         """
 
         self.rois = rois
-        self.shape = first_frame.shape
         self.scaling_factor = roi_tracker_params["scaling_factor"]
         self.position_name = position_name
         self.pixel_size_xy = position_tracker_params["pixel_size_xy"]
         self.pixel_size_z = position_tracker_params["pixel_size_z"]
         self.log = log
+
+        if first_frame :
+            self.shape = first_frame.shape
+            self.positions = [Position3D(x=self.rois[0]['x'], y=self.rois[0]['y'], z=self.shape[0]//2)]
+            self.ref_position = Position3D(x=self.rois[0]['x'], y=self.rois[0]['y'], z=self.shape[0]//2)
+            self.tracking_state = self.base_tracker.tracking_state
+        else :
+            self.shape = None
+            self.positions = None
+            self.ref_position = None
+            self.tracking_state = TrackingState.WAIT_FOR_NEXT_TIME_POINT
+
 
         # Initialize Tracker
         base_tracker_params = {k:v for k, v in roi_tracker_params.items() if k not in ["pixel_size_xy", "pixel_size_z"]}
@@ -242,13 +270,10 @@ class PositionTrackerMultiROI :
         self.base_tracker = self.initialize_tracker(base_tracker_params)
 
         # Initialize tracking vars
-        self.tracking_state = self.base_tracker.tracking_state
-        self.tracking_state_list = [self.tracking_state]
-        self.positions = [Position3D(x=self.rois[0]['x'], y=self.rois[0]['y'], z=self.shape[0]//2)]
-        self.ref_position = Position3D(x=self.rois[0]['x'], y=self.rois[0]['y'], z=self.shape[0]//2)
         self.ref_position_list = [copy.copy(self.ref_position)]
         self.shifts_px = []
         self.shifts_um = []
+        self.tracking_state_list = [self.tracking_state]
 
         # Set default logger
         self.logger = init_logger("PositionTrackerMultiROI")
@@ -261,6 +286,16 @@ class PositionTrackerMultiROI :
 
 
     def compute_shift_um(self, frame) :
+        # if first frame initialize pos_tracker and base_tracker and return 0 shift
+        if self.shape == None :
+            self.shape = frame.shape
+            self.positions = [Position3D(x=self.rois[0]['x'], y=self.rois[0]['y'], z=self.shape[0]//2)]
+            self.ref_position = Position3D(x=self.rois[0]['x'], y=self.rois[0]['y'], z=self.shape[0]//2)
+            new_positions, tracking_state = self.base_tracker.compute_new_positions(frame)
+            self.shifts_px.append(Shift3D(x=0, y=0, z=0))
+            self.shifts_um.append(Shift3D(x=0, y=0, z=0))
+            return Shift3D(x=0, y=0, z=0), TrackingState.WAIT_FOR_NEXT_TIME_POINT
+
         # Check for frame shape 
         if frame.shape != self.shape :
             self.logger.warning(f"Image shape is not {self.shape}, Skipping image")

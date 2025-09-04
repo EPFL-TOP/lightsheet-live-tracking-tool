@@ -35,6 +35,8 @@ class TrackingRunner() :
         self.positions_config = positions_config
         if self.positions_config == {} :
             raise ValueError(f"position_config must not be empty : {self.positions_config}")
+        # Lookup table to get positions_config key from the position name
+        self.position_name_to_PosSetting = {config["Position"]: name for name, config in self.positions_config.items()}
         self.log_dir_name = runner_params["log_dir_name"]
         self.log = runner_params["log"]
         self.scaling_factor = roi_tracker_params["scaling_factor"]
@@ -61,7 +63,13 @@ class TrackingRunner() :
         # Enable pause after position
         self.microscope.pause_after_position()
         # Run main tracking loop
-        # Inititalize timeout to False for logging
+
+        # Initialize trackers before main loop
+        self.logger.info(f"Initializing trackers")
+        for position_name in self.position_names :
+            self.initialize_tracker(position_name)
+        
+        self.logger.info(f"Main tracking loop")
         timeout = False
         while not self.stop_requested :
             
@@ -78,7 +86,7 @@ class TrackingRunner() :
                 self.logger.info(f"Timepoint {time_point}, Position {position_name}")
             
             # Read image
-            PosSetting = [name for name in self.positions_config.keys() if position_name in name][0]
+            PosSetting = self.position_name_to_PosSetting[position_name]
             settings = self.positions_config[PosSetting]['Settings']
             channel = self.positions_config[PosSetting]['channel']
             image = self.reader.read_image(position_name, settings, channel, time_point)
@@ -87,9 +95,8 @@ class TrackingRunner() :
                 self.stop()
                 continue
             
-            # If tracker for position do not exist, create tracker
+            # If tracker for position do not exist, skip
             if position_name not in self.trackers.keys() :
-                self.initialize_tracker(position_name, time_point, image)
                 self.microscope.continue_from_pause()
             else :
                 if self.tracking_state_dict[position_name] != TrackingState.TRACKING_OFF :
@@ -99,15 +106,17 @@ class TrackingRunner() :
         self.microscope.no_pause_after_position()
         self.microscope.disconnect()
 
-    def initialize_tracker(self, position_name, time_point, image) :
-        PosSetting = [name for name in self.positions_config.keys() if position_name in name][0]
+    def initialize_tracker(self, position_name, image=None, time_point=None) :
+        PosSetting = self.position_name_to_PosSetting[position_name]
         use_detection = self.positions_config[PosSetting]['use_detection']
         # Append starting point
-        with open(self.dirpath / PosSetting / self.log_dir_name / "tracking_parameters.json", "r") as json_file:
-            to_save = json.load(json_file)
-        to_save['starting_time_point'] = time_point
-        with open(self.dirpath / PosSetting / self.log_dir_name / "tracking_parameters.json", 'w') as json_file:
-            json.dump(to_save, json_file, indent=4)
+        if time_point :
+            with open(self.dirpath / PosSetting / self.log_dir_name / "tracking_parameters.json", "r") as json_file:
+                to_save = json.load(json_file)
+            to_save['starting_time_point'] = time_point
+            with open(self.dirpath / PosSetting / self.log_dir_name / "tracking_parameters.json", 'w') as json_file:
+                json.dump(to_save, json_file, indent=4)
+        # Initialize tracker
         rois = self.positions_config[PosSetting]['RoIs']
         tracker = self.tracker_class(
             first_frame=image,
@@ -130,8 +139,9 @@ class TrackingRunner() :
             self.microscope.relative_move(position_name, shift_um.x, shift_um.y, shift_um.z)
 
             if self.log:
-                PosSetting = [name for name in self.positions_config.keys() if position_name in name][0]
+                PosSetting = self.position_name_to_PosSetting[position_name]
                 log_dir = self.dirpath / PosSetting / self.log_dir_name
+                self.logger.info(f"Saving logs in {log_dir}")
                 shifts_px = tracker.get_shifts_px()
                 shifts_um = tracker.get_shifts_um()
                 current_roi = tracker.get_current_rois()
