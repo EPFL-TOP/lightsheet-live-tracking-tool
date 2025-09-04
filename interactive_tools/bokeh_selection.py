@@ -28,8 +28,8 @@ except ModuleNotFoundError:
     print("Module 'tail_detection_visu' not found. Ensure the training_tools package is installed or available in the PYTHONPATH.")
 
 
-#_______________________________________________________
-def make_document(doc):
+
+def make_layout():
     #### SHARED VARIABLES ######
     updating = False
     detect_model = None
@@ -516,13 +516,13 @@ def make_document(doc):
         print(dirname, '   ',channel)
 
 
-
         for i, (x, y, w, h) in enumerate(zip(data.get('x', []), data.get('y', []), data.get('width', []), data.get('height', []))):
             out.append({'x': x*scaling, 'y': initial_shape[0] - y*scaling, 'width': w*scaling, 'height': h*scaling, 'order': i+1})
 
         use_detection = False
         if 0 in checkbox_detection.active: use_detection = True
-        outdict = {'channel':channel, 'shape':original_source.data["image"][0].shape, 'RoIs':out, 'detection':use_detection}
+
+        outdict = {'channel':channel, 'shape':original_source.data["image"][0].shape, 'RoIs':out, 'detection':use_detection, "init_filename": os.path.basename(filename)}
         out_dirname = os.path.join(dirname, "embryo_tracking")
         if not os.path.isdir(out_dirname):
             os.mkdir(out_dirname)
@@ -699,8 +699,20 @@ def make_document(doc):
             p,column(checkbox_maxproj,dropdown_downscale, contrast_slider, dropdown_model,detect_button, checkbox_detection, mask_alpha_slider, points_alpha_slider)
         ), 
         slider_layout, controls, status_layout,status_layout2)
+    
+    return layout
+
+
+
+
+#_______________________________________________________
+def make_document(doc):
+    layout = make_layout()
     doc.title = 'Tracking selection'
     doc.add_root(layout)
+
+
+
 
 #_______________________________________________________
 def get_free_port():

@@ -18,8 +18,8 @@ import imageio
 
 last_tp = -1
 
-#_______________________________________________________
-def make_document(doc):
+
+def make_layout():
 
     initial_img = np.random.randint(0, 255, (1000, 1000), dtype=np.uint8)[::-1]
 
@@ -523,6 +523,13 @@ def make_document(doc):
     right_col = column(shifts_row, trajectory_row)
     layout = row(left_col, right_col)
 
+    return layout
+
+
+
+#_______________________________________________________
+def make_document(doc):
+    layout = make_layout()
     doc.title = 'Tracking visualisation'
     doc.add_root(layout)
 
