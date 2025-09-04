@@ -35,6 +35,8 @@ class TrackingRunner() :
         self.positions_config = positions_config
         if self.positions_config == {} :
             raise ValueError(f"position_config must not be empty : {self.positions_config}")
+        # Lookup table to get positions_config key from the position name
+        self.position_name_to_PosSetting = {config["Position"]: name for name, config in self.positions_config.items()}
         self.log_dir_name = runner_params["log_dir_name"]
         self.log = runner_params["log"]
         self.scaling_factor = roi_tracker_params["scaling_factor"]
@@ -84,7 +86,7 @@ class TrackingRunner() :
                 self.logger.info(f"Timepoint {time_point}, Position {position_name}")
             
             # Read image
-            PosSetting = [name for name in self.positions_config.keys() if position_name in name][0]
+            PosSetting = self.position_name_to_PosSetting[position_name]
             settings = self.positions_config[PosSetting]['Settings']
             channel = self.positions_config[PosSetting]['channel']
             image = self.reader.read_image(position_name, settings, channel, time_point)
@@ -106,7 +108,7 @@ class TrackingRunner() :
         self.microscope.disconnect()
 
     def initialize_tracker(self, position_name, image=None, time_point=None) :
-        PosSetting = [name for name in self.positions_config.keys() if position_name in name][0]
+        PosSetting = self.position_name_to_PosSetting[position_name]
         use_detection = self.positions_config[PosSetting]['use_detection']
         # Append starting point
         if time_point :
@@ -138,8 +140,9 @@ class TrackingRunner() :
             self.microscope.relative_move(position_name, shift_um.x, shift_um.y, shift_um.z)
 
             if self.log:
-                PosSetting = [name for name in self.positions_config.keys() if position_name in name][0]
+                PosSetting = self.position_name_to_PosSetting[position_name]
                 log_dir = self.dirpath / PosSetting / self.log_dir_name
+                self.logger.info(f"Saving logs in {log_dir}")
                 shifts_px = tracker.get_shifts_px()
                 shifts_um = tracker.get_shifts_um()
                 current_roi = tracker.get_current_rois()
