@@ -7,6 +7,7 @@ import yaml
 import threading
 from tornado.ioloop import IOLoop
 from bokeh.server.server import Server
+import subprocess
 
 LAUNCH_DIR = os.getcwd()
 
@@ -34,6 +35,19 @@ def run_server(PYMCSDIR):
     threading.Thread(target=run_script_gui, args=(PYMCSDIR,), daemon=True).start()
     io_loop.start()
 
+def run_panel(PYMCSDIR):
+
+    process = subprocess.Popen(
+        ["panel", "serve", "interactive_tools/panel_app.py", "--dev", "--show", "--port", "5021"],
+    )
+    port = 5021
+
+    print(f"Bokeh server running at http://localhost:{port}")
+    io_loop = IOLoop.current()
+
+    threading.Thread(target=run_script_gui, args=(PYMCSDIR,), daemon=True).start()
+    io_loop.start()
+
 # executed if script started from terminal
 if __name__ == "__main__":
     PYMCSDIR=sys.argv[1]
@@ -43,7 +57,8 @@ if __name__ == "__main__":
     if LAUNCH_DIR not in sys.path:
         sys.path.insert(0, LAUNCH_DIR)
 
-    run_server(PYMCSDIR)
+    #run_server(PYMCSDIR)
+    run_panel(PYMCSDIR)
 
 
     #from interactive_tools import bokeh_selection
