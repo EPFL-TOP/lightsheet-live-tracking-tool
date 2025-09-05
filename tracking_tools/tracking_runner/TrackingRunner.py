@@ -60,14 +60,14 @@ class TrackingRunner() :
         self.to_save = {}
 
     def run(self) :
-        # Enable pause after position
-        self.microscope.pause_after_position()
-        # Run main tracking loop
 
         # Initialize trackers before main loop
         self.logger.info(f"Initializing trackers")
         for position_name in self.position_names :
             self.initialize_tracker(position_name)
+
+        # Enable pause after position after initialisation to avoid timing problems
+        self.microscope.pause_after_position()
         
         self.logger.info(f"Main tracking loop")
         timeout = False
