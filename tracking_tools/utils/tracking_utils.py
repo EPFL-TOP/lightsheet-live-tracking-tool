@@ -215,3 +215,28 @@ def generate_uniform_grid_in_region(image, center_point, hws, grid_size, median_
     if return_mask :
         return grid_points, thresholded
     return grid_points
+
+
+def generate_uniform_grid_in_region_list(image, center_point_list, hws_list, grid_size, median_kernel=0, gaussian_kernel=11, threshold_type="otsu", return_mask=False) :
+    ndims = image.ndim
+    assert ndims == 2
+    assert len(center_point_list) == len(hws_list)
+
+    thresholded = filter_and_threshold(image, median_kernel, gaussian_kernel, threshold_type)
+    grid_coords = generate_grid(image.shape, grid_size=grid_size)
+
+    points = []
+    points_lengths = []
+
+    for center_point, hws in zip(center_point_list, hws_list) :
+        box = get_box(image.shape, center_point, hws)
+        segm_mask = np.logical_and(box, thresholded)
+        inside_mask = segm_mask[grid_coords[:,1], grid_coords[:,0]]
+        new_points = grid_coords[inside_mask]
+        points.append(new_points)
+        points_lengths.append(len(new_points))
+    points = np.vstack(points) if points else np.empty((0, 2), dtype=int)
+
+    if return_mask :
+        return points, points_lengths, thresholded
+    return points, points_lengths
