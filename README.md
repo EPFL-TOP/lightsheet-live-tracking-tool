@@ -12,7 +12,7 @@
 
 | 2D multi-ROIs |
 |:------------------------:|
-| ![2D multi-ROIs](videos/Fluo-C2DL-Huh7-01_Settings_1.gif) |
+| <img src="videos/Fluo-C2DL-Huh7-01_Settings_1.gif" alt="Databay showcase gif" title="Databay showcase gif" width="500"/> |
 
 
 
