@@ -9,6 +9,13 @@
 |:------------------------:|
 | ![Shifts and Trajectories](videos/shifts_and_trajectories.gif) |
 
+
+| 2D multi-ROIs |
+|:------------------------:|
+| ![2D multi-ROIs](videos/Fluo-C2DL-Huh7-01_Settings_1.gif) |
+
+
+
 ## Installation
 
 ### Recommended Python Version
