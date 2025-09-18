@@ -849,35 +849,57 @@ class MultiRoIBaseTracker :
 
         Args:
             frame (np.ndarray): Input frame (2D)
-            roi (ROI): Input ROI
+            list(rois) (ROI): Input ROIs
 
         Returns:
             np.ndarray: Nx2 array of points coordinates
         """
 
-        total_points = []
-        queries_lengths = []
-        # Loop over rois
+        center_points_list = []
+        hws_list = []
+
         for roi in rois :
-            # Build bounding box
-            center_point = roi.to_position2D().to_array(order='yx')
-            hws = [roi.height / 2, roi.width / 2]
+            center_points_list.append(roi.to_position2D().to_array(order='yx'))
+            hws_list.append([roi.height / 2, roi.width / 2])
 
-            points = generate_uniform_grid_in_region(frame, center_point, hws, grid_size=self.grid_size, gaussian_kernel=self.kernel_size_xy)
+        points, queries_lengths = generate_uniform_grid_in_region_list(frame, center_points_list, hws_list, grid_size=self.grid_size, gaussian_kernel=self.kernel_size_xy)
 
-            if len(points) == 0:
+        # Log warning for no points
+        for i, roi in enumerate(rois) :
+            length = queries_lengths[i]
+            if length == 0:
                 self.logger.warning(f"No query points generated for RoI {roi.order}.")
-                total_points.append(np.empty((0, 2)))
-            else :
-                total_points.append(points)
-                queries_lengths.append(len(points))
 
-        if total_points:
-            return np.vstack(total_points), queries_lengths
+        if points.any() :
+            return points, queries_lengths
         else :
             self.logger.warning("No query points generated for any ROIs")
             self.tracking_state = TrackingState.WAIT_FOR_NEXT_TIME_POINT
             return np.empty((0, 2)), queries_lengths # No points from any rois
+
+        # total_points = []
+        # queries_lengths = []
+        # # Build regions 
+        # for roi in rois :
+        #     # Build bounding box
+        #     center_point = roi.to_position2D().to_array(order='yx')
+        #     hws = [roi.height / 2, roi.width / 2]
+
+        #     points = generate_uniform_grid_in_region(frame, center_point, hws, grid_size=self.grid_size, gaussian_kernel=self.kernel_size_xy)
+
+        #     if len(points) == 0:
+        #         self.logger.warning(f"No query points generated for RoI {roi.order}.")
+        #         total_points.append(np.empty((0, 2)))
+        #     else :
+        #         total_points.append(points)
+        #         queries_lengths.append(len(points))
+
+        # if total_points:
+        #     return np.vstack(total_points), queries_lengths
+        # else :
+        #     self.logger.warning("No query points generated for any ROIs")
+        #     self.tracking_state = TrackingState.WAIT_FOR_NEXT_TIME_POINT
+        #     return np.empty((0, 2)), queries_lengths # No points from any rois
 
     
     def _normalize_percentile(self, video_batch) :
