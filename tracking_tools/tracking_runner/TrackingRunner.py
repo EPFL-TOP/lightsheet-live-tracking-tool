@@ -59,7 +59,7 @@ class TrackingRunner() :
         self.logger = init_logger("TrackingRunner")
         self.to_save = {}
 
-    def run(self) :
+    def run_LS1(self) :
 
         # Initialize trackers before main loop
         self.logger.info(f"Initializing trackers")

@@ -4,6 +4,7 @@ from dataclasses import asdict
 from ..utils.structures import ROI, Position3D, Shift3D
 import copy
 from ..tracker.status import TrackingState, ReturnStatus
+from  ..utils.tracking_utils import compute_Fis, sweepLine2D, clamp, prioritized_intersection
 
 
 class PositionTrackerSingleRoI_v2 :
@@ -123,9 +124,8 @@ class PositionTrackerSingleRoI_v2 :
         shift_px = self.compute_shift_px(new_position, roi)
 
         # Convert into um
-        # Y Axis is inverted for the microscope stage coordinate
         shift_x_um = self.convert_px_um(shift_px.x, self.pixel_size_xy, invert=False)
-        shift_y_um = self.convert_px_um(shift_px.y, self.pixel_size_xy, invert=True)
+        shift_y_um = self.convert_px_um(shift_px.y, self.pixel_size_xy, invert=False)
         shift_z_um = self.convert_px_um(shift_px.z, self.pixel_size_z, invert=False)
         shift_um = Shift3D(x=shift_x_um, y=shift_y_um, z=shift_z_um)
         self.shifts_um.append(shift_um)
@@ -275,6 +275,11 @@ class PositionTrackerMultiROI :
         self.shifts_um = []
         self.tracking_state_list = [self.tracking_state]
 
+        try :
+            self.mode = position_tracker_params["mode"]
+        except :
+            self.mode = "SingleROI"
+
         # Set default logger
         self.logger = init_logger("PositionTrackerMultiROI")
         if self.log : 
@@ -309,7 +314,7 @@ class PositionTrackerMultiROI :
 
         
         new_positions, tracking_state = self.base_tracker.compute_new_positions(frame)
-        new_position = new_positions[0] ### Only taking the first position for now (testing)
+        new_position = new_positions[0] ### Only taking the first position
         self.positions.append(new_position)
 
         # Update tracking state
@@ -317,24 +322,20 @@ class PositionTrackerMultiROI :
         self.tracking_state_list.append(self.tracking_state)
 
         # If Tracking state is not on, do not move the microscope, return 0 shifts
-        if self.tracking_state == TrackingState.WAIT_FOR_NEXT_TIME_POINT :
+        if self.tracking_state != TrackingState.TRACKING_ON :
             self.shifts_px.append(Shift3D(x=0, y=0, z=0))
             self.shifts_um.append(Shift3D(x=0, y=0, z=0))
             self.ref_position_list.append(copy.copy(self.ref_position))
             self.base_tracker.fill_placeholders()
             return Shift3D(x=0, y=0, z=0), self.tracking_state
-        
-        # Get and scale the ROI
-        roi = copy.copy(self.base_tracker.rois_list[-1][0])
-        roi = roi * 2 ** self.scaling_factor
+    
 
         # Compute shift in pixels
-        shift_px = self.compute_shift_px(new_position, roi)
+        shift_px = self.compute_shift_px(new_position, self.base_tracker.rois_list)
 
         # Convert into um
-        # Y Axis is inverted for the microscope stage coordinate
         shift_x_um = self.convert_px_um(shift_px.x, self.pixel_size_xy, invert=False)
-        shift_y_um = self.convert_px_um(shift_px.y, self.pixel_size_xy, invert=True)
+        shift_y_um = self.convert_px_um(shift_px.y, self.pixel_size_xy, invert=False)
         shift_z_um = self.convert_px_um(shift_px.z, self.pixel_size_z, invert=False)
         shift_um = Shift3D(x=shift_x_um, y=shift_y_um, z=shift_z_um)
         self.shifts_um.append(shift_um)
@@ -344,7 +345,41 @@ class PositionTrackerMultiROI :
         return shift_um, self.tracking_state
        
     
-    def compute_shift_px(self, new_position, roi):
+    def compute_shift_px(self, new_position, rois):
+        # Get and scale ROIs
+        rois_list_scaled = []
+        rois_list = copy.copy(rois[-1])
+        for roi in rois_list :
+            roi_scaled =  roi * 2 ** self.scaling_factor
+            rois_list_scaled.append(roi_scaled)
+
+        if self.mode == "SingleROI" :
+            roi = rois_list_scaled[0]
+            shift_px = self.shift_single_roi(new_position, roi)
+
+        elif self.mode == "MultiROI_max_based_non_weighted" :
+            shift_px = self.shift_multi_roi_max_based(rois_list_scaled, weighted=False)
+
+        elif self.mode == "MultiROI_max_based_weighted" :
+            shift_px = self.shift_multi_roi_max_based(rois_list_scaled, weighted=True)
+
+        elif self.mode == "MultiROI_priority_based" :
+            shift_px = self.shift_multi_roi_priority_based(rois_list_scaled)
+
+        else :
+            raise Exception(f"Tracking mode {self.mode} not supported.")
+        
+        # Log and return
+        self.shifts_px.append(shift_px)
+        if self.log:
+            self.logger.info(
+                f"[{self.position_name}] Pixel shift: "
+                f"{shift_px}"
+            )
+        
+        return shift_px
+    
+    def shift_single_roi(self, new_position, roi) :
         D, H, W = self.shape
 
         # Compute base shift
@@ -382,14 +417,63 @@ class PositionTrackerMultiROI :
         shift_px.y += dy_correction
         shift_px.x += dx_correction
         
-        # Log and return
-        self.shifts_px.append(shift_px)
-        if self.log:
-            self.logger.info(
-                f"[{self.position_name}] Pixel shift: "
-                f"{shift_px}"
-            )
         return shift_px
+    
+    def shift_multi_roi_max_based(self, rois, weighted=False) :
+        D, H, W = self.shape
+        rois_list = []
+        for roi in rois :
+            xmin = roi.x - roi.width / 2
+            xmax = roi.x + roi.width / 2
+            ymax = H - (roi.y - roi.height / 2)
+            ymin = H - (roi.y + roi.height / 2)
+            rois_list.append((xmin, xmax, ymin, ymax))
+
+        # Create shift feasable sets of the ROIs
+        Fis = compute_Fis(H, W, rois_list)
+        # Weight the Fis (w = 1 if non weighted mode selected)
+        Fis_weighted = []
+        for i, (xmin, xmax, ymin, ymax) in enumerate(Fis) :
+            if weighted :
+                weight = len(Fis) - i
+            else :
+                weight = 1
+            Fis_weighted.append((xmin, xmax, ymin, ymax, weight))
+        # Compute the best shift region
+        max_count, best_region = sweepLine2D(Fis_weighted)
+        # Best shift as the closest point to 0 in the best region (lowest shift magnitude)
+        best_shift_x = clamp(0, best_region[0], best_region[1])
+        best_shift_y = clamp(0, best_region[2], best_region[3])
+        best_shift_z = 0 # No shift in z until a better approach is determined
+
+        shift_px = Shift3D(x=best_shift_x, y=best_shift_y, z=best_shift_z)
+
+        return shift_px
+    
+    def shift_multi_roi_priority_based(self, rois) :
+        D, H, W = self.shape
+        rois_list = []
+        for roi in rois :
+            xmin = roi.x - roi.width / 2
+            xmax = roi.x + roi.width / 2
+            ymax = H - (roi.y - roi.height / 2)
+            ymin = H - (roi.y + roi.height / 2)
+            rois_list.append((xmin, xmax, ymin, ymax))
+
+        # Create shift feasable sets of the ROIs
+        Fis = compute_Fis(H, W, rois_list)
+        # Compute the best shift region
+        best_region, selected = prioritized_intersection(Fis)
+        # Best shift as the closest point to 0 in the best region (lowest shift magnitude)
+        best_shift_x = clamp(0, best_region[0], best_region[1])
+        best_shift_y = clamp(0, best_region[2], best_region[3])
+        best_shift_z = 0 # No shift in z until a better approach is determined
+
+        shift_px = Shift3D(x=best_shift_x, y=best_shift_y, z=best_shift_z)
+
+        return shift_px
+
+        
 
     def initialize_tracker(self, params) :
         from ..tracker.BaseTracker import MultiRoIBaseTracker

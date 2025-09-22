@@ -207,7 +207,7 @@ class Script:
 
 
         from tracking_tools.tracking_runner.TrackingRunner import TrackingRunner
-        from tracking_tools.microscope_interface.MicroscopeInterface import MicroscopeInterface, SimulatedMicroscopeInterface
+        from tracking_tools.microscope_interface.MicroscopeInterface import MicroscopeInterface_LS1, SimulatedMicroscopeInterface
         from tracking_tools.position_tracker.PositionTracker import PositionTrackerSingleRoI_v2
         from tracking_tools.image_reader.ImageReader import ImageReader
         log_dir_name = runner_config['log_dir_name']
@@ -219,7 +219,7 @@ class Script:
         if simulated_microscope :
             microscope = SimulatedMicroscopeInterface(position_names=[v['Position'] for v in position_config.values()], **simulation_config)
         else :
-            microscope = MicroscopeInterface()
+            microscope = MicroscopeInterface_LS1()
 
         self.microscope = microscope
 
@@ -237,7 +237,7 @@ class Script:
             roi_tracker_params=roi_tracker_config,
             position_tracker_params=position_tracker_config,
         )
-        self.runner.run()
+        self.runner.run_LS1()
 
         print("")
         microscope.no_pause_after_position()

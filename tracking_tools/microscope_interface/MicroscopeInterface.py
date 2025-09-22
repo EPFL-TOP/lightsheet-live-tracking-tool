@@ -1,7 +1,7 @@
 import time
 from ..logger.logger import init_logger
 
-class MicroscopeInterface:
+class MicroscopeInterface_LS1:
     def __init__(self) :
         import pymcs
         self.microscope = pymcs.Microscope()
@@ -27,7 +27,7 @@ class MicroscopeInterface:
         self.stage_xyz.position_set(
             position_name=position_name,
             position_x=pos.position_x - shift_x,
-            position_y=pos.position_y - shift_y,
+            position_y=pos.position_y + shift_y,  # Y Axis is inverted for the microscope stage coordinates
             position_z=pos.position_z - shift_z,
         )
 
@@ -49,6 +49,9 @@ class SimulatedMicroscopeInterface :
         self.max_timeout = max_timeout
         # Set default logger
         self.logger = init_logger("SimulatedMicroscopeInterface")
+
+        ### CHANGED
+        self.to_save = {}
 
     def wait_for_pause(self, timeout_ms) :
         time.sleep(timeout_ms/1000)
@@ -77,6 +80,15 @@ class SimulatedMicroscopeInterface :
         return
     
     def relative_move(self, position_name, shift_x, shift_y, shift_z) :
+        # import json
+        # self.to_save[str(len(self.to_save))] = dict(
+        #     x=shift_x,
+        #     y=-shift_y,
+        #     z=shift_z
+        # )
+        # with open("shifts.json", "w") as f :
+        #     json.dump(self.to_save, f, indent=4)
+        #     f.close()
         return
     
     def connect(self) :

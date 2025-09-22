@@ -235,8 +235,150 @@ def generate_uniform_grid_in_region_list(image, center_point_list, hws_list, gri
         new_points = grid_coords[inside_mask]
         points.append(new_points)
         points_lengths.append(len(new_points))
-    points = np.vstack(points) if points else np.empty((0, 2), dtype=int)
+    points = np.vstack(points)
 
     if return_mask :
         return points, points_lengths, thresholded
     return points, points_lengths
+
+
+
+
+def compute_Fis(H, W, rois_list) :
+    Fis = []
+    for xmin, xmax, ymin, ymax in rois_list :
+        sx_min = xmax - W
+        sx_max = xmin
+        sy_min = ymax - H
+        sy_max = ymin
+        # If the ROI is too big to be contained in the window, skip it
+        if (sx_max < sx_min) or (sy_max < sy_min) :
+            continue
+        Fis.append((sx_min, sx_max, sy_min, sy_max))
+    return Fis
+
+
+#######################################
+# Maximum overlapping intervals (1D), using a sweep line algorithm
+#######################################
+
+def sweepLine1D(arr) :
+    # intervals are (ymin, ymax, weight)
+    # Create event for each start and end of segments
+    events = []
+    for ymin, ymax, w in arr :
+        events.append((ymin, +w))
+        events.append((ymax, -w))
+
+    # Sort events by coordinate, then by type (end is processed before start)
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    active = 0
+    max_count = 0
+    intervals = []
+    last_y = None
+
+    for y, typ in events :
+        if last_y is not None and active == max_count and y > last_y:
+            intervals.append((last_y, y))
+        active += typ
+        if active > max_count:
+            max_count = active
+            intervals = []
+            last_y = y
+        elif active == max_count :
+            last_y = y
+        else :
+            last_y = y
+
+    return max_count, intervals
+
+
+#######################################
+# Maximum overlapping regions (2D), using a sweep line algorithm
+# Finds the maximum number of overlaps region in O(N^2 log(N)) time
+# A Segment tree instead of a sweep for the y coordinate can reduce the complexity to O(N log(N))
+#######################################
+
+def sweepLine2D(rectangles) :
+    # rectangles are (xmin, xmax, ymin, ymax, weight)
+
+    # Create event in x
+    events = []
+    for xmin, xmax, ymin, ymax, w in rectangles:
+        events.append((xmin, +w, (xmin, xmax, ymin, ymax)))
+        events.append((xmax, -w, (xmin, xmax, ymin, ymax)))
+
+    # Sort by x coordinates, and by type (leaves are processed before enters)
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    active = []
+    max_count = 0
+    best_region = None
+
+    for i in range(len(events) - 1) :
+        x, w, (xmin, xmax, ymin, ymax) = events[i]
+        if w > 0: # start
+            active.append((ymin, ymax, w))
+        else : #end
+            active.remove((ymin, ymax, -w))
+
+        next_x = events[i + 1][0]
+        if next_x == x :
+            continue # Zero width slab, skip
+
+        if active:
+            count, y_intervals = sweepLine1D(active)
+            if count > max_count :
+                max_count = count
+                # Take the first max interval in case of ties
+                if y_intervals :
+                    ymin, ymax = y_intervals[0]
+                    best_region = (x, next_x, ymin, ymax)
+
+    return max_count, best_region
+
+
+
+
+def clamp(val, low, high) :
+    if val < low :
+        return low
+    elif val > high :
+        return high
+    return val
+
+
+
+###############################################
+# Prioritized intersection
+###############################################
+
+def compute_intersection(rectangles) :
+    xmin = max([rect[0] for rect in rectangles])
+    xmax = min([rect[1] for rect in rectangles])
+    ymin = max([rect[2] for rect in rectangles])
+    ymax = min([rect[3] for rect in rectangles])
+
+    return (xmin, xmax, ymin, ymax)
+
+
+def prioritized_intersection(Fis) :
+    # Compute the intersection of intersection(F until n-1) and F n
+    # If the intersection does not exists, skip F n
+    # F 1 will always be included in the final intersection
+    # Weaker Fis are discarded over stronger ones
+
+    current = [Fis[0]]
+    selected = [0] # indices of kept ROIs
+    final_intersection = Fis[0]
+
+    for i, test_set in enumerate(Fis[1:], start=1) :
+        new_set = current + [test_set]
+        intersection = compute_intersection(new_set)
+        if intersection[0] <= intersection[1] and intersection[2] <= intersection[3] : # If intersection exists (min < max)
+            selected.append(i)
+            current = [intersection]
+            final_intersection = intersection
+    
+    return final_intersection, selected
