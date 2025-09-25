@@ -109,6 +109,7 @@ class TrackingRunner() :
     def initialize_tracker(self, position_name, image=None, time_point=None) :
         PosSetting = self.position_name_to_PosSetting[position_name]
         use_detection = self.positions_config[PosSetting]['use_detection']
+        tracking_mode = self.positions_config[PosSetting]["tracking_mode"]
         # Append starting point
         if time_point :
             with open(self.dirpath / PosSetting / self.log_dir_name / "tracking_parameters.json", "r") as json_file:
@@ -123,6 +124,7 @@ class TrackingRunner() :
             rois=rois,
             log=self.log,
             use_detection=use_detection,
+            tracking_mode=tracking_mode,
             position_name=position_name,
             roi_tracker_params=self.roi_tracker_params,
             position_tracker_params=self.position_tracker_params,
