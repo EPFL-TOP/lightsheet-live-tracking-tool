@@ -9,6 +9,13 @@
 |:------------------------:|
 | ![Shifts and Trajectories](videos/shifts_and_trajectories.gif) |
 
+
+| 2D multi-ROIs |
+|:------------------------:|
+| <img src="videos/Fluo-C2DL-Huh7-01_Settings_1.gif" alt="Databay showcase gif" title="Databay showcase gif" width="500"/> |
+
+
+
 ## Installation
 
 ### Recommended Python Version
