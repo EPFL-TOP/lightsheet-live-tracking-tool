@@ -146,26 +146,15 @@ class Script:
         self._figure_color_indexes = []
         self._available_colors = ['b', 'r', 'g', 'y']
 
-    def run(self, parameter_values, update_figures_callback):
-        """
-        Called by the user interface to run the script.
+    def _run_workers(self, parameter_values, update_figure_callback) :
+        """Worker thread for the long-running tracking loop."""
 
-        Parameters
-        ----------
-        parameter_values : list
-            List of parameter values.
-        figures : list
-            List of figure(s) on which the script can plot.
-        update_figure_callback : method
-            Callback method to update figure in the user interface.
+        try :
+            self._run_loop(parameter_values)
+        finally :
+            print("Worker finished")
 
-        Notes
-        -----
-        The user interface initializes empty figures and provides them
-        for plotting to this method. To update figures in the user interface
-        update_figure_callback should be called
-        """
-
+    def _run_loop(self, parameter_values) :
         if LAUNCH_DIR not in sys.path:
             sys.path.insert(0, LAUNCH_DIR)
 
@@ -234,10 +223,36 @@ class Script:
         )
         self.runner.run_LS1()
 
-        print("")
-        microscope.no_pause_after_position()
-        microscope.disconnect()
-        print("Script stopped.")
+
+    def run(self, parameter_values, update_figures_callback):
+        """
+        Called by the user interface to run the script.
+
+        Parameters
+        ----------
+        parameter_values : list
+            List of parameter values.
+        figures : list
+            List of figure(s) on which the script can plot.
+        update_figure_callback : method
+            Callback method to update figure in the user interface.
+
+        Notes
+        -----
+        The user interface initializes empty figures and provides them
+        for plotting to this method. To update figures in the user interface
+        update_figure_callback should be called
+        """
+
+        self.stop_requested = False
+        self._thread = threading.Thread(
+            target=self._run_workers,
+            args=(parameter_values, update_figures_callback),
+            daemon=True
+        )
+        self._thread.start()
+        # Block until worker is done
+        self._thread.join()
 
     def stop(self):
         """
@@ -247,10 +262,12 @@ class Script:
         -----
         Run method should terminate once stop is called.
         """
+        ("Stop Requested")
         self.stop_requested = True
-        self.runner.stop_requested = True
-        self.microscope.no_pause_after_position()
-        self.microscope.disconnect()
+        if self.runner:
+            self.runner.stop_requested = True
+        if self._thread and self._thread.is_alive() :
+            self._thread.join(timeout=2)
     
     
     def get_figure_count(self, parameter_values):
