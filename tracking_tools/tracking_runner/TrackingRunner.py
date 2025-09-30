@@ -1,5 +1,6 @@
 import numpy as np
 from pathlib import Path
+import os
 import json
 import pickle
 from ..logger.logger import init_logger
@@ -36,12 +37,13 @@ class TrackingRunner() :
         if self.positions_config == {} :
             raise ValueError(f"position_config must not be empty : {self.positions_config}")
         # Lookup table to get positions_config key from the position name
-        self.position_name_to_PosSetting = {config["Position"]: name for name, config in self.positions_config.items()}
+        # self.position_name_to_PosSetting = {config["Position"]: name for name, config in self.positions_config.items()} ### CHANGED (removed)
         self.log_dir_name = runner_params["log_dir_name"]
         self.log = runner_params["log"]
         self.scaling_factor = roi_tracker_params["scaling_factor"]
-        self.position_names = [config['Position'] for config in positions_config.values()]
-        self.tracking_state_dict = {k:TrackingState.TRACKING_ON for k in self.position_names}
+        # self.position_names = [config['Position'] for config in positions_config.values()]     ###CHANGED (removed)
+        # self.tracking_state_dict = {k:TrackingState.TRACKING_ON for k in self.position_names} ### CHANGED
+        self.tracking_state_dict = {k:TrackingState.TRACKING_ON for k in self.positions_config.keys()}
         self.trackers = {}
         self.stop_requested = False
         self.dirpath = Path(dirpath)
@@ -49,28 +51,57 @@ class TrackingRunner() :
         self.position_tracker_params = position_tracker_params
         self.reader = image_reader(dirpath=self.dirpath, log=self.log)
 
-        for config_name in positions_config.keys() :
-            with open(self.dirpath / config_name / runner_params["log_dir_name"] / "tracking_parameters.json", 'w') as json_file:
+        # for config_name in self.positions_config.keys():
+        for config in self.positions_config.values() :   ### CHANGED
+            # with open(self.dirpath / config_name / runner_params["log_dir_name"] / "tracking_parameters.json", 'w') as json_file: ### CHANGED
+            with open(os.path.join(config["log_dir"], "tracking_parameters.json"), "w") as json_file:
                 to_save = dict()
                 to_save['scaling_factor'] = self.scaling_factor
                 json.dump(to_save, json_file, indent=4)
                 
         # Set default logger
-        self.logger = init_logger("TrackingRunner")
+        self.logger = init_logger(self.__class__.__name__)
         self.to_save = {}
+
+    def run_LS1_new(self) :
+        # Initialize trackers before main loop
+        self.logger.info(f"Initializing trackers")
+        for position_name in self.positions_config.keys() :
+            self.initialize_tracker(position_name)
+
+        # Enable pause after position after initialisation to avoid timing problems
+        self.microscope.pause_after_position()
+        self.logger.info(f"Main tracking loop")
+
+        while not self.stop_requested :
+            # Wait for a new image
+            image, time_point, position_name = self.microscope.wait_for_image(timeout_ms=self.timeout_ms)
+
+            # If tracker for position do not exist, skip
+            if position_name not in self.trackers.keys() :
+                self.microscope.continue_from_pause()
+            else :
+                if self.tracking_state_dict[position_name] != TrackingState.TRACKING_OFF :
+                    self.track_and_correct(position_name, time_point, image)
+                self.microscope.continue_from_pause()
+
+        self.microscope.no_pause_after_position()
+        self.microscope.disconnect()
+
 
     def run_LS1(self) :
 
         # Initialize trackers before main loop
         self.logger.info(f"Initializing trackers")
-        for position_name in self.position_names :
+        # for position_name in self.position_names : ### CHANGED
+        for position_name in self.positions_config.keys() :
             self.initialize_tracker(position_name)
 
         # Enable pause after position after initialisation to avoid timing problems
         self.microscope.pause_after_position()
         
         self.logger.info(f"Main tracking loop")
-        timeout = False
+        timeout = False  
         while not self.stop_requested :
             
             if self.log and not timeout:
@@ -107,8 +138,9 @@ class TrackingRunner() :
         self.microscope.disconnect()
 
     def initialize_tracker(self, position_name, image=None, time_point=None) :
-        PosSetting = self.position_name_to_PosSetting[position_name]
-        use_detection = self.positions_config[PosSetting]['use_detection']
+        # PosSetting = self.position_name_to_PosSetting[position_name] ######## CHANGED
+        PosSetting = position_name
+        use_detection = self.positions_config[PosSetting]['detection']
         tracking_mode = self.positions_config[PosSetting]["tracking_mode"]
         # Append starting point
         if time_point :
@@ -141,7 +173,8 @@ class TrackingRunner() :
             self.microscope.relative_move(position_name, shift_um.x, shift_um.y, shift_um.z)
 
             if self.log:
-                PosSetting = self.position_name_to_PosSetting[position_name]
+                # PosSetting = self.position_name_to_PosSetting[position_name] ######## CHANGED
+                PosSetting = position_name
                 log_dir = self.dirpath / PosSetting / self.log_dir_name
                 self.logger.info(f"Saving logs in {log_dir}")
                 shifts_px = tracker.get_shifts_px()
@@ -187,5 +220,7 @@ class TrackingRunner() :
             return obj
 
     def stop(self) :
-        self.stop_requested = True
+        self.microscope.stop()
         # self.microscope.no_pause_after_position()
+        self.stop_requested = True
+        

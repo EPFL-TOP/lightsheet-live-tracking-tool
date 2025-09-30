@@ -53,6 +53,8 @@ def make_layout():
         models = glob.glob(os.path.join(default_model_path,'*.pth'))
         model_detect=[os.path.split(model)[-1].replace('.pth','') for model in models]
     dropdown_model  = Select(value=downscale[0], title='Detect Model', options=model_detect)
+    tracking_modes = ["SingleROI", "MultiROI_max_rois_non_weighted", "MultiROI_max_rois_weighted", "MultiROI_priority"]
+    dropdown_tracking_mode = Select(value=tracking_modes[0], title="Tracking Mode", options=tracking_modes)
 
     # Sliders
     contrast_slider = RangeSlider(start=0, end=255, value=(0, 255), step=1, title="Contrast", width=150)
@@ -525,7 +527,7 @@ def make_layout():
         use_detection = False
         if 0 in checkbox_detection.active: use_detection = True
 
-        outdict = {'channel':channel, 'shape':original_source.data["image"][0].shape, 'RoIs':out, 'detection':use_detection, "init_filename": os.path.basename(filename)}
+        outdict = {'channel':channel, 'shape':original_source.data["image"][0].shape, 'RoIs':out, 'detection':use_detection, "tracking_mode": dropdown_tracking_mode.value}
         out_dirname = os.path.join(dirname, "embryo_tracking")
         if not os.path.isdir(out_dirname):
             os.mkdir(out_dirname)
@@ -700,7 +702,7 @@ def make_layout():
             mk_div(),select_image_button,mk_div(), select_model_button, 
         ), 
         row(
-            p,column(checkbox_maxproj,dropdown_downscale, contrast_slider, 
+            p,column(checkbox_maxproj, contrast_slider, dropdown_downscale, dropdown_tracking_mode,
                      dropdown_model,detect_button, checkbox_detection, mask_alpha_slider, 
                      points_alpha_slider, sigma_size_slider)
         ), 

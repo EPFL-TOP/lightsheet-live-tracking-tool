@@ -226,6 +226,7 @@ class PositionTrackerMultiROI :
         position_name,
         roi_tracker_params,
         position_tracker_params,
+        tracking_mode = "SingleROI",
     ) :
         """Tracks a position in a streaming video, shift cpmputation and unit conversion
 
@@ -257,8 +258,12 @@ class PositionTrackerMultiROI :
             self.ref_position = None
             self.tracking_state = TrackingState.WAIT_FOR_NEXT_TIME_POINT
 
+        self.mode = tracking_mode
 
         # Initialize Tracker
+        # Use detection only if SingleROI mode selected, else set to false by default
+        if self.mode != "SingleROI" :
+            use_detection = False
         base_tracker_params = {k:v for k, v in roi_tracker_params.items() if k not in ["pixel_size_xy", "pixel_size_z"]}
         base_tracker_params = {
             "first_frame": first_frame,
@@ -275,22 +280,24 @@ class PositionTrackerMultiROI :
         self.shifts_um = []
         self.tracking_state_list = [self.tracking_state]
 
-        try :
-            self.mode = position_tracker_params["mode"]
-        except :
-            self.mode = "SingleROI"
 
         # Set default logger
-        self.logger = init_logger("PositionTrackerMultiROI")
+        self.logger = init_logger(self.__class__.__name__)
         if self.log : 
             param_lines = [f"  {k}: {v}" for k, v in vars(self).items()
                     if not k.startswith('_') and k in ["shape", "scaling_factor", "position_name", "pixel_size_xy",
-                                                       "pixel_size_z"]]
+                                                       "pixel_size_z", "mode"]]
             param_block = "\n".join(param_lines)
             self.logger.info(f"Initialized a new position tracker for position: {self.position_name}\nParameters:\n{param_block}")
 
 
     def compute_shift_um(self, frame) :
+        # If frame is 2D, convert to 3D 
+        if frame.ndim == 2 :
+            self.logger.info("Converting 2D image to 3D")
+            frame = frame[np.newaxis, ...]
+
+
         # if first frame initialize pos_tracker and base_tracker and return 0 shift
         if self.shape == None :
             self.shape = frame.shape
@@ -311,6 +318,7 @@ class PositionTrackerMultiROI :
             self.tracking_state_list.append(self.tracking_state)
             self.base_tracker.fill_placeholders()
             return Shift3D(x=0, y=0, z=0), self.tracking_state
+        
 
         
         new_positions, tracking_state = self.base_tracker.compute_new_positions(frame)
@@ -357,13 +365,13 @@ class PositionTrackerMultiROI :
             roi = rois_list_scaled[0]
             shift_px = self.shift_single_roi(new_position, roi)
 
-        elif self.mode == "MultiROI_max_based_non_weighted" :
+        elif self.mode == "MultiROI_max_rois_non_weighted" :
             shift_px = self.shift_multi_roi_max_based(rois_list_scaled, weighted=False)
 
-        elif self.mode == "MultiROI_max_based_weighted" :
+        elif self.mode == "MultiROI_max_rois_weighted" :
             shift_px = self.shift_multi_roi_max_based(rois_list_scaled, weighted=True)
 
-        elif self.mode == "MultiROI_priority_based" :
+        elif self.mode == "MultiROI_priority" :
             shift_px = self.shift_multi_roi_priority_based(rois_list_scaled)
 
         else :
@@ -446,7 +454,7 @@ class PositionTrackerMultiROI :
         best_shift_y = clamp(0, best_region[2], best_region[3])
         best_shift_z = 0 # No shift in z until a better approach is determined
 
-        shift_px = Shift3D(x=best_shift_x, y=best_shift_y, z=best_shift_z)
+        shift_px = Shift3D(x=best_shift_x, y=best_shift_y, z=best_shift_z) 
 
         return shift_px
     
@@ -458,7 +466,7 @@ class PositionTrackerMultiROI :
             xmax = roi.x + roi.width / 2
             ymax = H - (roi.y - roi.height / 2)
             ymin = H - (roi.y + roi.height / 2)
-            rois_list.append((xmin, xmax, ymin, ymax))
+            rois_list.append((xmin, xmax, ymin, ymax)) 
 
         # Create shift feasable sets of the ROIs
         Fis = compute_Fis(H, W, rois_list)

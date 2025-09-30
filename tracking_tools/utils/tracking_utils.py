@@ -382,3 +382,32 @@ def prioritized_intersection(Fis) :
             final_intersection = intersection
     
     return final_intersection, selected
+
+
+
+
+
+
+#####################################################
+# Helper to get the positions config
+#####################################################
+
+def get_pos_config(dirpath, log_dir_name) :
+    import glob
+    import os
+    import json
+    positions_config = {}
+    folder_list = glob.glob(os.path.join(dirpath, "*", log_dir_name))
+    for folder in folder_list :
+        root = os.path.split(folder)[0]
+        name = os.path.split(root)[-1]
+        with open(os.path.join(folder, "tracking_RoIs.json")) as f :
+            tracking_dict = json.load(f)
+            f.close()
+        config = {}
+        config["images_dir"] = root
+        config["log_dir"] = folder
+        for k, v in tracking_dict.items() :
+            config[k] = v
+        positions_config[name] = config
+    return positions_config
