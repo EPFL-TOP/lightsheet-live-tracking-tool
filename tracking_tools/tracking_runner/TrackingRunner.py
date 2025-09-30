@@ -8,15 +8,14 @@ import tifffile
 import dataclasses
 from dataclasses import asdict
 from ..tracker.status import TrackingState, ReturnStatus
+from ..position_tracker.PositionTracker import PositionTrackerMultiROI
 
 
 class TrackingRunner() :
     def __init__(
             self,
             positions_config,
-            position_tracker,
             microscope_interface,
-            image_reader,
             dirpath,
             runner_params,
             roi_tracker_params,
@@ -31,7 +30,7 @@ class TrackingRunner() :
             logging (bool, optional): _description_. Defaults to False.
         """
         self.microscope = microscope_interface
-        self.tracker_class = position_tracker
+        self.tracker_class = PositionTrackerMultiROI
         self.timeout_ms = runner_params["timeout_ms"]
         self.positions_config = positions_config
         if self.positions_config == {} :
@@ -49,7 +48,6 @@ class TrackingRunner() :
         self.dirpath = Path(dirpath)
         self.roi_tracker_params = roi_tracker_params
         self.position_tracker_params = position_tracker_params
-        self.reader = image_reader(dirpath=self.dirpath, log=self.log)
 
         # for config_name in self.positions_config.keys():
         for config in self.positions_config.values() :   ### CHANGED
@@ -63,7 +61,7 @@ class TrackingRunner() :
         self.logger = init_logger(self.__class__.__name__)
         self.to_save = {}
 
-    def run_LS1_new(self) :
+    def run_LS1(self) :
         # Initialize trackers before main loop
         self.logger.info(f"Initializing trackers")
         for position_name in self.positions_config.keys() :
@@ -77,55 +75,6 @@ class TrackingRunner() :
             # Wait for a new image
             image, time_point, position_name = self.microscope.wait_for_image(timeout_ms=self.timeout_ms)
 
-            # If tracker for position do not exist, skip
-            if position_name not in self.trackers.keys() :
-                self.microscope.continue_from_pause()
-            else :
-                if self.tracking_state_dict[position_name] != TrackingState.TRACKING_OFF :
-                    self.track_and_correct(position_name, time_point, image)
-                self.microscope.continue_from_pause()
-
-        self.microscope.no_pause_after_position()
-        self.microscope.disconnect()
-
-
-    def run_LS1(self) :
-
-        # Initialize trackers before main loop
-        self.logger.info(f"Initializing trackers")
-        # for position_name in self.position_names : ### CHANGED
-        for position_name in self.positions_config.keys() :
-            self.initialize_tracker(position_name)
-
-        # Enable pause after position after initialisation to avoid timing problems
-        self.microscope.pause_after_position()
-        
-        self.logger.info(f"Main tracking loop")
-        timeout = False  
-        while not self.stop_requested :
-            
-            if self.log and not timeout:
-                self.logger.info(f"Waiting for the next timepoint and position")
-            position_name, time_point, timeout = self.microscope.wait_for_pause(timeout_ms=self.timeout_ms)
-            if timeout : 
-                continue
-            if position_name not in self.position_names :
-                self.microscope.continue_from_pause()
-                continue
-            
-            if self.log :
-                self.logger.info(f"Timepoint {time_point}, Position {position_name}")
-            
-            # Read image
-            PosSetting = self.position_name_to_PosSetting[position_name]
-            settings = self.positions_config[PosSetting]['Settings']
-            channel = self.positions_config[PosSetting]['channel']
-            image = self.reader.read_image(position_name, settings, channel, time_point)
-            if image is None :
-                self.microscope.continue_from_pause()
-                self.stop()
-                continue
-            
             # If tracker for position do not exist, skip
             if position_name not in self.trackers.keys() :
                 self.microscope.continue_from_pause()

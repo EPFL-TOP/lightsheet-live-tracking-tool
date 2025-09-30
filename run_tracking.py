@@ -207,30 +207,25 @@ class Script:
 
 
         from tracking_tools.tracking_runner.TrackingRunner import TrackingRunner
-        from tracking_tools.microscope_interface.MicroscopeInterface import MicroscopeInterface_LS1, SimulatedMicroscopeInterface
-        from tracking_tools.position_tracker.PositionTracker import PositionTrackerSingleRoI_v2
+        from tracking_tools.microscope_interface.MicroscopeInterface import MicroscopeInterface_LS1, SimulatedMicroscopeInterface_LS1
+        from tracking_tools.position_tracker.PositionTracker import PositionTrackerMultiROI
         from tracking_tools.image_reader.ImageReader import ImageReader
+        from tracking_tools.utils.tracking_utils import get_pos_config
         log_dir_name = runner_config['log_dir_name']
-        position_config = self.search_JSON_files(dirpath, log_dir_name)
+        position_config = get_pos_config(dirpath, log_dir_name)
         print(position_config)
 
         self.setup_global_logging(dirpath)
 
         if simulated_microscope :
-            microscope = SimulatedMicroscopeInterface(position_names=[v['Position'] for v in position_config.values()], **simulation_config)
+            microscope = SimulatedMicroscopeInterface_LS1(positions_config=position_config, **simulation_config)
         else :
-            microscope = MicroscopeInterface_LS1()
+            microscope = MicroscopeInterface_LS1(positions_config=position_config)
 
         self.microscope = microscope
 
-        position_tracker = PositionTrackerSingleRoI_v2
-        
-        image_reader = ImageReader
-
         self.runner = TrackingRunner(
             microscope_interface=microscope,
-            position_tracker=position_tracker,
-            image_reader=image_reader,
             positions_config=position_config,
             dirpath=dirpath,
             runner_params=runner_config,
@@ -315,30 +310,6 @@ class Script:
             figures[figure_index].add_subplot(1,1,1).plot(self._figure_data[0], self._figure_data[1], self._available_colors[self._figure_color_indexes[figure_index]])
             figures[figure_index].tight_layout()  
 
-    def search_JSON_files(self, dirpath, log_dir_name) :
-        import glob
-        import os
-        import json
-        positions_config = {}
-        file_list = glob.glob(os.path.join(dirpath, '*', log_dir_name, 'tracking_RoIs.json'))
-        print(file_list)
-        for file in file_list :
-            PosSettingsName = os.path.split(os.path.split(os.path.split(file)[0])[0])[1]
-            Pos, Settings = PosSettingsName.split('_')
-            print(file)
-            with open(file) as json_data:
-                d = json.load(json_data)
-                json_data.close()
-            print(d)
-            channel = d['channel']
-            positions_config[PosSettingsName] = {
-                'Position' : Pos,
-                'Settings' : Settings,
-                'RoIs' : d['RoIs'],
-                'use_detection': d['detection'],
-                'channel': channel
-            }
-        return positions_config
     
     @staticmethod
     def setup_global_logging(log_dir):
