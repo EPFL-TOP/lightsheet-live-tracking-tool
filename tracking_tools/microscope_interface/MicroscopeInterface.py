@@ -17,7 +17,7 @@ class MicroscopeInterface_LS1:
             position_setting = pos_name.split("_")
             self.pos_to_PosSettings[position_setting[0]] = pos_name
             self.pos_to_Channel[position_setting[0]] = positions_config[pos_name]["channel"]
-            
+
         self.microscope = pymcs.Microscope()
         self.connect()
         self.time_lapse_controller = pymcs.TimeLapseController(self.microscope)
@@ -149,7 +149,6 @@ class SimulatedMicroscopeInterface_LS1 :
             return image, time_point, PosSetting
         
     def read_image(self, PosSetting, channel, time_point) :
-
         # Get path
         image_path = os.path.join(self.positions_config[PosSetting]["images_dir"], f"t{time_point:04}_{channel}.tif")
 

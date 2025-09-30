@@ -35,13 +35,9 @@ class TrackingRunner() :
         self.positions_config = positions_config
         if self.positions_config == {} :
             raise ValueError(f"position_config must not be empty : {self.positions_config}")
-        # Lookup table to get positions_config key from the position name
-        # self.position_name_to_PosSetting = {config["Position"]: name for name, config in self.positions_config.items()} ### CHANGED (removed)
         self.log_dir_name = runner_params["log_dir_name"]
         self.log = runner_params["log"]
         self.scaling_factor = roi_tracker_params["scaling_factor"]
-        # self.position_names = [config['Position'] for config in positions_config.values()]     ###CHANGED (removed)
-        # self.tracking_state_dict = {k:TrackingState.TRACKING_ON for k in self.position_names} ### CHANGED
         self.tracking_state_dict = {k:TrackingState.TRACKING_ON for k in self.positions_config.keys()}
         self.trackers = {}
         self.stop_requested = False
@@ -49,9 +45,7 @@ class TrackingRunner() :
         self.roi_tracker_params = roi_tracker_params
         self.position_tracker_params = position_tracker_params
 
-        # for config_name in self.positions_config.keys():
-        for config in self.positions_config.values() :   ### CHANGED
-            # with open(self.dirpath / config_name / runner_params["log_dir_name"] / "tracking_parameters.json", 'w') as json_file: ### CHANGED
+        for config in self.positions_config.values() : 
             with open(os.path.join(config["log_dir"], "tracking_parameters.json"), "w") as json_file:
                 to_save = dict()
                 to_save['scaling_factor'] = self.scaling_factor
@@ -87,16 +81,17 @@ class TrackingRunner() :
         self.microscope.disconnect()
 
     def initialize_tracker(self, position_name, image=None, time_point=None) :
-        # PosSetting = self.position_name_to_PosSetting[position_name] ######## CHANGED
         PosSetting = position_name
         use_detection = self.positions_config[PosSetting]['detection']
         tracking_mode = self.positions_config[PosSetting]["tracking_mode"]
+
         # Append starting point
         if time_point :
             with open(self.dirpath / PosSetting / self.log_dir_name / "tracking_parameters.json", "r") as json_file:
                 to_save = json.load(json_file)
             to_save['starting_time_point'] = time_point
             with open(self.dirpath / PosSetting / self.log_dir_name / "tracking_parameters.json", 'w') as json_file:
+
                 json.dump(to_save, json_file, indent=4)
         # Initialize tracker
         rois = self.positions_config[PosSetting]['RoIs']
@@ -115,6 +110,7 @@ class TrackingRunner() :
     def track_and_correct(self, position_name, time_point, image) :
         tracker = self.trackers[position_name]
         shift_um, tracking_state = tracker.compute_shift_um(image)
+        
         # Update tracking state
         self.tracking_state_dict[position_name] = tracking_state
 
