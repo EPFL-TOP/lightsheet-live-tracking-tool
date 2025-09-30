@@ -4,21 +4,56 @@ import uvicorn
 import torch
 import numpy as np
 # from cotracker.predictor import CoTrackerPredictor
-import utils.tracker_utils as tracker_utils
-import utils.detector_utils as detector_utils
-
 from imaging_server_kit import algorithm_server, ImageUI, PointsUI
 from imaging_server_kit import MultiAlgorithmServer
 import torch
 import torchvision
 from torchvision import transforms
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor, fasterrcnn_resnet50_fpn_v2
-
 from pathlib import Path
 
+#################################
+# Tracker utils
+#################################
+def process_step_offline(model, window_frames, query_points, device) :
+        video_chunk = (
+            torch.tensor(
+                np.stack(window_frames), device=device
+            )
+            .float()
+            .permute(0, 3, 1, 2)[None]
+        )  # (1, T, 3, H, W)
+        queries = torch.tensor(
+                np.column_stack((np.zeros(query_points.shape[0], dtype=query_points.dtype), query_points)), 
+                dtype=torch.float16,
+                device=device,
+            )[None]
+        return model(
+            video_chunk,
+            queries=queries
+        )
 
+############################
+# Detector utils
+############################
+class ToTensorNormalize:
+    def __call__(self, image):
+        if isinstance(image, np.ndarray):
+            image = torch.tensor(image, dtype=torch.float32).unsqueeze(0)
+        else:
+            image = transforms.functional.pil_to_tensor(image).float()
+        image = (image - image.min()) / (image.max() - image.min())
+        return image
+    
+def preprocess_frame(frame) :
+    transform = ToTensorNormalize()
+    frame_pp = transform(frame)
+    return frame_pp.unsqueeze(0) 
 
-device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
+################################
+# Server main code
+################################
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print('Running on device:', device)
 # model = CoTrackerPredictor(checkpoint='../co-tracker/checkpoints/scaled_offline.pth')
 model_tracker =  torch.hub.load("facebookresearch/co-tracker", "cotracker3_offline")
@@ -51,7 +86,7 @@ def tracker_server(
 ):
     """Runs the algorithm."""
     video = np.repeat(video[..., np.newaxis], 3, axis=-1) # Convert to RGB
-    pred_tracks, pred_visibility = tracker_utils.process_step_offline(model_tracker, video, query_points, device)
+    pred_tracks, pred_visibility = process_step_offline(model_tracker, video, query_points, device)
     # Convert pred_tracks (batch, video_length, num_points, coords_dim) into a numpy array with shape (video_length, num_points, coords_dim)
     # batch = 1, coords_dim = 2
     pred_tracks_np = pred_tracks.cpu().numpy()[0] # (video_length, num_points, 2)
@@ -77,7 +112,7 @@ def detector_server(
     image: np.ndarray,
 ) -> List[tuple]:
     """Runs the algorithm."""
-    frame_pp = detector_utils.preprocess_frame(image)
+    frame_pp = preprocess_frame(image)
     frame_pp = frame_pp.to(device)
     predictions = model_detector(frame_pp)[0]
     predictions_cpu = {k:v.detach().cpu().numpy() for k, v in predictions.items()}
