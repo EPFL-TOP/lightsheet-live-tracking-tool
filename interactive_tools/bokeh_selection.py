@@ -516,9 +516,7 @@ def make_layout():
         print(status.text.split("Selected image: "))
         filename = status.text.split("Selected image: ")[-1]
         dirname  = pathlib.Path(filename).parent.resolve()
-        channel = os.path.basename(filename)
-        channel = channel.replace(".tif","").split("_")[-1]
-        print(dirname, '   ',channel)
+        print(dirname)
 
 
         for i, (x, y, w, h) in enumerate(zip(data.get('x', []), data.get('y', []), data.get('width', []), data.get('height', []))):
@@ -527,7 +525,13 @@ def make_layout():
         use_detection = False
         if 0 in checkbox_detection.active: use_detection = True
 
-        outdict = {'channel':channel, 'shape':original_source.data["image"][0].shape, 'RoIs':out, 'detection':use_detection, "tracking_mode": dropdown_tracking_mode.value}
+        outdict = {
+            'shape':original_source.data["image"][0].shape, 
+            'detection':use_detection, 
+            "tracking_mode": dropdown_tracking_mode.value, 
+            "filename":os.path.basename(filename),
+            'RoIs':out, 
+        }
         out_dirname = os.path.join(dirname, "embryo_tracking")
         if not os.path.isdir(out_dirname):
             os.mkdir(out_dirname)
