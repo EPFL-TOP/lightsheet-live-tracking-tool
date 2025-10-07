@@ -79,6 +79,26 @@ class TrackingRunner() :
 
         self.microscope.no_pause_after_position()
         self.microscope.disconnect()
+        
+
+    def run_general(self) :
+        # Initialize trackers before main loop
+        self.logger.info(f"Initializing trackers")
+        for position_name in self.positions_config.keys() :
+            self.initialize_tracker(position_name)
+        
+        self.logger.info(f"Main tracking loop")
+        while not self.stop_requested :
+            # Get new image
+            image, time_point, position_name = self.microscope.wait_for_image(timeout_ms=self.timeout_ms)
+
+            # If tracker for position do not exist, skip
+            if position_name not in self.trackers.keys() :
+                self.microscope.continue_from_pause()
+            else :
+                if self.tracking_state_dict[position_name] != TrackingState.TRACKING_OFF :
+                    self.track_and_correct(position_name, time_point, image)
+
 
     def initialize_tracker(self, position_name, image=None, time_point=None) :
         PosSetting = position_name

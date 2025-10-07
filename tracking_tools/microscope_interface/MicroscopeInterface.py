@@ -212,4 +212,63 @@ class SimulatedMicroscopeInterface_LS1 :
         self.stop_requested = True
 
     
+class SimulatedMicroscopeInterface_General :
+    def __init__(self, positions_config) :
+        self.positions_config = positions_config
+        self.position_names = list(self.positions_config.keys())
+        self.nb_positions = len(self.position_names)
+        self.logger = init_logger(self.__class__.__name__)
+        # Get the naming format
+        self.nb_digits = self.detect_format(self.positions_config[next(iter(self.positions_config))]["filename"])
+        self.timepoint = 0
+        self.current_position_index = 0
+
+    def wait_for_image(self, timeout_ms=100) :
+        time.sleep(timeout_ms/1000)
+        position_name, timepoint = self.get_pos_timepoint()
+        image = self.read_image(position_name, timepoint)
+        return image, timepoint, position_name
+
+
+    def read_image(self, position_name, timepoint) :
+        nb_zeros = self.nb_digits - len(str(timepoint))
+        filename = "t" + "0" * nb_zeros + str(timepoint) + ".tif"
+        image_dir = self.positions_config[position_name]["images_dir"]
+        image_path = os.path.join(image_dir, filename)
+
+        if not os.path.exists(image_path):
+            self.logger.error(f"Missing image at{image_path}")
+            return None
+        try :
+            image = tifffile.imread(str(image_path))
+            self.logger.info(f"Read image {image_path}")
+            self.logger.info(f"Image shape : {image.shape}")
+            return image
+        except Exception as e:
+            self.logger.error(f'Cannot read {image_path}: {e}')
+            return None
+
+    def get_pos_timepoint(self) :
+        # Go through positions in a round robin cycle
+        current_pos = self.position_names[self.current_position_index]
+        # Update timepoint if after a full cycle
+        if self.current_position_index == 0 :
+            self.timepoint = self.timepoint + 1
+        # Update position for the next call
+        self.current_position_index = (self.current_position_index + 1) % self.nb_positions
+        self.logger.info(f"Position [{current_pos}] at timepoint {self.timepoint}")
+        return current_pos, self.timepoint
+
+
+    def detect_format(self, filename) :
+        import re
+        match = re.match(r"t(\d+)\.tif$", filename)
+        if not match:
+            self.logger.info(f"Could not match a filename with format t(\d+)\.tif$, {filename}")
+        digits = match.group(1)
+        return len(digits)
     
+    def relative_move(self, position_name, shift_x, shift_y, shift_z) :
+        self.logger.info(f"Relative move :[{position_name}], x={shift_x}, y={shift_y}, z={shift_z}")
+        return
+        
