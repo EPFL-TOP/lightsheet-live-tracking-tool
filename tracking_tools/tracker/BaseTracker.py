@@ -526,7 +526,7 @@ class MultiRoIBaseTracker :
         self.kernel_size_xy = base_kernel_size_xy // (2**scaling_factor)
         self.kernel_size_z = kernel_size_z
         self.log = log
-        self.use_detection = False ############# NO detection for multi roi
+        self.use_detection = use_detection ############# Detection should only be ON when tracking a single ROI, and is only used on the first ROI
         self.containment_threshold = containment_threshold
         self.k = k
         self.c0 = c0
@@ -536,9 +536,6 @@ class MultiRoIBaseTracker :
 
         # Convert to ROI dataclass, downscale rois
         self.rois = [ROI(**roi).scale(scaling_factor=self.scaling_factor, down=True) for roi in rois]      
-
-        if use_detection == True :
-            self.logger.warning("Detection set to False, not supported for MultiROI")
 
         # Initialize rolling window, queries, tracked points
         if first_frame :
@@ -660,9 +657,9 @@ class MultiRoIBaseTracker :
                     # self.predicted_points.append(position_yx_predicted) ###################
                     predicted_points_by_roi.append(position_yx_predicted)
                     # Compute the detected ROI
-                    if self.use_detection :
+                    if self.use_detection and i == 0:
                         roi_detected, score, returnStatus = self.compute_detected_roi(self.current_frame_proj)
-                        self.detected_points.append(roi_detected.to_position2D())
+                        # self.detected_points.append(roi_detected.to_position2D())
                     else :
                         self.detected = False
                         roi_detected = ROI.invalid(order=1) # Placeholder
@@ -1007,7 +1004,7 @@ class MultiRoIBaseTracker :
     def fill_placeholders(self) :
         self.tracked_points.append(self.tracked_points[-1])
         self.predicted_points.append(Position2D.invalid())
-        self.detected_points.append(Position2D.invalid())
+        # self.detected_points.append(Position2D.invalid())
         self.rois_list.append([self._get_past_roi(-1)])
         self.tracks.append([])
         self.logger.info("Filled placeholder data for tracker.")

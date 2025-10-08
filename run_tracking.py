@@ -146,26 +146,15 @@ class Script:
         self._figure_color_indexes = []
         self._available_colors = ['b', 'r', 'g', 'y']
 
-    def run(self, parameter_values, update_figures_callback):
-        """
-        Called by the user interface to run the script.
+    def _run_workers(self, parameter_values, update_figure_callback) :
+        """Worker thread for the long-running tracking loop."""
 
-        Parameters
-        ----------
-        parameter_values : list
-            List of parameter values.
-        figures : list
-            List of figure(s) on which the script can plot.
-        update_figure_callback : method
-            Callback method to update figure in the user interface.
+        try :
+            self._run_loop(parameter_values)
+        finally :
+            print("Worker finished")
 
-        Notes
-        -----
-        The user interface initializes empty figures and provides them
-        for plotting to this method. To update figures in the user interface
-        update_figure_callback should be called
-        """
-
+    def _run_loop(self, parameter_values) :
         if LAUNCH_DIR not in sys.path:
             sys.path.insert(0, LAUNCH_DIR)
 
@@ -207,42 +196,63 @@ class Script:
 
 
         from tracking_tools.tracking_runner.TrackingRunner import TrackingRunner
-        from tracking_tools.microscope_interface.MicroscopeInterface import MicroscopeInterface, SimulatedMicroscopeInterface
-        from tracking_tools.position_tracker.PositionTracker import PositionTrackerSingleRoI_v2
+        from tracking_tools.microscope_interface.MicroscopeInterface import MicroscopeInterface_LS1, SimulatedMicroscopeInterface_LS1
+        from tracking_tools.position_tracker.PositionTracker import PositionTrackerMultiROI
         from tracking_tools.image_reader.ImageReader import ImageReader
+        from tracking_tools.utils.tracking_utils import get_pos_config
         log_dir_name = runner_config['log_dir_name']
-        position_config = self.search_JSON_files(dirpath, log_dir_name)
+        position_config = get_pos_config(dirpath, log_dir_name)
         print(position_config)
 
         self.setup_global_logging(dirpath)
 
         if simulated_microscope :
-            microscope = SimulatedMicroscopeInterface(position_names=[v['Position'] for v in position_config.values()], **simulation_config)
+            microscope = SimulatedMicroscopeInterface_LS1(positions_config=position_config, **simulation_config)
         else :
-            microscope = MicroscopeInterface()
+            microscope = MicroscopeInterface_LS1(positions_config=position_config)
 
         self.microscope = microscope
 
-        position_tracker = PositionTrackerSingleRoI_v2
-        
-        image_reader = ImageReader
-
         self.runner = TrackingRunner(
             microscope_interface=microscope,
-            position_tracker=position_tracker,
-            image_reader=image_reader,
             positions_config=position_config,
             dirpath=dirpath,
             runner_params=runner_config,
             roi_tracker_params=roi_tracker_config,
             position_tracker_params=position_tracker_config,
         )
-        self.runner.run()
+        self.runner.run_LS1()
 
-        print("")
-        microscope.no_pause_after_position()
-        microscope.disconnect()
-        print("Script stopped.")
+
+    def run(self, parameter_values, update_figures_callback):
+        """
+        Called by the user interface to run the script.
+
+        Parameters
+        ----------
+        parameter_values : list
+            List of parameter values.
+        figures : list
+            List of figure(s) on which the script can plot.
+        update_figure_callback : method
+            Callback method to update figure in the user interface.
+
+        Notes
+        -----
+        The user interface initializes empty figures and provides them
+        for plotting to this method. To update figures in the user interface
+        update_figure_callback should be called
+        """
+
+        self.stop_requested = False
+        self._thread = threading.Thread(
+            target=self._run_workers,
+            args=(parameter_values, update_figures_callback),
+            daemon=True
+        )
+        self._thread.start()
+        # Block until worker is done
+        self._thread.join()
 
     def stop(self):
         """
@@ -252,10 +262,12 @@ class Script:
         -----
         Run method should terminate once stop is called.
         """
+        ("Stop Requested")
         self.stop_requested = True
-        self.runner.stop_requested = True
-        self.microscope.no_pause_after_position()
-        self.microscope.disconnect()
+        if self.runner:
+            self.runner.stop_requested = True
+        if self._thread and self._thread.is_alive() :
+            self._thread.join(timeout=2)
     
     
     def get_figure_count(self, parameter_values):
@@ -315,30 +327,6 @@ class Script:
             figures[figure_index].add_subplot(1,1,1).plot(self._figure_data[0], self._figure_data[1], self._available_colors[self._figure_color_indexes[figure_index]])
             figures[figure_index].tight_layout()  
 
-    def search_JSON_files(self, dirpath, log_dir_name) :
-        import glob
-        import os
-        import json
-        positions_config = {}
-        file_list = glob.glob(os.path.join(dirpath, '*', log_dir_name, 'tracking_RoIs.json'))
-        print(file_list)
-        for file in file_list :
-            PosSettingsName = os.path.split(os.path.split(os.path.split(file)[0])[0])[1]
-            Pos, Settings = PosSettingsName.split('_')
-            print(file)
-            with open(file) as json_data:
-                d = json.load(json_data)
-                json_data.close()
-            print(d)
-            channel = d['channel']
-            positions_config[PosSettingsName] = {
-                'Position' : Pos,
-                'Settings' : Settings,
-                'RoIs' : d['RoIs'],
-                'use_detection': d['detection'],
-                'channel': channel
-            }
-        return positions_config
     
     @staticmethod
     def setup_global_logging(log_dir):
