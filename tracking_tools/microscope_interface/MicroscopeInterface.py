@@ -16,7 +16,7 @@ class MicroscopeInterface_LS1:
         for pos_name in positions_config.keys() :
             position_setting = pos_name.split("_")
             self.pos_to_PosSettings[position_setting[0]] = pos_name
-            self.pos_to_Channel[position_setting[0]] = positions_config[pos_name]["channel"]
+            self.pos_to_Channel[position_setting[0]] = positions_config[pos_name]["filename"].replace(".tif","").split("_")[-1]
 
         self.microscope = pymcs.Microscope()
         self.connect()
