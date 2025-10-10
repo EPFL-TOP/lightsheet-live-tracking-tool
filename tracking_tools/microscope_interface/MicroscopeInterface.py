@@ -22,6 +22,7 @@ class MicroscopeInterface_LS1:
         self.connect()
         self.time_lapse_controller = pymcs.TimeLapseController(self.microscope)
         self.stage_xyz = pymcs.StageXYZ(self.microscope, "STAGE")
+        self.stop_requested = False
 
     # Waits for a new image
     def wait_for_image(self, timeout_ms) :
