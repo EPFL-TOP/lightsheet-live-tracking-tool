@@ -18,6 +18,7 @@ class MicroscopeInterface_LS1:
             self.pos_to_PosSettings[position_setting[0]] = pos_name
             self.pos_to_Channel[position_setting[0]] = positions_config[pos_name]["filename"].replace(".tif","").split("_")[-1]
 
+        self.PosSettings_to_pos = {v:k for k, v in self.pos_to_PosSettings.items()}
         self.microscope = pymcs.Microscope()
         self.connect()
         self.time_lapse_controller = pymcs.TimeLapseController(self.microscope)
@@ -81,6 +82,8 @@ class MicroscopeInterface_LS1:
         self.time_lapse_controller.continue_from_pause()
 
     def relative_move(self, position_name, shift_x, shift_y, shift_z) :
+        # Get the position out of the posSetting name
+        position_name = position_name.split("_")[0]
         pos = self.stage_xyz.position_get(position_name=position_name)
         self.stage_xyz.position_set(
             position_name=position_name,
