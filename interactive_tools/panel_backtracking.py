@@ -18,6 +18,8 @@ import panel as pn
 import torch
 import matplotlib.cm as cm
 from skimage.draw import line
+import pandas as pd
+from datetime import datetime
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -35,10 +37,13 @@ except ModuleNotFoundError:
 
 def make_layout():
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = torch.hub.load("facebookresearch/co-tracker", "cotracker3_offline")
+    model = model.to(device)
     tracks = None
     tracks_overlays = []
     all_images = []
     all_points = []
+    folder = None
     ####### GENERAL WIDGETS ##########
     # Sliders
     contrast_slider = RangeSlider(start=0, end=255, value=(0, 255), step=1, title="Contrast", width=150)
@@ -47,7 +52,8 @@ def make_layout():
 
     # Buttons
     select_folder_button = Button(label="Browse Folder...", button_type="primary")
-    run_tracking_button = Button(label="Run CoTracker...", button_type="primary")
+    run_tracking_button = Button(label="Run CoTracker...", button_type="success")
+    save_tracks_button = Button(label="Save tracks", button_type="primary")
 
     # Checkbox
     leave_trace_checkbox = Checkbox(label="Leave traces", active=True)
@@ -56,6 +62,7 @@ def make_layout():
     # Texts
     status = Div(text="")
     model_status = Div(text="")
+    tracks_status = Div(text="")
 
     ############ DATA SOURCES #############
     # Initial dummy image
@@ -198,6 +205,7 @@ def make_layout():
 
 
     def select_folder():
+        nonlocal folder
         parent = _get_parent()
         folder = filedialog.askdirectory(parent=parent)
         parent.destroy()
@@ -255,7 +263,7 @@ def make_layout():
         p_tracks.x_range=x_range
         p_tracks.y_range=y_range
 
-        all_points = [{"x":[], "y":[]} for _ in range(len(all_images) - 1)]
+        all_points = [{"x":[], "y":[]} for _ in range(len(all_images))]
 
     #________________________________________________________
     def tap_callback(event):
@@ -319,9 +327,7 @@ def make_layout():
         nonlocal tracks
         nonlocal tracks_overlays
         nonlocal all_images
-        model_status.text = "Computing tracks..."
-        model = torch.hub.load("facebookresearch/co-tracker", "cotracker3_offline")
-        model = model.to(device)
+        # model_status.text = "Computing tracks..."
         H, W = all_images[0].shape
 
         # Build queries and video
@@ -355,7 +361,17 @@ def make_layout():
         tracks_overlay_source.data = dict(
             image=[tracks_overlays[0]]
         )
-        model_status.text="Finished computing tracks"
+        # model_status.text="Finished computing tracks"
+        run_tracking_button.label = "Run CoTracker..."
+        run_tracking_button.button_type = "success"
+
+
+    #___________________________________________________________________________________________
+    def run_tracking_callback_short():
+        run_tracking_button.label = "Processing..."
+        run_tracking_button.button_type = "danger"
+        curdoc().add_next_tick_callback(run_tracking_callback)
+
 
     #_______________________________________________________________________
     def update_tracks_overlay(attr, old, new) :
@@ -443,6 +459,27 @@ def make_layout():
                 x=[], y=[]
             )
 
+    #_____________________________________________________________________________
+    def save_tracks_callback() :
+        nonlocal tracks
+        n_timepoints, n_tracks, _ = tracks.shape
+        rows = []
+        for t in range(n_timepoints) :
+            for tracks_id in range(n_tracks) :
+                x, y = tracks[t, tracks_id]
+                rows.append({
+                    "timepoint": t,
+                    "tracks_id": tracks_id,
+                    "x": x,
+                    "y": y
+                })
+
+        df = pd.DataFrame(rows)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(folder, f"tracks_{timestamp}.csv")
+        df = df.sort_values(by=["timepoint", "tracks_id"])
+        df.to_csv(path, index=False)
+        tracks_status.text = f"Tracks saved in [{path}]"
 
     ########## CALLBACKS #########
 
@@ -455,6 +492,8 @@ def make_layout():
     run_tracking_button.on_click(run_tracking_callback)
     leave_trace_checkbox.on_change("active", leave_traces_callback)
     display_points_checkbox.on_change("active", display_points_callback)
+    run_tracking_button.on_click(run_tracking_callback_short)
+    save_tracks_button.on_click(save_tracks_callback)
 
 
     ########## LAYOUT ##########
@@ -467,8 +506,8 @@ def make_layout():
     status_layout = row(mk_div(), status)
 
     selection_layout = column(p, timepoint_slider_layout, status_layout)
-    vis_layout = column(p_tracks, tracks_slider_layout)
-    commands_layout = column(contrast_slider, run_tracking_button, model_status, leave_trace_checkbox, display_points_checkbox)
+    vis_layout = column(p_tracks, tracks_slider_layout, tracks_status)
+    commands_layout = column(contrast_slider, run_tracking_button, model_status, leave_trace_checkbox, display_points_checkbox, save_tracks_button)
 
     layout = row(
         mk_div(),
