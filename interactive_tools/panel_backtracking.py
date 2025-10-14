@@ -3,15 +3,12 @@ from tornado.ioloop import IOLoop
 from tkinter import filedialog
 from bokeh.io import curdoc
 from bokeh.plotting import figure
-from bokeh.models import ColumnDataSource, Button, Checkbox, Div, Range1d, Slider, RangeSlider, LinearColorMapper
-import base64
+from bokeh.models import ColumnDataSource, Button, Checkbox, Div, Range1d, Slider, RangeSlider, LinearColorMapper, NumericInput
 from PIL import Image
-import io
 from bokeh.layouts import column, row
-from bokeh.events import SelectionGeometry
 from bokeh.server.server import Server
 import numpy as np
-import json, os, pathlib, glob, sys
+import os, sys
 import tifffile
 import socket
 import panel as pn
@@ -20,6 +17,9 @@ import matplotlib.cm as cm
 from skimage.draw import line
 import pandas as pd
 from datetime import datetime
+import torch.nn.functional as F
+from PIL import Image, ImageDraw
+
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -37,13 +37,12 @@ except ModuleNotFoundError:
 
 def make_layout():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = torch.hub.load("facebookresearch/co-tracker", "cotracker3_offline")
-    model = model.to(device)
     tracks = None
     tracks_overlays = []
     all_images = []
     all_points = []
     folder = None
+    H, W = 1000, 1000
     ####### GENERAL WIDGETS ##########
     # Sliders
     contrast_slider = RangeSlider(start=0, end=255, value=(0, 255), step=1, title="Contrast", width=150)
@@ -54,27 +53,42 @@ def make_layout():
     select_folder_button = Button(label="Browse Folder...", button_type="primary")
     run_tracking_button = Button(label="Run CoTracker...", button_type="success")
     save_tracks_button = Button(label="Save tracks", button_type="primary")
+    save_movie_buton = Button(label="Save movie", button_type="primary")
 
     # Checkbox
     leave_trace_checkbox = Checkbox(label="Leave traces", active=True)
-    display_points_checkbox = Checkbox(label="Display tracked points", active=False)
+    display_points_checkbox = Checkbox(label="Display tracked points", active=True)
+    cotracker_online_checkbox = Checkbox(active=True)
+    cotracker_online_label = Div(text="""
+                                <b>Cotracker3 Online mode</b><br>
+                                <span style="font-size: 11px; color: gray;">
+                                (for big videos, to avoid memory usage problems)
+                                </span>
+                                """)
 
     # Texts
     status = Div(text="")
     model_status = Div(text="")
     tracks_status = Div(text="")
+    movie_status = Div(text="")
+
+    # Text inputs
+    starting_timepoint_input = NumericInput(title="Starting Timepoint", mode="int", low=0, width=100)
+    ending_timepoint_input = NumericInput(title="Ending Timepoint", mode="int", low=0, width=100)
+    width_input = NumericInput(title="Width", low=1, width=100, mode="int")
+    height_input = NumericInput(title="Height", low=1, width=100, mode="int")
 
     ############ DATA SOURCES #############
     # Initial dummy image
-    initial_img = np.random.randint(0, 255, (10, 1000, 1000), dtype=np.uint8)[::-1]
+    initial_img = np.random.randint(0, 255, (H, W), dtype=np.uint8)[::-1]
 
     # Displayed image data source 
     displayed_source = ColumnDataSource(data=dict(
-        image=[initial_img[0]], x=[0], y=[0], dw=[initial_img.shape[1]], dh=[initial_img.shape[0]]
+        image=[initial_img], x=[0], y=[0], dw=[initial_img.shape[1]], dh=[initial_img.shape[0]]
     ))
 
     tracks_displayed_source = ColumnDataSource(data=dict(
-        image=[initial_img[0]], x=[0], y=[0], dw=[initial_img.shape[1]], dh=[initial_img.shape[0]]
+        image=[initial_img], x=[0], y=[0], dw=[initial_img.shape[1]], dh=[initial_img.shape[0]]
     ))
 
     points_source = ColumnDataSource(data=dict(
@@ -158,10 +172,10 @@ def make_layout():
             image=[displayed], x=[0], y=[0], dw=[displayed.shape[1]], dh=[displayed.shape[0]]
         )
         # Update figure range
-        x_range = Range1d(start=0, end=displayed.shape[0])
-        y_range = Range1d(start=0, end=displayed.shape[1])
-        p.x_range=x_range
-        p.y_range=y_range
+        # x_range = Range1d(start=0, end=displayed.shape[0])
+        # y_range = Range1d(start=0, end=displayed.shape[1])
+        # p.x_range=x_range
+        # p.y_range=y_range
 
     #________________________________________________________________________________________________
     def update_tracks_display(attr, old, new) :
@@ -176,10 +190,10 @@ def make_layout():
             image=[displayed], x=[0], y=[0], dw=[displayed.shape[1]], dh=[displayed.shape[0]]
         )
         # Update figure range
-        x_range = Range1d(start=0, end=displayed.shape[0])
-        y_range = Range1d(start=0, end=displayed.shape[1])
-        p_tracks.x_range=x_range
-        p_tracks.y_range=y_range
+        # x_range = Range1d(start=0, end=displayed.shape[0])
+        # y_range = Range1d(start=0, end=displayed.shape[1])
+        # p_tracks.x_range=x_range
+        # p_tracks.y_range=y_range
 
 
     #___________________________________________________________________________________________
@@ -228,6 +242,8 @@ def make_layout():
     def load_images(folder) :
         nonlocal all_images
         nonlocal all_points
+        nonlocal H
+        nonlocal W
         tif_files = list_images(folder)
         all_images = []
         for file in tif_files :
@@ -242,6 +258,7 @@ def make_layout():
                 print(f"Could not read image : {e}")
         timepoint_slider.end = len(all_images) - 1
         tracks_slider.end = len(all_images) - 1
+        H, W = all_images[0].shape
 
         working = all_images[0]
         # Normalize image
@@ -264,6 +281,19 @@ def make_layout():
         p_tracks.y_range=y_range
 
         all_points = [{"x":[], "y":[]} for _ in range(len(all_images))]
+
+        starting_timepoint_input.high = len(all_images) - 1
+        ending_timepoint_input.high = len(all_images) - 1
+        starting_timepoint_input.value = 0
+        ending_timepoint_input.value = len(all_images) - 1
+        width_input.remove_on_change("value", width_update)
+        height_input.remove_on_change("value", height_update)
+        width_input.value = W
+        height_input.value = H
+        width_input.high = W
+        height_input.high = H
+        width_input.on_change("value", width_update)
+        height_input.on_change("value", height_update)
 
     #________________________________________________________
     def tap_callback(event):
@@ -309,8 +339,9 @@ def make_layout():
     #________________________________________________________________________________________________
     def update_overlay(attr, old, new) :
         nonlocal all_images
+        nonlocal H
+        nonlocal W
         # Create binary mask
-        H, W = all_images[0].shape
         overlay = np.zeros((H, W))
         x_coords = points_source.data["x"]
         y_coords = points_source.data["y"]
@@ -327,35 +358,68 @@ def make_layout():
         nonlocal tracks
         nonlocal tracks_overlays
         nonlocal all_images
+        nonlocal H
+        nonlocal W
         # model_status.text = "Computing tracks..."
-        H, W = all_images[0].shape
+        start = starting_timepoint_input.value
+        end = ending_timepoint_input.value
 
         # Build queries and video
         queries = []
         for timepoint, coords in enumerate(all_points) :
-            for x, y in zip(coords["x"], coords["y"]) :
-                queries.append([timepoint, x, H-y])
+            if timepoint <= end :
+                for x, y in zip(coords["x"], coords["y"]) :
+                    queries.append([timepoint - start, x * width_input.value / W, (H-y) * height_input.value / H])
         queries = np.array(queries)
         queries_tensor = torch.tensor(queries, dtype=torch.float16, device=device)[None]
         queries_tensor = queries_tensor.to(device)
 
-        video = np.array(all_images)
-        video_chunk = _prepare_video_chunk(video)
-        video_chunk = video_chunk.to(device)
+        video = np.array(all_images[start:end+1])
+        video = _prepare_video_chunk(video)
+        video = F.interpolate(video[0], [height_input.value, width_input.value], mode="bilinear")[None]
+        video = video.to(device)
 
         # Run model
-        pred_tracks, _ = model(video_chunk, queries=queries_tensor, backward_tracking=True)
-        pred_tracks_np = pred_tracks.cpu().numpy()[0]
-        tracks = pred_tracks_np
+        if cotracker_online_checkbox.active :
+            model = torch.hub.load("facebookresearch/co-tracker", "cotracker3_online")
+            model = model.to(device)
+            # Forward run
+            print("Forward Run")
+            model(video_chunk=video, is_first_step=True, queries=queries_tensor)
+            for ind in range(0, video.shape[1] - model.step, model.step) :
+                pred_tracks_forward, _ = model(video_chunk=video[:, ind : ind + model.step * 2])
+            # Backward run
+            print("Backward run")
+            queries_tensor[:,:,0] = video.shape[1] - queries_tensor[:,:,0]
+            video = video.flip(1)
+            model(video_chunk=video, is_first_step=True, queries=queries_tensor)
+            for ind in range(0, video.shape[1] - model.step, model.step) :
+                pred_tracks_backward, _ = model(video_chunk=video[:, ind : ind + model.step * 2])
+            # Temporal overlap
+            tracks = torch.zeros_like(pred_tracks_forward)
+            for ind, (timepoint, _, _) in enumerate(queries) :
+                timepoint = int(timepoint)
+                tracks[:, :timepoint, ind, :] = pred_tracks_backward[:, video.shape[1]-timepoint:video.shape[1], ind, :].flip(1)
+                tracks[:, timepoint:, ind, :] = pred_tracks_forward[:, timepoint:, ind, :]
+            tracks = tracks.cpu().numpy()[0]
+
+        else :
+            model = torch.hub.load("facebookresearch/co-tracker", "cotracker3_offline")
+            model = model.to(device)
+            pred_tracks, _ = model(video, queries=queries_tensor, backward_tracking=True)
+            tracks = pred_tracks.cpu().numpy()[0]
+
+        print(tracks.shape)
+
+        tracks[:,:,0] *= W / width_input.value
+        tracks[:,:,1] *= H / height_input.value
 
         # Update tracks overlays
-        # For each timepoint, draw the tracks until that timepoint
-        N = tracks.shape[0]
     
-        tracks_overlays = []
-        for t in range(N) :
-            overlay = tracks2rgba(tracks, t, H, W)
-            tracks_overlays.append(overlay)
+        tracks_overlays = [np.zeros((H, W), dtype=np.float32) for _ in range(len(all_images))]
+        for t in range(start, end+1) :
+            overlay = tracks2rgba(tracks, t-start, H, W)
+            tracks_overlays[t] = overlay
 
         tracks_slider.value = 0
         tracks_overlay_source.data = dict(
@@ -378,12 +442,17 @@ def make_layout():
         nonlocal tracks_overlays
         nonlocal tracks
         nonlocal all_images
-        H, W = all_images[0].shape
+        nonlocal H
+        nonlocal W
 
-        if display_points_checkbox.active :
-            tracks_points = tracks[tracks_slider.value]
+        if display_points_checkbox.active and tracks_slider.value >= starting_timepoint_input.value and tracks_slider.value <= ending_timepoint_input.value :
+            tracks_points = tracks[tracks_slider.value - starting_timepoint_input.value]
             tracks_points_source.data = dict(
                 x=list(tracks_points[:,0]), y=list(H-tracks_points[:,1])
+            )
+        else :
+            tracks_points_source.data = dict(
+                x=[], y=[]
             )
         if tracks_overlays and leave_trace_checkbox.active :
             overlay_rgba = tracks_overlays[tracks_slider.value]
@@ -423,11 +492,13 @@ def make_layout():
     #_____________________________________________________________________
     def _prepare_video_chunk(window_frames) :
         frames = np.asarray(window_frames.copy())
+
         if frames.ndim == 3 : # If not RGB (no channel dimension)
             frames = np.repeat(frames[..., np.newaxis], 3, axis=-1) # Convert to RGB by duplicating into 3 channels
         video_chunk = torch.tensor(
             np.stack(frames), device=device
             ).float().permute(0, 3, 1, 2)[None]
+
         return video_chunk
     
     #_______________________________________________________________________
@@ -447,14 +518,15 @@ def make_layout():
     def display_points_callback(attr, old, new) :
         nonlocal tracks
         nonlocal all_images
-        H, W = all_images[0].shape
+        nonlocal H
+        nonlocal W
         if display_points_checkbox.active :
-            tracks_points = tracks[tracks_slider.value]
-            tracks_points_source.data = dict(
-                x=list(tracks_points[:,0]), y=list(H-tracks_points[:,1])
-            )
+            if tracks_slider.value >= starting_timepoint_input.value :
+                tracks_points = tracks[tracks_slider.value - starting_timepoint_input.value]
+                tracks_points_source.data = dict(
+                    x=list(tracks_points[:,0]), y=list(H-tracks_points[:,1])
+                )
         else :
-            tracks_points = tracks[tracks_slider.value]
             tracks_points_source.data = dict(
                 x=[], y=[]
             )
@@ -462,24 +534,79 @@ def make_layout():
     #_____________________________________________________________________________
     def save_tracks_callback() :
         nonlocal tracks
-        n_timepoints, n_tracks, _ = tracks.shape
+        _, n_tracks, _ = tracks.shape
         rows = []
-        for t in range(n_timepoints) :
-            for tracks_id in range(n_tracks) :
-                x, y = tracks[t, tracks_id]
+        start = starting_timepoint_input.value
+        end = ending_timepoint_input.value
+
+        for tracks_id in range(n_tracks) :
+            for t in range(start, end+1) :
+                x, y = tracks[t-start, tracks_id]
                 rows.append({
-                    "timepoint": t,
                     "tracks_id": tracks_id,
+                    "timepoint": t,
                     "x": x,
                     "y": y
                 })
 
+
         df = pd.DataFrame(rows)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = os.path.join(folder, f"tracks_{timestamp}.csv")
-        df = df.sort_values(by=["timepoint", "tracks_id"])
+        df = df.sort_values(by=["tracks_id", "timepoint"])
         df.to_csv(path, index=False)
         tracks_status.text = f"Tracks saved in [{path}]"
+
+    #_______________________________________________________________________________
+    def width_update(attr, old, new) :
+        nonlocal H
+        nonlocal W
+        ratio = H/W
+        height_input.remove_on_change("value", height_update)
+        height_input.value = int(width_input.value * ratio)
+        height_input.on_change("value", height_update)
+    #_______________________________________________________________________________
+    def height_update(attr, old, new) :
+        nonlocal H
+        nonlocal W
+        ratio = W/H
+        width_input.remove_on_change("value", width_update)
+        width_input.value = int(height_input.value * ratio)
+        width_input.on_change("value", width_update)
+
+    #_______________________________________________________
+    def save_movie():
+        images=all_images
+        # for i in range(len(images)):
+        #     images[i] = np.flip(images[i], axis=0)
+        points = [[tuple(p) for p in tracks[t, :, :]] for t in range(tracks.shape[0])]
+        frames = []
+        for i, (img_array, pts) in enumerate(zip(images, points)):
+            img = Image.fromarray(img_array).convert("RGB")
+            draw = ImageDraw.Draw(img)
+            draw.text((5, 5), f"Frame {i}", fill="white")
+            for x, y in pts:
+                x = int(x)
+                y = int(y)
+                r = 3
+                draw.ellipse((x - r, y - r, x + r, y + r), fill="red")
+           
+            frames.append(img)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        name="{}/{}.gif".format(folder, f"movie_{timestamp}")
+        save_movie_buton.label = "Save movie"
+        save_movie_buton.button_type = "primary"
+        frames[0].save(name, save_all=True, append_images=frames[1:], duration=100, loop=0)
+        print("Saved  movie as ",name)
+        movie_status.text = f"Movie saved in [{name}] "
+
+        #_______________________________________________________
+    def save_movie_short():
+        save_movie_buton.label = "Processing"
+        save_movie_buton.button_type = "danger"
+  
+        curdoc().add_next_tick_callback(save_movie)
 
     ########## CALLBACKS #########
 
@@ -489,11 +616,13 @@ def make_layout():
     tracks_slider.on_change("value", update_tracks_display, update_tracks_overlay)
     p.on_event("tap", tap_callback) 
     points_source.on_change("data", update_overlay)
-    run_tracking_button.on_click(run_tracking_callback)
     leave_trace_checkbox.on_change("active", leave_traces_callback)
     display_points_checkbox.on_change("active", display_points_callback)
     run_tracking_button.on_click(run_tracking_callback_short)
     save_tracks_button.on_click(save_tracks_callback)
+    width_input.on_change("value", width_update)
+    height_input.on_change("value", height_update)
+    save_movie_buton.on_click(save_movie_short)
 
 
     ########## LAYOUT ##########
@@ -504,10 +633,19 @@ def make_layout():
     timepoint_slider_layout = row(mk_div(),timepoint_slider)
     tracks_slider_layout = row(mk_div(),tracks_slider)
     status_layout = row(mk_div(), status)
+    dim_layout = row(width_input, height_input)
 
     selection_layout = column(p, timepoint_slider_layout, status_layout)
-    vis_layout = column(p_tracks, tracks_slider_layout, tracks_status)
-    commands_layout = column(contrast_slider, run_tracking_button, model_status, leave_trace_checkbox, display_points_checkbox, save_tracks_button)
+    vis_layout = column(p_tracks, tracks_slider_layout, tracks_status, movie_status)
+    commands_layout = column(contrast_slider,
+                              starting_timepoint_input, ending_timepoint_input,
+                              dim_layout,
+                              row(cotracker_online_checkbox, cotracker_online_label),
+                              run_tracking_button, 
+                              model_status, 
+                              leave_trace_checkbox, display_points_checkbox, 
+                              save_tracks_button,
+                              save_movie_buton)
 
     layout = row(
         mk_div(),
