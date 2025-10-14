@@ -61,11 +61,29 @@ These examples can serve as templates for adapting the tracking tool to your own
 
 You can find a working example of the whole process [`example.py`](example.py).
 
+### Folder Architecture
+
+This tool expects the experiment data to follow a consistent folder structure.  
+Each experiment should contain one or more **position folders**, each holding the corresponding image sequence to be tracked.
+
+```text
+experiment_folder/
+├── Position_1/
+│   ├── img_0001.tif
+│   ├── img_0002.tif
+│   ├── ...
+│
+├── Position_2/
+│   ├── img_0001.tif
+│   ├── img_0002.tif
+│   ├── ...
+```
+- Each "Position" folder corresponds to a acquisition in your experiment.
+- The tool processes each Position independently.
+
 ## Using `live-tracking-tool` with PyMCS
 
-If you are using a **Viventis LS1 microscope**, an integration with **PyMCS** is available.
-
-To use this integration:
+An integration with **PyMCS** for the **Viventis LS1 microscope** is available.
 
 1. Copy the `run_tracking.py` script from this repository into the `scripts/` folder of your PyMCS installation.
 2. ```bash
@@ -111,7 +129,7 @@ panel serve interactive_tools/panel_app.py --dev
 ```
 
 ## Local GPU
-To run the on a local GPU using the detection feature, the detector model weights must be placed at:
+To run on a local GPU using the detection feature, the detector model weights must be placed at:
 
 ```bash
 weights/*.pth
