@@ -48,10 +48,22 @@ PyTorch is not included in the `requirements.txt` file because it depends on you
 Follow the official installation instructions tailored to your setup:  
 🔗 [https://pytorch.org/get-started/locally](https://pytorch.org/get-started/locally)
 
+## Using `live-tracking-tool`
+
+The **microscope interface** is responsible for retrieving images and linking the tracking output to your microscope’s control commands. You can find implementation examples in [`MicroscopeInterface.py`](tracking_tools/microscope_interface/MicroscopeInterface.py) and [`TrackingRunner.py`](tracking_tools/tracking_runner/TrackingRunner.py).  
+
+Several implementations are already provided, including:  
+- **Viventis LS1 implementation** – supports both **online** and **offline (simulated microscope)** tracking.  
+- **General implementation** – for **offline** use.  
+
+These examples can serve as templates for adapting the tracking tool to your own microscope system.
+
+
+You can find a working example of the whole process [`example.py`](example.py).
 
 ## Using `live-tracking-tool` with PyMCS
 
-If you are using a **Viventis microscope**, an integration with **PyMCS** is available.
+If you are using a **Viventis LS1 microscope**, an integration with **PyMCS** is available.
 
 To use this integration:
 
@@ -63,27 +75,9 @@ To use this integration:
     ```
 > Running the script will start a GUI similar to the other PyMCS scripts.
 
-
-## Using `live-tracking-tool` Without PyMCS
-
-You can use **`live-tracking-tool`** *without* the PyMCS integration by creating your own **microscope interface**.  
-
-The microscope interface is responsible for linking the tracking output to your microscope's commands. You can find the base class and implementation here: [`MicroscopeInterface.py`](tracking_tools/microscope_interface/MicroscopeInterface.py)
-
-A ready-to-use **`SimulatedMicroscopeInterface`** is available for running **offline tracking** without hardware.
-
-If your image format or file naming differs from the default setup, you can also create your own image reader in:  [`ImageReader.py`](tracking_tools/image_reader/ImageReader.py)
-
-To start tracking:
-
-1. Create a `TrackingRunner` instance with your tracking config.
-2. Call its `.run()` method.
-
-You can find a working example [`example.py`](example.py).
-
 ## Interactive visualizations
 
-This project provides two interactive tools to support the tracking workflow. Both tools are available in the [`interactive-tools`](interactive-tools) directory:
+This project provides two interactive tools to support the tracking workflow. Both tools are available in the [`interactive_tools`](interactive_tools) directory:
 
 ### 1. **ROI Selection Tool – `bokeh_selection.py`**
 Used to **initialize the Regions of Interest (ROIs)** before tracking begins. This script allows you to manually select the areas in the image where tracking should occur. 
@@ -99,11 +93,21 @@ python interactive_tools bokeh_selection.py
 
 Used to **monitor the tracking process** in real-time. It visualizes current tracking data.
 
-> This tool is **optional** and is meant for live monitoring only.
+> This tool is **optional** and is meant for monitoring only.
 ```bash
 cd path/to/live/tracking/tool
 source tracking-tool-venv/bin/activate  # On Windows: tracking-tool-venv\Scripts\activate
 python interactive_tools bokeh_visualization.py
+```
+
+### 3. **Combined Interface - `panel_app.py`**
+
+You can also run both tools simultaneously through a single interactive dashboard.
+This combined interface provides access to ROI selection and tracking visualization in one place.
+```bash
+cd path/to/live/tracking/tool
+source tracking-tool-venv/bin/activate  # On Windows: tracking-tool-venv\Scripts\activate
+panel serve interactive_tools/panel_app.py --dev
 ```
 
 ## Local GPU
@@ -114,7 +118,7 @@ weights/*.pth
 ```
 **Note**: The weights folder must contain only one .pth file, as the current implementation automatically loads the first match.
 
-If you wish to use a different path for the weights, you can override the default location by setting the model_path parameter in your tracking_config.yaml file
+If you wish to use a different path for the weights, you can override the default location by setting the model_path parameter in your config.
 
 ## Remote GPU
 
@@ -138,8 +142,7 @@ To run the server:
 To access the remote GPU server from your local machine:
 
 - In your `TrackingRunner` configuration, set the server address (e.g., `http://192.168.1.10:8000`) to point to the remote machine.
+- Set the `serverkit` parameter to `True`.
 
 Once configured, all model inference will be offloaded to the remote GPU server.
-
-A usage example is available in [`example.py`](example.py)
 
