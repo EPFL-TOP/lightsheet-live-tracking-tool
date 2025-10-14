@@ -103,7 +103,7 @@ Used to **initialize the Regions of Interest (ROIs)** before tracking begins. Th
 ```bash
 cd path/to/live/tracking/tool
 source tracking-tool-venv/bin/activate  # On Windows: tracking-tool-venv\Scripts\activate
-python interactive_tools bokeh_selection.py
+python interactive_tools/bokeh_selection.py
 ```
 
 
@@ -115,7 +115,7 @@ Used to **monitor the tracking process** in real-time. It visualizes current tra
 ```bash
 cd path/to/live/tracking/tool
 source tracking-tool-venv/bin/activate  # On Windows: tracking-tool-venv\Scripts\activate
-python interactive_tools bokeh_visualization.py
+python interactive_tools/bokeh_visualization.py
 ```
 
 ### 3. **Combined Interface - `panel_app.py`**
