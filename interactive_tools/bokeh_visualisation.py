@@ -523,7 +523,9 @@ def make_layout():
            
             frames.append(img)
 
-        name="{}-{}.gif".format(os.path.split(status.text.replace("Selected folder: ",""))[-1], dropdown_position.value.replace(" ", "_"))
+        name="{}/{}.gif".format(status.text.replace("Selected folder: ",""), dropdown_position.value.replace(" ", "_"))
+        print(os.path.split(status.text.replace("Selected folder: ","")))
+        print(name)
         print("Saved  movie as ",name)
         button_save.label = "Save movie"
         button_save.button_type = "success"

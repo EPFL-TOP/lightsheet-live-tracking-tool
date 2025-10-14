@@ -50,14 +50,16 @@ Follow the official installation instructions tailored to your setup:
 
 ## Using `live-tracking-tool`
 
+You can use **`live-tracking-tool`** on your system by creating your own **microscope interface** and **tracking runner** loop.  
+
 The **microscope interface** is responsible for retrieving images and linking the tracking output to your microscope’s control commands. You can find implementation examples in [`MicroscopeInterface.py`](tracking_tools/microscope_interface/MicroscopeInterface.py) and [`TrackingRunner.py`](tracking_tools/tracking_runner/TrackingRunner.py).  
 
 Several implementations are already provided, including:  
 - **Viventis LS1 implementation** – supports both **online** and **offline (simulated microscope)** tracking.  
 - **General implementation** – for **offline** use.  
 
-These examples can serve as templates for adapting the tracking tool to your own microscope system.
-
+These examples can serve as templates for adapting the tracking tool to your own microscope system. 
+> Only the "relative_move" function needs to be defined as such in the microscope interface.
 
 You can find a working example of the whole process [`example.py`](example.py).
 
@@ -148,6 +150,7 @@ To run the server:
 
 1. Ensure that the machine has compatible **PyTorch** and **imaging-server-kit** installations.
 2. Run the main server script [`serverkit_main.py`](serverkit_main.py) on the GPU-enabled machine.
+3. If you connect through SSH, it is better to use a detached terminal like tmux to run [`serverkit_main.py`](serverkit_main.py).
 
 > The server script defaults to using the detection model. Make sure the model weights are located in the same directory as the script.
 
