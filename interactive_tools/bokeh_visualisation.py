@@ -20,6 +20,8 @@ last_tp = -1
 
 
 def make_layout():
+    data_log = None
+    mp_list = []
 
     initial_img = np.random.randint(0, 255, (1000, 1000), dtype=np.uint8)[::-1]
 
@@ -39,6 +41,8 @@ def make_layout():
 
     positions=[]
     dropdown_position = Select(value="", title='Position', options=positions)
+
+    invert_axis_checkboxgroup = CheckboxGroup(labels=["Invert x", "Invert y", "Invert z"], active=[])
 
     # Figure setup
     p_img = figure(
@@ -64,21 +68,29 @@ def make_layout():
         tools="pan,wheel_zoom,box_select,reset,undo,redo",
         match_aspect=True, 
         width=400, 
-        height=400
+        height=400,
+        x_axis_label="x",
+        y_axis_label="y"
     )
+
+
     p_trajectory_xz = figure(
         title="Trajectory XZ", 
         tools="pan,wheel_zoom,box_select,reset,undo,redo",
         match_aspect=True, 
         width=400, 
-        height=400
+        height=400,
+        x_axis_label="x",
+        y_axis_label="z"
     )
     p_trajectory_yz = figure(
         title="Trajectory YZ", 
         tools="pan,wheel_zoom,box_select,reset,undo,redo",
         match_aspect=True, 
         width=400, 
-        height=400
+        height=400,
+        x_axis_label="y",
+        y_axis_label="z"
     )
     color_mapper_trajectory = linear_cmap(field_name='t', palette=Viridis256, low=0, high=1)
 
@@ -164,9 +176,9 @@ def make_layout():
 
         # Update displyed shift text
         shifts_text.text = (
-            f"x (&micro;m): {shift_mu_source.data["x"][slider.value]}<br>"
-            f"y (&micro;m): {shift_mu_source.data["y"][slider.value]}<br>"
-            f"z (&micro;m): {shift_mu_source.data["z"][slider.value]}"
+            f"x (&micro;m): {shift_mu_source.data["x"][slider.value]:.2f}<br>"
+            f"y (&micro;m): {shift_mu_source.data["y"][slider.value]:.2f}<br>"
+            f"z (&micro;m): {shift_mu_source.data["z"][slider.value]:.2f}"
         )
 
         # Update trajectory point highlight
@@ -273,6 +285,8 @@ def make_layout():
 
     #_______________________________________________________
     def load_tracking(dir_path, reload=False):
+        nonlocal data_log
+        nonlocal mp_list
         print(dir_path)
         tracking_path = os.path.join(dir_path, "embryo_tracking")
         pos_config    = os.path.join(tracking_path, "tracking_RoIs.json")
@@ -310,9 +324,19 @@ def make_layout():
                 roi_timepoint.append(tp)
                 tracks_idx.append(data_log[tp]["tracks_id"])
 
-                shifts_x.append(data_log[tp]["shift_um"]["x"])
-                shifts_y.append(data_log[tp]["shift_um"]["y"])
-                shifts_z.append(data_log[tp]["shift_um"]["z"])
+                if 0 in invert_axis_checkboxgroup.active :
+                    shifts_x.append(-data_log[tp]["shift_um"]["x"])
+                else :
+                    shifts_x.append(data_log[tp]["shift_um"]["x"])
+                if 1 in invert_axis_checkboxgroup.active :
+                    shifts_y.append(-data_log[tp]["shift_um"]["y"])
+                else :
+                    shifts_y.append(data_log[tp]["shift_um"]["y"])
+                if 2 in invert_axis_checkboxgroup.active :
+                    shifts_z.append(-data_log[tp]["shift_um"]["z"])
+                else :
+                    shifts_z.append(data_log[tp]["shift_um"]["z"])
+
                 n_tp+=1
             except KeyError:
                 print('no time point---',tp,'----')
@@ -346,9 +370,9 @@ def make_layout():
         shifts_um_cumsum_z = np.cumsum(np.array(shifts_z),axis=0)
         shift_mu_source.data = dict(x=shifts_x, y=shifts_y, z=shifts_z, t=[i for i in range(0,len(shifts_x))])
         shifts_text.text = (
-            f"x (&micro;m): {shift_mu_source.data["x"][slider.value]}<br>"
-            f"y (&micro;m): {shift_mu_source.data["y"][slider.value]}<br>"
-            f"z (&micro;m): {shift_mu_source.data["z"][slider.value]}"
+            f"x (&micro;m): {shift_mu_source.data["x"][slider.value]:.2f}<br>"
+            f"y (&micro;m): {shift_mu_source.data["y"][slider.value]:.2f}<br>"
+            f"z (&micro;m): {shift_mu_source.data["z"][slider.value]:.2f}"
         )
         trajectory_source.data = dict(x=shifts_um_cumsum_x, y=shifts_um_cumsum_y, z=shifts_um_cumsum_z, t=np.arange(len(shifts_um_cumsum_x)))
         trajectory_highlight_source.data = {
@@ -397,6 +421,51 @@ def make_layout():
             y=points_source.data['y'][0]
         )
 
+    #_____________________________________________________________
+    def invert_axis_callback(attr, old, new) :
+        shifts_x = []
+        shifts_y = []
+        shifts_z = []
+
+        print("invert callback")
+        for tp in mp_list:
+            tp = str(tp)
+            try :
+                if 0 in invert_axis_checkboxgroup.active :
+                    shifts_x.append(-data_log[tp]["shift_um"]["x"])
+                else :
+                    shifts_x.append(data_log[tp]["shift_um"]["x"])
+                if 1 in invert_axis_checkboxgroup.active :
+                    shifts_y.append(-data_log[tp]["shift_um"]["y"])
+                else :
+                    shifts_y.append(data_log[tp]["shift_um"]["y"])
+                if 2 in invert_axis_checkboxgroup.active :
+                    shifts_z.append(-data_log[tp]["shift_um"]["z"])
+                else :
+                    shifts_z.append(data_log[tp]["shift_um"]["z"])
+            except KeyError:
+                print('no time point---',tp,'----')
+
+
+        shifts_um_cumsum_x = np.cumsum(np.array(shifts_x),axis=0)
+        shifts_um_cumsum_y = np.cumsum(np.array(shifts_y),axis=0)
+        shifts_um_cumsum_z = np.cumsum(np.array(shifts_z),axis=0)
+
+        shift_mu_source.data = dict(x=shifts_x, y=shifts_y, z=shifts_z, t=[i for i in range(0,len(shifts_x))])
+        shifts_text.text = (
+            f"x (&micro;m): {shift_mu_source.data["x"][slider.value]:.2f}<br>"
+            f"y (&micro;m): {shift_mu_source.data["y"][slider.value]:.2f}<br>"
+            f"z (&micro;m): {shift_mu_source.data["z"][slider.value]:.2f}"
+        )
+
+        trajectory_source.data = dict(x=shifts_um_cumsum_x, y=shifts_um_cumsum_y, z=shifts_um_cumsum_z, t=np.arange(len(shifts_um_cumsum_x)))
+        trajectory_highlight_source.data = {
+            "x": [trajectory_source.data["x"][slider.value]],
+            "y": [trajectory_source.data["y"][slider.value]],
+            "z": [trajectory_source.data["z"][slider.value]],
+        }
+
+    invert_axis_checkboxgroup.on_change("active", invert_axis_callback)
     #_______________________________________________________
     def reload_images():
         load_images(status.text.replace("Selected folder: ",""), True)
@@ -454,7 +523,9 @@ def make_layout():
            
             frames.append(img)
 
-        name="{}-{}.gif".format(os.path.split(status.text.replace("Selected folder: ",""))[-1], dropdown_position.value.replace(" ", "_"))
+        name="{}/{}.gif".format(status.text.replace("Selected folder: ",""), dropdown_position.value.replace(" ", "_"))
+        print(os.path.split(status.text.replace("Selected folder: ","")))
+        print(name)
         print("Saved  movie as ",name)
         button_save.label = "Save movie"
         button_save.button_type = "success"
@@ -519,8 +590,8 @@ def make_layout():
     
     left_col  = column(select_layout, p_img, slider_layout, reload_layout, text_layout, row(mk_div(),contrast_slider))
     trajectory_row = row(p_trajectory_xy, p_trajectory_xz, p_trajectory_yz)
-    shifts_row = row(p_shifts, shifts_text)
-    right_col = column(shifts_row, trajectory_row)
+    shifts_row = row(p_shifts, shifts_text, invert_axis_checkboxgroup)
+    right_col = column(mk_div(), shifts_row, trajectory_row)
     layout = row(left_col, right_col)
 
     return layout

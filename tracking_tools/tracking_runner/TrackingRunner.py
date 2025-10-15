@@ -55,6 +55,11 @@ class TrackingRunner() :
         self.logger = init_logger(self.__class__.__name__)
         self.to_save = {}
 
+
+    # ------------------------------------
+    # Tracking Loops
+    # -----------------------------------
+    
     def run_LS1(self) :
         # Initialize trackers before main loop
         self.logger.info(f"Initializing trackers")
@@ -94,7 +99,7 @@ class TrackingRunner() :
 
             # If tracker for position do not exist, skip
             if position_name not in self.trackers.keys() :
-                self.microscope.continue_from_pause()
+                continue
             else :
                 if self.tracking_state_dict[position_name] != TrackingState.TRACKING_OFF :
                     self.track_and_correct(position_name, time_point, image)
