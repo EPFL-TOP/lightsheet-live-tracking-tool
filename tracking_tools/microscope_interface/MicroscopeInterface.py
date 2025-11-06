@@ -84,7 +84,7 @@ class MicroscopeInterface_LS1:
 
     def relative_move(self, position_name, shift_x, shift_y, shift_z) :
         # Get the position out of the posSetting name
-        position_name = position_name.split("_")[0]
+        position_name = position_name.rsplit("_", 1)[0] # Name is PositionName_SettingsName
         try :
             pos = self.stage_xyz.position_get(position_name=position_name)
             self.stage_xyz.position_set(
