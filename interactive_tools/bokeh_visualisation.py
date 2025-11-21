@@ -176,9 +176,9 @@ def make_layout():
 
         # Update displyed shift text
         shifts_text.text = (
-            f"x (&micro;m): {shift_mu_source.data["x"][slider.value]:.2f}<br>"
-            f"y (&micro;m): {shift_mu_source.data["y"][slider.value]:.2f}<br>"
-            f"z (&micro;m): {shift_mu_source.data["z"][slider.value]:.2f}"
+            f"x (&micro;m): {shift_mu_source.data[\"x\"][slider.value]:.2f}<br>"
+            f"y (&micro;m): {shift_mu_source.data[\"y\"][slider.value]:.2f}<br>"
+            f"z (&micro;m): {shift_mu_source.data[\"z\"][slider.value]:.2f}"
         )
 
         # Update trajectory point highlight
