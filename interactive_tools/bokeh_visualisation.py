@@ -370,9 +370,9 @@ def make_layout():
         shifts_um_cumsum_z = np.cumsum(np.array(shifts_z),axis=0)
         shift_mu_source.data = dict(x=shifts_x, y=shifts_y, z=shifts_z, t=[i for i in range(0,len(shifts_x))])
         shifts_text.text = (
-            f"x (&micro;m): {shift_mu_source.data["x"][slider.value]:.2f}<br>"
-            f"y (&micro;m): {shift_mu_source.data["y"][slider.value]:.2f}<br>"
-            f"z (&micro;m): {shift_mu_source.data["z"][slider.value]:.2f}"
+            f"x (&micro;m): {shift_mu_source.data['x'][slider.value]:.2f}<br>"
+            f"y (&micro;m): {shift_mu_source.data['y'][slider.value]:.2f}<br>"
+            f"z (&micro;m): {shift_mu_source.data['z'][slider.value]:.2f}"
         )
         trajectory_source.data = dict(x=shifts_um_cumsum_x, y=shifts_um_cumsum_y, z=shifts_um_cumsum_z, t=np.arange(len(shifts_um_cumsum_x)))
         trajectory_highlight_source.data = {
