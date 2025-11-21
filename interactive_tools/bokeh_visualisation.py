@@ -460,9 +460,9 @@ def make_layout():
 
         trajectory_source.data = dict(x=shifts_um_cumsum_x, y=shifts_um_cumsum_y, z=shifts_um_cumsum_z, t=np.arange(len(shifts_um_cumsum_x)))
         trajectory_highlight_source.data = {
-            "x": [trajectory_source.data["x"][slider.value]],
-            "y": [trajectory_source.data["y"][slider.value]],
-            "z": [trajectory_source.data["z"][slider.value]],
+            "x": [trajectory_source.data['x'][slider.value]],
+            "y": [trajectory_source.data['y'][slider.value]],
+            "z": [trajectory_source.data['z'][slider.value]],
         }
 
     invert_axis_checkboxgroup.on_change("active", invert_axis_callback)
