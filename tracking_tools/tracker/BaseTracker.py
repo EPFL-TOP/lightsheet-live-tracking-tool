@@ -855,9 +855,7 @@ class MultiRoIBaseTracker :
         center_points_list = []
         hws_list = []
 
-        print(rois)
         for roi in rois :
-            print("roi:", roi)
             center_points_list.append(roi.to_position2D().to_array(order='yx'))
             hws_list.append([roi.height / 2, roi.width / 2])
 
