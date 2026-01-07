@@ -10,14 +10,14 @@ class MicroscopeInterface_LS1:
 
         self.positions_config = positions_config
         # Get the position names seperated from the settings
-        self.position_names = [posSetting.split("_")[0] for posSetting in self.positions_config.keys()]
+        self.position_names = [posSetting.rsplit("_", 1)[0] for posSetting in self.positions_config.keys()]
         # Make the position to PositionSettings and channel lookup table
         self.pos_to_PosSettings = {}
         self.pos_to_Channel = {}
         for pos_name in positions_config.keys() :
-            position_setting = pos_name.split("_")
-            self.pos_to_PosSettings[position_setting[0]] = pos_name
-            self.pos_to_Channel[position_setting[0]] = positions_config[pos_name]["filename"].replace(".tif","").split("_")[-1]
+            position_settings_splitted = pos_name.rsplit("_", 1)
+            self.pos_to_PosSettings[position_settings_splitted[0]] = pos_name
+            self.pos_to_Channel[position_settings_splitted[0]] = positions_config[pos_name]["filename"].replace(".tif","").split("_")[-1]
 
         self.PosSettings_to_pos = {v:k for k, v in self.pos_to_PosSettings.items()}
         self.microscope = pymcs.Microscope()
@@ -114,14 +114,14 @@ class SimulatedMicroscopeInterface_LS1 :
     def __init__(self, positions_config, max_timeout=8) :
         self.positions_config = positions_config
         # Get the position names seperated from the settings
-        self.position_names = [posSetting.split("_")[0] for posSetting in self.positions_config.keys()]
+        self.position_names = [posSetting.rsplit("_", 1)[0] for posSetting in self.positions_config.keys()]
         # Make the position to PositionSettings and channel lookup table
         self.pos_to_PosSettings = {}
         self.pos_to_Channel = {}
         for pos_name in positions_config.keys() :
-            position_setting = pos_name.split("_")
-            self.pos_to_PosSettings[position_setting[0]] = pos_name
-            self.pos_to_Channel[position_setting[0]] = positions_config[pos_name]["filename"].replace(".tif","").split("_")[-1]
+            position_settings_splitted = pos_name.rsplit("_", 1)
+            self.pos_to_PosSettings[position_settings_splitted[0]] = pos_name
+            self.pos_to_Channel[position_settings_splitted[0]] = positions_config[pos_name]["filename"].replace(".tif","").split("_")[-1]
         
         self.nb_positions = len(self.position_names)
         self.current_position_index = 0
