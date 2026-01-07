@@ -530,6 +530,12 @@ def make_layout():
         button_save.label = "Save movie"
         button_save.button_type = "success"
         frames[0].save(name, save_all=True, append_images=frames[1:], duration=100, loop=0)
+
+        import moviepy as mp
+
+        clip = mp.VideoFileClip(name)
+        clip.write_videofile(name.replace(".gif",".mp4"))
+
         #status.text = "Movie saved as timelapse_multi_rois.gif"
 
         #_______________________________________________________
