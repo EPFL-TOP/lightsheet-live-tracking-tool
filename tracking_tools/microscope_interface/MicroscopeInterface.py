@@ -111,7 +111,7 @@ class MicroscopeInterface_LS1:
 
 
 class SimulatedMicroscopeInterface_LS1 :
-    def __init__(self, positions_config, max_timeout=8) :
+    def __init__(self, positions_config, starting_timepoint=0, max_timeout=8) :
         self.positions_config = positions_config
         # Get the position names seperated from the settings
         self.position_names = [posSetting.rsplit("_", 1)[0] for posSetting in self.positions_config.keys()]
@@ -125,7 +125,7 @@ class SimulatedMicroscopeInterface_LS1 :
         
         self.nb_positions = len(self.position_names)
         self.current_position_index = 0
-        self.timepoint = 0
+        self.timepoint = starting_timepoint
         self.timeout_count = 1
         # Send x timeouts before pausing
         self.max_timeout = max_timeout
@@ -185,13 +185,14 @@ class SimulatedMicroscopeInterface_LS1 :
             return None, None, True
         # Go through positions in a round robin cycle
         current_pos = self.position_names[self.current_position_index]
+        current_timepoint = self.timepoint
         # Update timepoint if after a full cycle
         if self.current_position_index == 0 :
             self.timepoint = self.timepoint + 1
         # Update position for the next call
         self.current_position_index = (self.current_position_index + 1) % self.nb_positions
-        self.logger.info(f"Pausing for position [{current_pos}] at timepoint {self.timepoint}")
-        return current_pos, self.timepoint, False
+        self.logger.info(f"Pausing for position [{current_pos}] at timepoint {current_timepoint}")
+        return current_pos, current_timepoint, False
 
 
     def pause_after_position(self) :
@@ -224,14 +225,27 @@ class SimulatedMicroscopeInterface_LS1 :
 
     
 class SimulatedMicroscopeInterface_General :
-    def __init__(self, positions_config) :
+    def __init__(self, positions_config, starting_timepoint=0) :
         self.positions_config = positions_config
         self.position_names = list(self.positions_config.keys())
         self.nb_positions = len(self.position_names)
         self.logger = init_logger(self.__class__.__name__)
-        # Get the naming format
-        self.nb_digits = self.detect_format(self.positions_config[next(iter(self.positions_config))]["filename"])
-        self.timepoint = 0
+
+
+        # Positions naming format
+
+        self.nb_digits = {}
+        self.suffixes = {}
+
+        for pos_name, cfg in self.positions_config.items() :
+            digits, suffix = self.detect_format(cfg["filename"])
+            self.nb_digits[pos_name] = digits
+            self.suffixes[pos_name] = suffix
+
+            self.logger.info(f"Position [{pos_name}] format: digits={digits}, suffix='{suffix}'")
+
+        # self.nb_digits = self.detect_format(self.positions_config[next(iter(self.positions_config))]["filename"])
+        self.timepoint = starting_timepoint
         self.current_position_index = 0
 
     def wait_for_image(self, timeout_ms=100) :
@@ -242,8 +256,10 @@ class SimulatedMicroscopeInterface_General :
 
 
     def read_image(self, position_name, timepoint) :
-        nb_zeros = self.nb_digits - len(str(timepoint))
-        filename = "t" + "0" * nb_zeros + str(timepoint) + ".tif"
+        digits = self.nb_digits[position_name]
+        suffix = self.suffixes[position_name]
+        
+        filename = f"t{timepoint:0{digits}d}{suffix}.tif"
         image_dir = self.positions_config[position_name]["images_dir"]
         image_path = os.path.join(image_dir, filename)
 
@@ -262,22 +278,24 @@ class SimulatedMicroscopeInterface_General :
     def get_pos_timepoint(self) :
         # Go through positions in a round robin cycle
         current_pos = self.position_names[self.current_position_index]
+        current_timepoint = self.timepoint
         # Update timepoint if after a full cycle
         if self.current_position_index == 0 :
             self.timepoint = self.timepoint + 1
         # Update position for the next call
         self.current_position_index = (self.current_position_index + 1) % self.nb_positions
-        self.logger.info(f"Position [{current_pos}] at timepoint {self.timepoint}")
-        return current_pos, self.timepoint
+        self.logger.info(f"Position [{current_pos}] at timepoint {current_timepoint}")
+        return current_pos, current_timepoint
 
 
     def detect_format(self, filename) :
         import re
-        match = re.match(r"t(\d+)\.tif$", filename)
+        match = re.match(r"t(\d+)(.*)\.tif$", filename)
         if not match:
             self.logger.info(f"Could not match a filename with format t(\d+)\.tif$, {filename}")
         digits = match.group(1)
-        return len(digits)
+        suffix = match.group(2)
+        return len(digits), suffix
     
     def relative_move(self, position_name, shift_x, shift_y, shift_z) :
         self.logger.info(f"Relative move :[{position_name}], x={shift_x}, y={shift_y}, z={shift_z}")

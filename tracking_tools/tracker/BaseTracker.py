@@ -606,7 +606,7 @@ class MultiRoIBaseTracker :
                 self.tracked_points = [[roi.to_position3D(z=self.shape[0]//2) for roi in self.rois]]
                 self.tracking_state = TrackingState.TRACKING_ON
                 self.detected = False
-                return Position3D.invalid(), TrackingState.WAIT_FOR_NEXT_TIME_POINT # Placeholder return
+                return [Position3D.invalid()], TrackingState.WAIT_FOR_NEXT_TIME_POINT # Placeholder return
 
             # Process input frame
             frame = self._downsample(frame)
@@ -631,12 +631,12 @@ class MultiRoIBaseTracker :
                     start = stop
 
             if tracking_state == TrackingState.TRACKING_OFF :
-                return Position3D.invalid(), self.tracking_state # Placeholder return
+                return [Position3D.invalid()], self.tracking_state # Placeholder return
             
             self.tracks.append(tracks_by_roi)
 
             if tracking_state == TrackingState.WAIT_FOR_NEXT_TIME_POINT :
-                return Position3D.invalid(), self.tracking_state # Placeholder
+                return [Position3D.invalid()], self.tracking_state # Placeholder
             
             else :
                 # Compute predicted ROIs
@@ -680,7 +680,7 @@ class MultiRoIBaseTracker :
             self.tracked_points.append(new_positions)
             return [position.scale(scaling_factor=self.scaling_factor, down=False, axes="xy") for position in new_positions], self.tracking_state
         else :
-            return Position3D.invalid(), self.tracking_state # Placeholder return
+            return [Position3D.invalid()], self.tracking_state # Placeholder return
 
     def update_rolling_window(self, frame_proj) :
         self.window_frames.append(frame_proj)
@@ -1005,7 +1005,7 @@ class MultiRoIBaseTracker :
         self.tracked_points.append(self.tracked_points[-1])
         self.predicted_points.append(Position2D.invalid())
         # self.detected_points.append(Position2D.invalid())
-        self.rois_list.append([self._get_past_roi(-1)])
+        self.rois_list.append(self._get_past_roi(-1))  #### CHANGED
         self.tracks.append([])
         self.logger.info("Filled placeholder data for tracker.")
     
