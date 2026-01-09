@@ -945,7 +945,7 @@ class MultiRoIBaseTracker :
                 weights_path = pth_files[0]
             else :
                 weights_path = self.model_path
-            detector = Detector(model_path=weights_path, device="cuda")
+            detector = Detector(model_path=weights_path)
         return detector
 
     def compute_rois_matching_metrics(self, roi1, roi2):
