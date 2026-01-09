@@ -123,9 +123,9 @@ def make_layout():
     p_trajectory_xz.scatter('x', 'z', size=8, color=color_mapper_trajectory, source=trajectory_source)
     p_trajectory_yz.scatter('y', 'z', size=8, color=color_mapper_trajectory, source=trajectory_source)
     # Trajectory highlights
-    p_trajectory_xy.circle("x", "y", size=10, line_color="red", fill_color="red", line_width=2, source=trajectory_highlight_source)
-    p_trajectory_yz.circle("y", "z", size=10, line_color="red", fill_color="red", line_width=2, source=trajectory_highlight_source)
-    p_trajectory_xz.circle("x", "z", size=10, line_color="red", fill_color="red", line_width=2, source=trajectory_highlight_source)
+    p_trajectory_xy.scatter("x", "y", size=10, line_color="red", fill_color="red", line_width=2, source=trajectory_highlight_source)
+    p_trajectory_yz.scatter("y", "z", size=10, line_color="red", fill_color="red", line_width=2, source=trajectory_highlight_source)
+    p_trajectory_xz.scatter("x", "z", size=10, line_color="red", fill_color="red", line_width=2, source=trajectory_highlight_source)
     
 
 
@@ -549,6 +549,19 @@ def make_layout():
     button_save = Button(label="Save movie", button_type="success")
     button_save.on_click(save_movie_short)
 
+    _root = tk.Tk()
+    _root.withdraw()
+
+    #_______________________________________________________
+    def _get_parent():
+        win = tk.Toplevel(_root)
+        win.overrideredirect(True)
+        win.geometry("1x1+200+200")
+        win.lift()
+        win.attributes("-topmost", True)
+        win.focus_force()
+        return win
+
     #_______________________________________________________
     def open_file_dialog():
         try:
@@ -577,6 +590,26 @@ def make_layout():
             status.text = f"Error: {e}"
 
     #_______________________________________________________
+    def select_folder():
+        parent = _get_parent()
+        folder = filedialog.askdirectory(parent=parent)
+        parent.destroy()
+
+        if folder:
+            if os.path.isdir(folder):
+                status.text = f"Selected folder: {folder}"
+                pos_list_full=glob.glob(os.path.join(folder, "*", "embryo_tracking"))
+                pos_list = []
+                for p in pos_list_full:
+                    pos_list.append(os.path.split(os.path.split(p)[0])[-1])
+                dropdown_position.options = pos_list
+
+        else:
+            status.text = "No directory selected."
+
+
+
+    #_______________________________________________________
     def update_pos(attr, old, new):
         
         dir_path = os.path.join(status.text.replace("Selected folder: ",""), new )
@@ -587,7 +620,7 @@ def make_layout():
     dropdown_position.on_change('value', update_pos)
 
     select_button = Button(label="Browse Folder...", button_type="primary")
-    select_button.on_click(open_file_dialog)
+    select_button.on_click(select_folder)
 
     select_layout = row(mk_div(), select_button, mk_div(), dropdown_position)
     slider_layout = row(mk_div(), slider)
