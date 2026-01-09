@@ -24,8 +24,9 @@ class Detector :
             in_features = Detector.model.roi_heads.box_predictor.cls_score.in_features
             Detector.model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
             self.logger.info(f'Initialize model running on device: {device},  with weights: {model_path}')
-            if device==torch.device('cpu'):
+            if device==torch.device('cpu') or not torch.cuda.is_available():
                 checkpoint = torch.load(model_path, weights_only=True, map_location=torch.device('cpu'))
+                device=torch.device('cpu')
             else:
                 checkpoint = torch.load(model_path, weights_only=True)
             Detector.model.load_state_dict(checkpoint['model_state_dict'])
