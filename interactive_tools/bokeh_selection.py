@@ -180,6 +180,7 @@ def make_layout():
     p.add_layout(labels)
     p.add_layout(labels_detect)
 
+
     # Edit tools
     box_edit = BoxEditTool(renderers=[rect_glyph_select], num_objects=100)
     p.add_tools(box_edit)
@@ -578,7 +579,7 @@ def make_layout():
         score=[]
         for idx, box in enumerate(labels[0]['boxes']):
             x_min, y_min, x_max, y_max = box.cpu().numpy()
-            score.append(round(labels[0]['scores'][idx].cpu().numpy().tolist(), 3))
+            score.append(round(labels[0]['scores'][idx].cpu().numpy().tolist(), 4))
             x.append(x_min+(x_max-x_min)/2.)
             y.append(image.shape[1]-(y_min+(y_max-y_min)/2.))
             width.append(y_max-y_min)
