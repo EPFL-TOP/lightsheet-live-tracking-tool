@@ -163,16 +163,18 @@ class SimulatedMicroscopeInterface_LS1 :
         image_path = os.path.join(self.positions_config[PosSetting]["images_dir"], f"t{time_point:04}_{channel}.tif")
 
         if not os.path.exists(image_path):
-            self.logger.error(f"Missing image at{image_path}")
-            return None
+            msg = f"Missing image at {image_path}"
+            self.logger.error(msg)
+            raise FileNotFoundError(msg)
         try :
             image = tifffile.imread(str(image_path))
             self.logger.info(f"Read image {image_path}")
             self.logger.info(f"Image shape : {image.shape}")
             return image
         except Exception as e:
-            self.logger.error(f'Cannot read {image_path}: {e}')
-            return None
+            msg = f"Cannot read {image_path}: {e}"
+            self.logger.error(msg)
+            raise RuntimeError(msg) from e
 
 
     # Simulates LS1 wait for pause function
@@ -264,16 +266,18 @@ class SimulatedMicroscopeInterface_General :
         image_path = os.path.join(image_dir, filename)
 
         if not os.path.exists(image_path):
-            self.logger.error(f"Missing image at{image_path}")
-            return None
+            msg = f"Missing image at {image_path}"
+            self.logger.error(msg)
+            raise FileNotFoundError(msg)
         try :
             image = tifffile.imread(str(image_path))
             self.logger.info(f"Read image {image_path}")
             self.logger.info(f"Image shape : {image.shape}")
             return image
         except Exception as e:
-            self.logger.error(f'Cannot read {image_path}: {e}')
-            return None
+            msg = f"Cannot read {image_path}: {e}"
+            self.logger.error(msg)
+            raise RuntimeError(msg) from e
 
     def get_pos_timepoint(self) :
         # Go through positions in a round robin cycle
@@ -292,7 +296,7 @@ class SimulatedMicroscopeInterface_General :
         import re
         match = re.match(r"t(\d+)(.*)\.tif$", filename)
         if not match:
-            self.logger.info(f"Could not match a filename with format t(\d+)\.tif$, {filename}")
+            self.logger.info(f"Could not match a filename with format t(\\d+)(.*)\\.tif$, {filename}")
         digits = match.group(1)
         suffix = match.group(2)
         return len(digits), suffix
@@ -300,4 +304,6 @@ class SimulatedMicroscopeInterface_General :
     def relative_move(self, position_name, shift_x, shift_y, shift_z) :
         self.logger.info(f"Relative move :[{position_name}], x={shift_x}, y={shift_y}, z={shift_z}")
         return
+    
+
         
