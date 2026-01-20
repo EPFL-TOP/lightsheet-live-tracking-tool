@@ -80,7 +80,7 @@ if __name__ == "__main__":
     position_config = get_pos_config(dirpath, "embryo_tracking")
     print(position_config)
 
-    microscope = SimulatedMicroscopeInterface_General(position_config)
+    microscope = SimulatedMicroscopeInterface_General(position_config,starting_timepoint=1)
     runner = TrackingRunner(
         microscope_interface=microscope,
         positions_config=position_config,
