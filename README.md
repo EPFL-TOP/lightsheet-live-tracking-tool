@@ -20,8 +20,9 @@
 | <img src="videos/workflow-lilittool.gif" alt="Databay showcase gif" title="Databay showcase gif" width="500"/> |
 
 
-![Demo video](thumbnail.png)
-[Click to watch](videos/workflow-lilittool.mp4)
+
+
+[![Demo video](https://img.youtube.com/vi/VIDEO_ID/0.jpg)](https://sv-open.epfl.ch/upoates-public/LiLiTTool/test2.mp4)
 
 ## Installation
 
