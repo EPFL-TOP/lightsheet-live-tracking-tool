@@ -15,13 +15,7 @@
 | <img src="videos/Fluo-C2DL-Huh7-01_Settings_1.gif" alt="Databay showcase gif" title="Databay showcase gif" width="500"/> |
 
 
-| Workflow example|
-|:------------------------:|
-| <img src="videos/workflow-lilittool.gif" alt="Databay showcase gif" title="Databay showcase gif" width="500"/> |
-
-
-
-[![Demo video](videos/demo-preview.png)](https://sv-open.epfl.ch/upoates-public/LiLiTTool/test2.mp4)
+[![Workflow demo video](videos/demo-preview.png)](https://sv-open.epfl.ch/upoates-public/LiLiTTool/workflow-lilittool.mov)
 
 ## Installation
 
