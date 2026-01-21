@@ -18,10 +18,10 @@
 | Workflow example|
 |:------------------------:|
 | <img src="videos/workflow-lilittool.gif" alt="Databay showcase gif" title="Databay showcase gif" width="500"/> |
-| Workflow example|
-|:------------------------:|
-| <img src="videos/workflow-lilittool.mp4" alt="Databay showcase gif" title="Databay showcase gif" width="500"/> |
 
+
+![Demo video](thumbnail.png)
+[Click to watch](videos/workflow-lilittool.mp4)
 
 ## Installation
 
