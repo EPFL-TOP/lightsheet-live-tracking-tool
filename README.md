@@ -21,8 +21,7 @@
 
 
 
-
-[![Demo video](https://img.youtube.com/vi/VIDEO_ID/0.jpg)](https://sv-open.epfl.ch/upoates-public/LiLiTTool/test2.mp4)
+[![Demo video](videos/demo-preview.png)](https://sv-open.epfl.ch/upoates-public/LiLiTTool/test2.mp4)
 
 ## Installation
 
