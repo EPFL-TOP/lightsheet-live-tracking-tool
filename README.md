@@ -15,6 +15,10 @@
 | <img src="videos/Fluo-C2DL-Huh7-01_Settings_1.gif" alt="Databay showcase gif" title="Databay showcase gif" width="500"/> |
 
 
+| Workflow example|
+|:------------------------:|
+| <img src="videos/workflow-lilittool.gif" alt="Databay showcase gif" title="Databay showcase gif" width="500"/> |
+
 
 ## Installation
 
