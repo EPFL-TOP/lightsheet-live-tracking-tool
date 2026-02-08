@@ -613,10 +613,11 @@ def make_layout():
     def update_pos(attr, old, new):
         
         dir_path = os.path.join(status.text.replace("Selected folder: ",""), new )
+        slider.value=0
         print("dir path ",dir_path)
         load_images(dir_path)
         load_tracking(dir_path)
-        slider.value=0
+        
     dropdown_position.on_change('value', update_pos)
 
     select_button = Button(label="Browse Folder...", button_type="primary")

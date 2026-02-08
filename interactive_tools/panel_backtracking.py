@@ -130,7 +130,7 @@ def make_layout():
     p_tracks.image('image', x='x', y='y', dw='dw', dh='dh', source=tracks_displayed_source,  color_mapper=color_mapper)
 
     # Display the tracks points
-    p_tracks.circle("x", "y", source=tracks_points_source, size=6, color="red", selection_alpha=1.0, nonselection_alpha=1.0)
+    p_tracks.scatter("x", "y", source=tracks_points_source, size=6, color="red", selection_alpha=1.0, nonselection_alpha=1.0)
 
     # RGBA overlay
     overlay_glyph = p.image_rgba(
