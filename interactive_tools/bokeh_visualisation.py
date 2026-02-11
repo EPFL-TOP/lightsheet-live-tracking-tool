@@ -470,6 +470,7 @@ def make_layout():
     def reload_images():
         load_images(os.path.join(status.text.replace("Selected folder: ",""), dropdown_position.value ), True)
         load_tracking(os.path.join(status.text.replace("Selected folder: ",""), dropdown_position.value ), True)
+        callback_slider(None, None, None)
     btn_reload = Button(label="Reload", button_type="success")
     btn_reload.on_click(reload_images)
 
