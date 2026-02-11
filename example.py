@@ -19,7 +19,7 @@ position_tracker_config = {
 roi_tracker_config = {
     "window_length": 10,
     "grid_size": 40,
-    "scaling_factor": 2,
+    "scaling_factor": 0,
     "server_addresses": ..., # List of server addresses for remote GPU execution. (imaging-server-kit)
     "base_kernel_size_xy": 41,
     "kernel_size_z": 5,

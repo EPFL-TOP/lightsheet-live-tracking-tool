@@ -468,8 +468,8 @@ def make_layout():
     invert_axis_checkboxgroup.on_change("active", invert_axis_callback)
     #_______________________________________________________
     def reload_images():
-        load_images(status.text.replace("Selected folder: ",""), True)
-        load_tracking(status.text.replace("Selected folder: ",""), True)
+        load_images(os.path.join(status.text.replace("Selected folder: ",""), dropdown_position.value ), True)
+        load_tracking(os.path.join(status.text.replace("Selected folder: ",""), dropdown_position.value ), True)
     btn_reload = Button(label="Reload", button_type="success")
     btn_reload.on_click(reload_images)
 
