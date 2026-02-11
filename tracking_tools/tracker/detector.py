@@ -15,7 +15,7 @@ class Detector :
     def __init__(
             self,
             model_path,
-            device,
+            # device,
             num_classes=2
     ) :
         self.logger = init_logger(self.__class__.__name__)
@@ -23,12 +23,12 @@ class Detector :
             Detector.model = torchvision.models.detection.fasterrcnn_resnet50_fpn_v2(weights='FasterRCNN_ResNet50_FPN_V2_Weights.DEFAULT')
             in_features = Detector.model.roi_heads.box_predictor.cls_score.in_features
             Detector.model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+            
+            device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
             self.logger.info(f'Initialize model running on device: {device},  with weights: {model_path}')
-            if device==torch.device('cpu') or not torch.cuda.is_available():
-                checkpoint = torch.load(model_path, weights_only=True, map_location=torch.device('cpu'))
-                device=torch.device('cpu')
-            else:
-                checkpoint = torch.load(model_path, weights_only=True)
+
+            checkpoint = torch.load(model_path, weights_only=True, map_location=torch.device('cpu'))
+
             Detector.model.load_state_dict(checkpoint['model_state_dict'])
             Detector.model.to(device)
             Detector.model.eval()
