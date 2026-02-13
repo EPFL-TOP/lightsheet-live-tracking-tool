@@ -258,6 +258,13 @@ def make_layout():
                 continue
             im =  tifffile.imread(img)
 
+            frames = np.stack(im)
+            q1, q99 = np.quantile(frames, [0.01, 0.99])
+            print(f"Quantile 1%: {q1}, Quantile 99%: {q99}")
+            value_range = q99 - q1
+            normalized_image = np.clip((frames - q1) / value_range, 0, 1)
+            im = normalized_image
+
             max_value = np.max(im)
             min_value = np.min(im)
             max_proj_norm = (im - min_value)/(max_value-min_value)*255
