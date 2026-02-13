@@ -635,6 +635,15 @@ def make_layout():
             if im.ndim == 2 :
                 im = im[np.newaxis, ...]
             status.text = f"Selected image: {filename}"
+            
+            frames = np.stack(im)
+            q1, q99 = np.quantile(frames, [0.01, 0.99])
+            print(f"Quantile 1%: {q1}, Quantile 99%: {q99}")
+            value_range = q99 - q1
+            normalized_image = np.clip((frames - q1) / value_range, 0, 1)
+            im = normalized_image
+
+
             update_original(im)
 
         except Exception as e:
