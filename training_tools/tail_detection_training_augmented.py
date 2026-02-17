@@ -65,8 +65,18 @@ class CellDataset(Dataset):
         if self.transforms:
             augmented = self.transforms(image=image.astype(np.uint8), bboxes=boxes, labels=labels)
             image = augmented['image']
-            boxes = torch.tensor(augmented['bboxes'], dtype=torch.float32)
-            labels = torch.tensor(augmented['labels'], dtype=torch.int64)
+
+            # Albumentations may remove boxes if they move outside image
+            if len(augmented['bboxes']) == 0:
+                boxes = torch.zeros((0, 4), dtype=torch.float32)
+                labels = torch.zeros((0,), dtype=torch.int64)
+            else:
+                boxes = torch.tensor(augmented['bboxes'], dtype=torch.float32)
+                labels = torch.tensor(augmented['labels'], dtype=torch.int64)
+
+
+            #boxes = torch.tensor(augmented['bboxes'], dtype=torch.float32)
+            #labels = torch.tensor(augmented['labels'], dtype=torch.int64)
         else:
             image = ToTensorV2()(image=image.astype(np.uint8))['image']
             boxes = torch.tensor(boxes, dtype=torch.float32)
