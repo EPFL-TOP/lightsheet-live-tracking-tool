@@ -83,6 +83,13 @@ def get_transform(train=True):
             A.HorizontalFlip(p=0.5),
             A.Rotate(limit=30, p=0.5),
 #            A.RandomBrightnessContrast(p=0.5),
+            A.OneOf([
+                # Mild scaling: 0.8x – 1.2x
+                A.Affine(scale=(0.8, 1.2), p=1.0),
+                # Strong scaling: 1.8x – 2.2x
+                A.Affine(scale=(1.8, 2.2), p=1.0),
+            ], p=0.6),
+
             A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=0.6),
 
             A.Resize(512, 512),
