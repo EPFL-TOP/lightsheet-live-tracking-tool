@@ -232,8 +232,6 @@ class SimulatedMicroscopeInterface_General :
         self.nb_positions = len(self.position_names)
         self.logger = init_logger(self.__class__.__name__)
 
-
-
         # Positions naming format
 
         self.nb_digits = {}
@@ -305,6 +303,9 @@ class SimulatedMicroscopeInterface_General :
         self.logger.info(f"Relative move :[{position_name}], x={shift_x}, y={shift_y}, z={shift_z}")
         return
     
+
+
+
 
 
 
