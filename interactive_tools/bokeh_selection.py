@@ -306,8 +306,8 @@ def make_layout():
         print("Updating mask")
         working = working_source.data["image"][0]
         base_kernel = sigma_size_slider.value
-        scaling_factor = 2 ** int(dropdown_downscale.value)
-        mask = tutils.filter_and_threshold(working, gaussian_kernel=base_kernel//scaling_factor)
+        #scaling_factor = 2 ** int(dropdown_downscale.value)
+        mask = tutils.filter_and_threshold(working, gaussian_kernel=base_kernel)
         mask_rgba = binary2rgba(mask)
         alpha_slider_value = float(mask_alpha_slider.value)
         mask_rgba_source.data = dict(
@@ -345,7 +345,7 @@ def make_layout():
             center_points_list.append(center_point)
             hws_list.append(hws)
 
-        points, lengths = tutils.generate_uniform_grid_in_region_list(working, center_points_list, hws_list, grid_size=grid_size_slider.value, gaussian_kernel=base_kernel//scaling_factor)
+        points, lengths = tutils.generate_uniform_grid_in_region_list(working, center_points_list, hws_list, grid_size=grid_size_slider.value, gaussian_kernel=base_kernel)
         points[:,1] = working.shape[0] - points[:,1]
         print(lengths)
 
@@ -692,7 +692,7 @@ def make_layout():
     p.on_event(SelectionGeometry, select_roi_callback)
     contrast_slider.on_change('value', update_contrast)
     dropdown_downscale.on_change("value", update_rectangles, update_working)
-    dropdown_blur_factor.on_change("value", update_rectangles, update_working)
+    dropdown_blur_factor.on_change("value", update_working)
     select_image_button.on_click(select_file)
     working_source.on_change("data", update_display, update_mask, update_points)
     original_source.on_change("data", update_working)
