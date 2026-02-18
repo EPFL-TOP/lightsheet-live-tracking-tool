@@ -92,7 +92,7 @@ def get_transform(train=True):
             A.RandomRotate90(p=0.5),
             A.HorizontalFlip(p=0.5),
             A.Rotate(limit=30, p=0.5),
-            A.Affine(scale=(0.8, 1.2), p=0.5)
+            A.Affine(scale=(0.8, 1.2), p=0.5),
 #            A.RandomBrightnessContrast(p=0.5),
             #A.OneOf([
                 # Mild scaling: 0.8x – 1.2x
