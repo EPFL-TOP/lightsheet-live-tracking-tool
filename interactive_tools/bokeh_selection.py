@@ -64,7 +64,7 @@ def make_layout():
     slice_slider = Slider(start=0, end=0, value=0, step=1, title="z-slice", width=250)
     mask_alpha_slider = Slider(start=0, end=1, value=0, step=0.01, title="Mask opacity", width=200)
     points_alpha_slider = Slider(start=0, end=1, value=0, step=0.01, title="Points opacity", width=200)
-    sigma_size_slider = Slider(start=1, end=50, value=41, step=1, title="Gaussian filter base kernel size", width=200)
+    sigma_size_slider = Slider(start=1, end=50, value=10, step=1, title="Gaussian filter base kernel size", width=200)
     grid_size_slider = Slider(start=10, end=100, value=40, step=5, title="Grid size for point generation", width=200)
 
     # Buttons
