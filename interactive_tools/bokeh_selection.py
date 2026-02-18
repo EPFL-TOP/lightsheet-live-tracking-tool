@@ -14,6 +14,7 @@ import numpy as np
 import json, os, pathlib, glob, sys
 import tifffile
 import socket
+from skimage.filters import gaussian
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -36,12 +37,14 @@ def make_layout():
 
     ####### GENERAL WIDGETS ##########
     # Checkboxes
-    checkbox_maxproj = CheckboxGroup(labels=["Max projection"], active=[])
+    checkbox_maxproj = CheckboxGroup(labels=["Max projection"], active=[0])
     checkbox_detection = CheckboxGroup(labels=["Use detection"], active=[])
     
     # Dropdowns
     downscale=['0','1','2','3','4','5']
     dropdown_downscale  = Select(value=downscale[0], title='Downscaling', options=downscale)
+    blur_factors = ['0','2','4','6','8','10','12','14','16','18','20']
+    dropdown_blur_factor  = Select(value=blur_factors[0], title='Gaussian blur factor', options=blur_factors)
     try:
         base_path = os.path.dirname(__file__)
     except NameError:
@@ -62,6 +65,7 @@ def make_layout():
     mask_alpha_slider = Slider(start=0, end=1, value=0, step=0.01, title="Mask opacity", width=200)
     points_alpha_slider = Slider(start=0, end=1, value=0, step=0.01, title="Points opacity", width=200)
     sigma_size_slider = Slider(start=1, end=50, value=41, step=1, title="Gaussian filter base kernel size", width=200)
+    grid_size_slider = Slider(start=10, end=100, value=40, step=5, title="Grid size for point generation", width=200)
 
     # Buttons
     btn_save = Button(label="Save Tracking RoIs", button_type="success")
@@ -269,7 +273,9 @@ def make_layout():
         scaling_factor = 2 ** int(dropdown_downscale.value)
         if scaling_factor > 1 :
             working = downscale_image(working, scaling_factor)
-
+        blur_factor = int(dropdown_blur_factor.value)
+        if blur_factor > 0 :
+            working = gaussian(working, blur_factor, preserve_range=True)
         # Update data source
         working_source.data = dict(
             image=[working], x=[0], y=[0], dw=[working.shape[1]], dh=[working.shape[0]]
@@ -339,7 +345,7 @@ def make_layout():
             center_points_list.append(center_point)
             hws_list.append(hws)
 
-        points, lengths = tutils.generate_uniform_grid_in_region_list(working, center_points_list, hws_list, grid_size=40, gaussian_kernel=base_kernel//scaling_factor)
+        points, lengths = tutils.generate_uniform_grid_in_region_list(working, center_points_list, hws_list, grid_size=grid_size_slider.value, gaussian_kernel=base_kernel//scaling_factor)
         points[:,1] = working.shape[0] - points[:,1]
         print(lengths)
 
@@ -381,8 +387,10 @@ def make_layout():
         )
         slice_slider.value = 0
         # Set the maximum slider value to the number of slices
-        slice_slider.end = arr.shape[0] - 1
-
+        if checkbox_maxproj.active == [] :
+            slice_slider.end = arr.shape[0] - 1
+        else :
+            slice_slider.end = 1
         # Remove the rectangles
         detect_rectangle_source.data = dict(
             x=[], y=[], width=[], height=[], score=[], label_x=[], label_y=[]
@@ -529,6 +537,10 @@ def make_layout():
         outdict = {
             'shape':original_source.data["image"][0].shape, 
             'detection':use_detection, 
+            'scaling_factor':int(dropdown_downscale.value),
+            'blur_factor':int(dropdown_blur_factor.value),
+            'mask_kernel_size':sigma_size_slider.value,
+            'grid_size':grid_size_slider.value,
             "tracking_mode": dropdown_tracking_mode.value, 
             "filename":os.path.basename(filename),
             'RoIs':out, 
@@ -539,9 +551,6 @@ def make_layout():
         with open(os.path.join(out_dirname,"tracking_RoIs.json"), "w") as f:
             json.dump(outdict, f, indent=2)
         print("Saved: ",os.path.join(out_dirname,"tracking_RoIs.json"))
-
-
-
 
     #_______________________________________________________
     def choose_model_detect(attr, old, new):
@@ -560,6 +569,9 @@ def make_layout():
         image = original_source.data["image"][0].copy()
         image = np.max(image, axis=0)
         image = downscale_image(image, scaling_factor)
+        blur_factor = int(dropdown_blur_factor.value)
+        if blur_factor > 0 :
+            image = gaussian(image, blur_factor, preserve_range=True)
         print(image.shape)
         # image_flip = np.flip(image,0)
         # image_flip_cp = image_flip.copy()
@@ -634,16 +646,8 @@ def make_layout():
             # Handle 2D images as 3D images with depth = 1
             if im.ndim == 2 :
                 im = im[np.newaxis, ...]
+
             status.text = f"Selected image: {filename}"
-            
-            frames = np.stack(im)
-            q1, q99 = np.quantile(frames, [0.01, 0.99])
-            print(f"Quantile 1%: {q1}, Quantile 99%: {q99}")
-            value_range = q99 - q1
-            normalized_image = np.clip((frames - q1) / value_range, 0, 1)
-            im = normalized_image
-
-
             update_original(im)
 
         except Exception as e:
@@ -688,6 +692,7 @@ def make_layout():
     p.on_event(SelectionGeometry, select_roi_callback)
     contrast_slider.on_change('value', update_contrast)
     dropdown_downscale.on_change("value", update_rectangles, update_working)
+    dropdown_blur_factor.on_change("value", update_rectangles, update_working)
     select_image_button.on_click(select_file)
     working_source.on_change("data", update_display, update_mask, update_points)
     original_source.on_change("data", update_working)
@@ -696,7 +701,7 @@ def make_layout():
     mask_alpha_slider.on_change("value", update_mask_alpha)
     points_alpha_slider.on_change("value", update_points_alpha)
     sigma_size_slider.on_change("value_throttled", update_mask, update_points)
-
+    grid_size_slider.on_change("value_throttled", update_points)
 
 
     ########## LAYOUT ##########
@@ -715,10 +720,16 @@ def make_layout():
         row(
             mk_div(),select_image_button,mk_div(), select_model_button, 
         ), 
+                           
+
         row(
-            p,column(checkbox_maxproj, contrast_slider, dropdown_downscale, dropdown_tracking_mode,
-                     dropdown_model,detect_button, checkbox_detection, mask_alpha_slider, 
-                     points_alpha_slider, sigma_size_slider)
+            p,mk_div(),column(mk_div(),
+                     row(dropdown_downscale,dropdown_blur_factor),dropdown_tracking_mode, 
+                     grid_size_slider, sigma_size_slider,checkbox_detection,
+                     mk_div(),mk_div(),
+                     checkbox_maxproj, contrast_slider, 
+                     dropdown_model,detect_button, mask_alpha_slider, 
+                     points_alpha_slider)
         ), 
         slider_layout, controls, status_layout,status_layout2)
     
