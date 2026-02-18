@@ -547,7 +547,7 @@ class MultiRoIBaseTracker :
             self.shape = self.current_frame.shape
             self.current_frame_proj = np.max(self.current_frame, axis=0)
             if self.blur_factor > 0 :
-                self.preprocessed_frame = gaussian(self.current_frame_proj, self.blur_factor) 
+                self.preprocessed_frame = gaussian(self.current_frame_proj, self.blur_factor, preserve_range=True) 
             else :
                 self.preprocessed_frame = self.current_frame_proj
             self.window_frames = [self.preprocessed_frame]
@@ -606,7 +606,7 @@ class MultiRoIBaseTracker :
                 self.shape = self.current_frame.shape
                 self.current_frame_proj = np.max(self.current_frame, axis=0)
                 if self.blur_factor > 0 :
-                    self.preprocessed_frame = gaussian(self.current_frame_proj, self.blur_factor) 
+                    self.preprocessed_frame = gaussian(self.current_frame_proj, self.blur_factor, preserve_range=True) 
                 else :
                     self.preprocessed_frame = self.current_frame_proj
                 self.window_frames = [self.preprocessed_frame]
@@ -623,7 +623,7 @@ class MultiRoIBaseTracker :
             self.current_frame = self._downsample(frame)
             self.current_frame_proj = np.max(self.current_frame, axis=0)
             if self.blur_factor > 0 :
-                self.preprocessed_frame = gaussian(self.current_frame_proj, self.blur_factor) 
+                self.preprocessed_frame = gaussian(self.current_frame_proj, self.blur_factor, preserve_range=True) 
             else :
                 self.preprocessed_frame = self.current_frame_proj
             self.update_rolling_window(self.preprocessed_frame)

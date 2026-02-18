@@ -84,7 +84,7 @@ class Script:
     def __init__(self):
         # list of unique parameter identifiers
         self.parameters = [
-            "pixel_size_xy", "pixel_size_z", "dirpath", "serverkit", "scaling_factor", "simulated_microscope"
+            "pixel_size_xy", "pixel_size_z", "dirpath", "serverkit", "simulated_microscope"
         ]
 
         # label of each parameter in user interface
@@ -94,7 +94,6 @@ class Script:
             "dirpath": "Data directory",
             "serverkit" : "Use serverkit",
             "simulated_microscope" : "Simulated Microscope",
-            "scaling_factor": "Scaling Factor",
         }
 
         # default parameters values loaded to user interface
@@ -104,7 +103,6 @@ class Script:
             "dirpath": "",
             "serverkit": True,
             "simulated_microscope": False,
-            "scaling_factor" : 2,
         }
         
         # types of parameters, min and max values provided in tuple
@@ -114,7 +112,6 @@ class Script:
             "dirpath": str,
             "serverkit": bool,
             "simulated_microscope": bool,
-            "scaling_factor" : int,
         }
 
         # control to use in user interface, if not defined text box will be used
@@ -123,7 +120,6 @@ class Script:
             "log_dir": "folder",
             "serverkit": "checkbox",
             "simulated_microscope": "checkbox",
-            "scaling_factor": ("combobox", [1, 2, 3, 4], "normal"),
         }
         
         # documentation shown in user interface for each parameter
@@ -133,7 +129,6 @@ class Script:
             "dirpath": "Timelapse folder",
             "serverkit": "Use the serverkit implementation for the models",
             "simulated_microscope": "Use a simulated microscope for offline debugging",
-            "scaling_factor" : "Number of downscaling applied to the images"
         }
 
         self.window_tittle = "Tracking test"
@@ -169,7 +164,6 @@ class Script:
         pixel_size_z = parameter_values['pixel_size_z'] 
         serverkit = parameter_values['serverkit']
         simulated_microscope = parameter_values['simulated_microscope']
-        scaling_factor = parameter_values['scaling_factor']
 
         # dirpath 
         dirpath = parameter_values['dirpath'] # Timelapse folder
