@@ -223,6 +223,10 @@ class PositionTrackerMultiROI :
         first_frame,
         log,
         use_detection,
+        scaling_factor,
+        blur_factor,
+        grid_size,
+        mask_kernel_size,
         position_name,
         roi_tracker_params,
         position_tracker_params,
@@ -241,7 +245,10 @@ class PositionTrackerMultiROI :
         """
 
         self.rois = rois
-        self.scaling_factor = roi_tracker_params["scaling_factor"]
+        self.scaling_factor = scaling_factor
+        self.blur_factor = blur_factor
+        self.grid_size = grid_size
+        self.mask_kernel_size = mask_kernel_size
         self.position_name = position_name
         self.pixel_size_xy = position_tracker_params["pixel_size_xy"]
         self.pixel_size_z = position_tracker_params["pixel_size_z"]
@@ -269,6 +276,10 @@ class PositionTrackerMultiROI :
             "first_frame": first_frame,
             "rois": self.rois,
             "use_detection": use_detection,
+            "scaling_factor": scaling_factor,
+            "blur_factor": blur_factor,
+            "grid_size": grid_size,
+            "mask_kernel_size": mask_kernel_size,
             "log": log,
             **base_tracker_params
         }
