@@ -6,7 +6,6 @@ from ..logger.logger import init_logger
 class MicroscopeInterface_LS1:
     def __init__(self, positions_config) :
         import pymcs
-        from pymcs.MicroscopeException import MicroscopeException
 
         self.positions_config = positions_config
         # Get the position names seperated from the settings
@@ -93,10 +92,10 @@ class MicroscopeInterface_LS1:
                 position_y=pos.position_y + shift_y,  # Y Axis is inverted for the microscope stage coordinates
                 position_z=pos.position_z - shift_z,
             )
-        except MicroscopeException as e :
-            self.logger.exception(f"Microscope error during stage move : {e}")
-        except Exception as e :
-            self.logger.exception(f"Unexpected error during stage move: {e}")
+            
+        except pymcs.MicroscopeException.MicroscopeException as e :
+            self.logger.info(f"Error during stage move : {e}")
+
 
     def connect(self) :
         self.microscope.connect()
@@ -234,6 +233,7 @@ class SimulatedMicroscopeInterface_General :
         self.logger = init_logger(self.__class__.__name__)
 
 
+
         # Positions naming format
 
         self.nb_digits = {}
@@ -306,4 +306,6 @@ class SimulatedMicroscopeInterface_General :
         return
     
 
-        
+
+
+    

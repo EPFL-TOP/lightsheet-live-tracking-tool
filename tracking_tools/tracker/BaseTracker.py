@@ -1,6 +1,7 @@
 import numpy as np
 from ..utils.tracking_utils import *
 from scipy.ndimage import center_of_mass
+from skimage.filters import gaussian
 from ..logger.logger import init_logger
 from ..utils.structures import ROI, Position2D, Position3D, Shift2D
 import copy
@@ -507,7 +508,8 @@ class MultiRoIBaseTracker :
             server_addresses,
             window_length,
             grid_size,
-            base_kernel_size_xy,
+            mask_kernel_size,
+            blur_factor,
             kernel_size_z,
             log,
             use_detection,
@@ -523,7 +525,8 @@ class MultiRoIBaseTracker :
         self.scaling_factor = scaling_factor
         self.window_length = window_length
         self.grid_size = grid_size
-        self.kernel_size_xy = base_kernel_size_xy // (2**scaling_factor)
+        self.blur_factor = blur_factor
+        self.mask_kernel_size = mask_kernel_size
         self.kernel_size_z = kernel_size_z
         self.log = log
         self.use_detection = use_detection ############# Detection should only be ON when tracking a single ROI, and is only used on the first ROI
@@ -543,7 +546,11 @@ class MultiRoIBaseTracker :
             self.current_frame = self._downsample(first_frame)
             self.shape = self.current_frame.shape
             self.current_frame_proj = np.max(self.current_frame, axis=0)
-            self.window_frames = [self.current_frame_proj]
+            if self.blur_factor > 0 :
+                self.preprocessed_frame = gaussian(self.current_frame_proj, self.blur_factor) 
+            else :
+                self.preprocessed_frame = self.current_frame_proj
+            self.window_frames = [self.preprocessed_frame]
             # Initialize queries
             self.queries_init, self.queries_lengths_init = self._initialize_queries(self.current_frame_proj, self.rois)
             self.tracks = []
@@ -573,9 +580,9 @@ class MultiRoIBaseTracker :
         self.logger.info(f"Initialized {self.__class__.__name__}")
         param_lines = [f"  {k}: {v}" for k, v in vars(self).items()
                 if not k.startswith('_') and k in ["scaling_factor", "window_length", "grid_size",
-                                                    "shape", "kernel_size_xy", "kernel_size_z",
+                                                    "shape", "mask_kernel_size", "kernel_size_z",
                                                     "use_detection", "serverkit", "k", "c0", "containment_threshold",
-                                                    "score_threshold", "size_ratio_threshold"]]
+                                                    "score_threshold", "size_ratio_threshold", "blur_factor"]]
         param_block = "\n".join(param_lines)
         self.logger.info(f"Initialized a new ROI tracker: \nParameters:\n{param_block}")
 
@@ -598,7 +605,11 @@ class MultiRoIBaseTracker :
                 self.current_frame = self._downsample(frame)
                 self.shape = self.current_frame.shape
                 self.current_frame_proj = np.max(self.current_frame, axis=0)
-                self.window_frames = [self.current_frame_proj]
+                if self.blur_factor > 0 :
+                    self.preprocessed_frame = gaussian(self.current_frame_proj, self.blur_factor) 
+                else :
+                    self.preprocessed_frame = self.current_frame_proj
+                self.window_frames = [self.preprocessed_frame]
                 # Initialize queries
                 self.queries_init, self.queries_lengths_init = self._initialize_queries(self.current_frame_proj, self.rois)
                 self.tracks = [np.empty((0, 2))]
@@ -609,12 +620,13 @@ class MultiRoIBaseTracker :
                 return [Position3D.invalid()], TrackingState.WAIT_FOR_NEXT_TIME_POINT # Placeholder return
 
             # Process input frame
-            frame = self._downsample(frame)
-            self.current_frame = frame
-            frame_proj = np.max(frame, axis=0)
-            self.current_frame_proj = frame_proj
-
-            self.update_rolling_window(frame_proj)
+            self.current_frame = self._downsample(frame)
+            self.current_frame_proj = np.max(self.current_frame, axis=0)
+            if self.blur_factor > 0 :
+                self.preprocessed_frame = gaussian(self.current_frame_proj, self.blur_factor) 
+            else :
+                self.preprocessed_frame = self.current_frame_proj
+            self.update_rolling_window(self.preprocessed_frame)
 
             # Compute CoTracker3 tracks
             new_tracks, queries_lengths, tracking_state = self.update_tracks()
@@ -832,7 +844,7 @@ class MultiRoIBaseTracker :
         frame_cropped = crop_image(self.current_frame, center_point_z_tracking, hws_z_tracking)
 
         # Filter (Gaussian blurring)
-        frame_cropped_filtered = filter_image(frame_cropped, median_kernel=0, gaussian_kernel_xy=self.kernel_size_xy, gaussian_kernel_z=self.kernel_size_z)
+        frame_cropped_filtered = filter_image(frame_cropped, median_kernel=0, gaussian_kernel_xy=self.mask_kernel_size, gaussian_kernel_z=self.kernel_size_z)
 
         # Binarize
         binary = threshold_image(frame_cropped_filtered)
@@ -859,7 +871,7 @@ class MultiRoIBaseTracker :
             center_points_list.append(roi.to_position2D().to_array(order='yx'))
             hws_list.append([roi.height / 2, roi.width / 2])
 
-        points, queries_lengths = generate_uniform_grid_in_region_list(frame, center_points_list, hws_list, grid_size=self.grid_size, gaussian_kernel=self.kernel_size_xy)
+        points, queries_lengths = generate_uniform_grid_in_region_list(frame, center_points_list, hws_list, grid_size=self.grid_size, gaussian_kernel=self.mask_kernel_size)
 
         # Log warning for no points
         for i, roi in enumerate(rois) :
@@ -873,30 +885,6 @@ class MultiRoIBaseTracker :
             self.logger.warning("No query points generated for any ROIs")
             self.tracking_state = TrackingState.WAIT_FOR_NEXT_TIME_POINT
             return np.empty((0, 2)), queries_lengths # No points from any rois
-
-        # total_points = []
-        # queries_lengths = []
-        # # Build regions 
-        # for roi in rois :
-        #     # Build bounding box
-        #     center_point = roi.to_position2D().to_array(order='yx')
-        #     hws = [roi.height / 2, roi.width / 2]
-
-        #     points = generate_uniform_grid_in_region(frame, center_point, hws, grid_size=self.grid_size, gaussian_kernel=self.kernel_size_xy)
-
-        #     if len(points) == 0:
-        #         self.logger.warning(f"No query points generated for RoI {roi.order}.")
-        #         total_points.append(np.empty((0, 2)))
-        #     else :
-        #         total_points.append(points)
-        #         queries_lengths.append(len(points))
-
-        # if total_points:
-        #     return np.vstack(total_points), queries_lengths
-        # else :
-        #     self.logger.warning("No query points generated for any ROIs")
-        #     self.tracking_state = TrackingState.WAIT_FOR_NEXT_TIME_POINT
-        #     return np.empty((0, 2)), queries_lengths # No points from any rois
 
     
     def _normalize_percentile(self, video_batch) :

@@ -187,7 +187,6 @@ class Script:
 
         roi_tracker_config = config['roi_tracker']
         roi_tracker_config["serverkit"] = serverkit
-        roi_tracker_config["scaling_factor"] = scaling_factor
         position_tracker_config = {}
         position_tracker_config["pixel_size_xy"] = pixel_size_xy
         position_tracker_config["pixel_size_z"] = pixel_size_z
