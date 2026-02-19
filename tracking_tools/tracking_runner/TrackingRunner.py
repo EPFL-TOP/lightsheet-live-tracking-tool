@@ -104,7 +104,6 @@ class TrackingRunner() :
                 if self.tracking_state_dict[position_name] != TrackingState.TRACKING_OFF :
                     self.track_and_correct(position_name, time_point, image)
 
-
     def initialize_tracker(self, position_name, image=None, time_point=None) :
         PosSetting = position_name
         use_detection = self.positions_config[PosSetting]['detection']

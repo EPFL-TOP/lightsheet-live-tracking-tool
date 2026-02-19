@@ -227,7 +227,7 @@ class SimulatedMicroscopeInterface_LS1 :
 
     
 class SimulatedMicroscopeInterface_General :
-    def __init__(self, positions_config, starting_timepoint=0) :
+    def __init__(self, positions_config, starting_timepoint=0, back_track=False) :
         self.positions_config = positions_config
         self.position_names = list(self.positions_config.keys())
         self.nb_positions = len(self.position_names)
@@ -249,6 +249,7 @@ class SimulatedMicroscopeInterface_General :
         # self.nb_digits = self.detect_format(self.positions_config[next(iter(self.positions_config))]["filename"])
         self.timepoint = starting_timepoint
         self.current_position_index = 0
+        self.back_track = back_track
 
     def wait_for_image(self, timeout_ms=100) :
         time.sleep(timeout_ms/1000)
@@ -285,7 +286,10 @@ class SimulatedMicroscopeInterface_General :
         current_timepoint = self.timepoint
         # Update timepoint if after a full cycle
         if self.current_position_index == 0 :
-            self.timepoint = self.timepoint + 1
+            if self.back_track :
+                self.timepoint = max(0, self.timepoint - 1)
+            else :
+                self.timepoint = self.timepoint + 1
         # Update position for the next call
         self.current_position_index = (self.current_position_index + 1) % self.nb_positions
         self.logger.info(f"Position [{current_pos}] at timepoint {current_timepoint}")

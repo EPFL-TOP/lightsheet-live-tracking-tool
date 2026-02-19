@@ -356,7 +356,8 @@ def make_layout():
 
 
         slider_alpha_value = float(points_alpha_slider.value)
-        initial_radius = 8
+        initial_radius = 8#0.0035*original_source.data["dw"][0] # radius is set as a fraction of the image width, and then downscaled accordingly
+        initial_radius = 0.0035*original_source.data["dw"][0] # radius is set as a fraction of the image width, and then downscaled accordingly
         scaling_factor = 2 ** int(dropdown_downscale.value)
         radius = initial_radius / scaling_factor
 

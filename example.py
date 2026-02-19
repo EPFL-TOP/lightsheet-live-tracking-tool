@@ -20,7 +20,7 @@ roi_tracker_config = {
     "window_length": 10,
     "grid_size": 40,
     "scaling_factor": 0,
-    "server_addresses": ..., # List of server addresses for remote GPU execution. (imaging-server-kit)
+    "server_addresses": ["http://upoates-tethys.epfl.ch:8000/"],#..., # List of server addresses for remote GPU execution. (imaging-server-kit)
     "base_kernel_size_xy": 41,
     "kernel_size_z": 5,
     "containment_threshold": 0.4,
@@ -29,7 +29,7 @@ roi_tracker_config = {
     "size_ratio_threshold": 0.3,
     "score_threshold": 0.9,
     "model_path": "default",
-    "serverkit": False,  # Choose wether to use imaging-server-kit
+    "serverkit": True,  # Choose wether to use imaging-server-kit
 }
 
 
@@ -80,7 +80,7 @@ if __name__ == "__main__":
     position_config = get_pos_config(dirpath, "embryo_tracking")
     print(position_config)
 
-    microscope = SimulatedMicroscopeInterface_General(position_config,starting_timepoint=1)
+    microscope = SimulatedMicroscopeInterface_General(position_config,starting_timepoint=248, back_track=True)
     runner = TrackingRunner(
         microscope_interface=microscope,
         positions_config=position_config,
