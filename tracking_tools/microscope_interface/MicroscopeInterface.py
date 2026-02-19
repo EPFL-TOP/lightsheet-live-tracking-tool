@@ -1,5 +1,6 @@
 import time
 import os
+import math
 import tifffile
 from ..logger.logger import init_logger
 
@@ -86,6 +87,12 @@ class MicroscopeInterface_LS1:
         position_name = position_name.rsplit("_", 1)[0] # Name is PositionName_SettingsName
         try :
             pos = self.stage_xyz.position_get(position_name=position_name)
+            if math.fabs(pos.position_x-shift_x)>25000:
+                shift_x=0
+            if math.fabs(pos.position_y+shift_y)>1500:
+                shift_y=0
+            if math.fabs(pos.position_z-shift_z)>1500:
+                shift_z=0    
             self.stage_xyz.position_set(
                 position_name=position_name,
                 position_x=pos.position_x - shift_x,
@@ -93,7 +100,7 @@ class MicroscopeInterface_LS1:
                 position_z=pos.position_z - shift_z,
             )
             
-        except pymcs.MicroscopeException.MicroscopeException as e :
+        except pymcs.MicroscopeException as e :
             self.logger.info(f"Error during stage move : {e}")
 
 

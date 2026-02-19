@@ -514,7 +514,7 @@ def make_layout():
             rois_per_frame.append(local_rois)
         points=[]
         for i in range(len(points_source.data['x'])):
-            x = points_source.data['x'][i]
+            x = points_source.data['x'][len(points_source.data['x'])-i-1]
             y = [images[0].shape[0]-points_source.data['y'][i][j] for j in range(len(points_source.data['y'][i]))]
             pts = list(zip(x, y))
             points.append(pts)
@@ -556,6 +556,75 @@ def make_layout():
 
     button_save = Button(label="Save movie", button_type="success")
     button_save.on_click(save_movie_short)
+
+
+    #_______________________________________________________
+    def save_movie_backtrack():
+        images_ori=images_source.data['image']
+        images=[]
+        for i in range(len(images_ori)):
+            images.append(np.flip(images_ori[len(images_ori)-i-1], axis=0))
+        rois_per_frame=[]
+        for i in range(len(rects_source.data['x'])):
+            x = rects_source.data['x'][len(rects_source.data['x'])-i-1]
+            y = rects_source.data['y'][len(rects_source.data['x'])-i-1]
+            width = rects_source.data['width'][len(rects_source.data['x'])-i-1]
+            height = rects_source.data['height'][len(rects_source.data['x'])-i-1]
+            local_rois=[]
+            for j in range(len(x)):
+                x_val = x[j]
+                y_val = images[0].shape[0]-y[j]
+                width_val = width[j]
+                height_val = height[j]
+                if width_val > 0 and height_val > 0:
+                    local_rois.append((x_val - width_val / 2., y_val - height_val / 2., x_val + width_val / 2., y_val + height_val / 2.))
+            rois_per_frame.append(local_rois)
+        points=[]
+        for i in range(len(points_source.data['x'])):
+            x = points_source.data['x'][i]
+            y = [images[0].shape[0]-points_source.data['y'][i][j] for j in range(len(points_source.data['y'][i]))]
+            pts = list(zip(x, y))
+            points.append(pts)
+        frames = []
+        for i, (img_array, rois, pts) in enumerate(zip(images, rois_per_frame, points)):
+            img = Image.fromarray(img_array).convert("RGB")
+            draw = ImageDraw.Draw(img)
+            for roi in rois:
+                draw.rectangle(roi, outline="red", width=2)
+            draw.text((5, 5), f"Frame {i}", fill="white")
+            for x, y in pts:
+                r = 3
+                draw.ellipse((x - r, y - r, x + r, y + r), fill="red")
+           
+            frames.append(img)
+
+        name="{}/{}.gif".format(status.text.replace("Selected folder: ",""), dropdown_position.value.replace(" ", "_"))
+        print(os.path.split(status.text.replace("Selected folder: ","")))
+        print(name)
+        print("Saved  movie as ",name)
+        button_save_backtrack.label = "Save movie backtrack"
+        button_save_backtrack.button_type = "success"
+        frames[0].save(name, save_all=True, append_images=frames[1:], duration=100, loop=0)
+
+        import moviepy as mp
+
+        clip = mp.VideoFileClip(name)
+        clip.write_videofile(name.replace(".gif",".mp4"))
+
+        #status.text = "Movie saved as timelapse_multi_rois.gif"
+
+        #_______________________________________________________
+    def save_movie_short_backtrack():
+        global detect_model
+        button_save_backtrack.label = "Processing"
+        button_save_backtrack.button_type = "danger"
+  
+        curdoc().add_next_tick_callback(save_movie_backtrack)
+
+    button_save_backtrack = Button(label="Save movie backtrack", button_type="success")
+    button_save_backtrack.on_click(save_movie_short_backtrack)
+
+
 
     _root = tk.Tk()
     _root.withdraw()
@@ -634,7 +703,7 @@ def make_layout():
     select_layout = row(mk_div(), select_button, mk_div(), dropdown_position)
     slider_layout = row(mk_div(), slider)
     text_layout = row(mk_div(), status)
-    reload_layout = row(mk_div(), btn_reload, button_save)
+    reload_layout = row(mk_div(), btn_reload, button_save, button_save_backtrack)
     
     left_col  = column(select_layout, p_img, slider_layout, reload_layout, text_layout, row(mk_div(),contrast_slider))
     trajectory_row = row(p_trajectory_xy, p_trajectory_xz, p_trajectory_yz)
