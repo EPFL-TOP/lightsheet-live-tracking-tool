@@ -18,10 +18,7 @@ position_tracker_config = {
 }
 roi_tracker_config = {
     "window_length": 10,
-    "grid_size": 40,
-    "scaling_factor": 0,
-    "server_addresses": ["http://upoates-tethys.epfl.ch:8000/"],#..., # List of server addresses for remote GPU execution. (imaging-server-kit)
-    "base_kernel_size_xy": 41,
+    "server_addresses": ..., # List of server addresses for remote GPU execution. (imaging-server-kit)
     "kernel_size_z": 5,
     "containment_threshold": 0.4,
     "k": 5.0,

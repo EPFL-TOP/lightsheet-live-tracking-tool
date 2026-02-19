@@ -37,19 +37,12 @@ class TrackingRunner() :
             raise ValueError(f"position_config must not be empty : {self.positions_config}")
         self.log_dir_name = runner_params["log_dir_name"]
         self.log = runner_params["log"]
-        self.scaling_factor = roi_tracker_params["scaling_factor"]
         self.tracking_state_dict = {k:TrackingState.TRACKING_ON for k in self.positions_config.keys()}
         self.trackers = {}
         self.stop_requested = False
         self.dirpath = Path(dirpath)
         self.roi_tracker_params = roi_tracker_params
         self.position_tracker_params = position_tracker_params
-
-        for config in self.positions_config.values() : 
-            with open(os.path.join(config["log_dir"], "tracking_parameters.json"), "w") as json_file:
-                to_save = dict()
-                to_save['scaling_factor'] = self.scaling_factor
-                json.dump(to_save, json_file, indent=4)
                 
         # Set default logger
         self.logger = init_logger(self.__class__.__name__)
@@ -108,15 +101,12 @@ class TrackingRunner() :
         PosSetting = position_name
         use_detection = self.positions_config[PosSetting]['detection']
         tracking_mode = self.positions_config[PosSetting]["tracking_mode"]
+        scaling_factor = self.positions_config[PosSetting]["scaling_factor"]
+        blur_factor = self.positions_config[PosSetting]["blur_factor"]
+        grid_size = self.positions_config[PosSetting]["grid_size"]
+        mask_kernel_size = self.positions_config[PosSetting]["mask_kernel_size"]
 
-        # Append starting point
-        if time_point :
-            with open(self.dirpath / PosSetting / self.log_dir_name / "tracking_parameters.json", "r") as json_file:
-                to_save = json.load(json_file)
-            to_save['starting_time_point'] = time_point
-            with open(self.dirpath / PosSetting / self.log_dir_name / "tracking_parameters.json", 'w') as json_file:
 
-                json.dump(to_save, json_file, indent=4)
         # Initialize tracker
         rois = self.positions_config[PosSetting]['RoIs']
         tracker = self.tracker_class(
@@ -125,6 +115,10 @@ class TrackingRunner() :
             log=self.log,
             use_detection=use_detection,
             tracking_mode=tracking_mode,
+            scaling_factor=scaling_factor,
+            blur_factor=blur_factor,
+            grid_size=grid_size,
+            mask_kernel_size=mask_kernel_size,
             position_name=position_name,
             roi_tracker_params=self.roi_tracker_params,
             position_tracker_params=self.position_tracker_params,
@@ -160,7 +154,7 @@ class TrackingRunner() :
                 self.to_save[position_name][str(time_point)]['roi'] = self.make_json_serializable(current_roi)
                 tracks = tracker.get_tracks()
                 self.to_save[position_name][str(time_point)]['tracks_id'] = self.make_json_serializable(len(tracks)-1)
-                self.to_save[position_name][str(time_point)]['scaling_factor'] = self.make_json_serializable(self.scaling_factor)
+                self.to_save[position_name][str(time_point)]['scaling_factor'] = self.make_json_serializable(tracker.scaling_factor)
                 with open(log_dir / f"logs.json", 'w') as file :
                     json.dump(self.to_save[position_name], file, indent=4)
                     file.close()
