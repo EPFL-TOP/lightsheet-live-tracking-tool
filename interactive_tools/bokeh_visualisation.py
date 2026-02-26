@@ -514,7 +514,7 @@ def make_layout():
             rois_per_frame.append(local_rois)
         points=[]
         for i in range(len(points_source.data['x'])):
-            x = points_source.data['x'][len(points_source.data['x'])-i-1]
+            x = points_source.data['x'][i]
             y = [images[0].shape[0]-points_source.data['y'][i][j] for j in range(len(points_source.data['y'][i]))]
             pts = list(zip(x, y))
             points.append(pts)
@@ -679,7 +679,9 @@ def make_layout():
                 pos_list = []
                 for p in pos_list_full:
                     pos_list.append(os.path.split(os.path.split(p)[0])[-1])
+                    pos_list = sorted(pos_list)
                 dropdown_position.options = pos_list
+                dropdown_position.value = ""
 
         else:
             status.text = "No directory selected."
