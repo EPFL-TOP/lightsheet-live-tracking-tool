@@ -304,7 +304,7 @@ def make_document(doc):
 
 
     #_______________________________________________________
-    def use_same_rect():
+    def use_same_rect(attr, old, new):
         if 0 in same_rect.active:
             rect_exist_source.data = rect_source.data
         else:
