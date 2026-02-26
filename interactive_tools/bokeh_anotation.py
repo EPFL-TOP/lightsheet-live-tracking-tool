@@ -306,8 +306,10 @@ def make_document(doc):
     #_______________________________________________________
     def use_same_rect(attr, old, new):
         if 0 in same_rect.active:
-            rect_exist_source.data = dict(x=rect_source.data['x'], y=rect_source.data['y'], 
-                                          height=rect_source.data['height'], width=rect_source.data['width'])
+            rect_source.data = dict(x=rect_exist_source.data['x'], 
+                                    y=rect_exist_source.data['y'], 
+                                    height=rect_exist_source.data['height'], 
+                                    width=rect_exist_source.data['width'])
         else:
             rect_source.data = dict(x=[], y=[], height=[], width=[])
     same_rect = CheckboxGroup(labels=["Use same rectangles"], active=[], width=200)
