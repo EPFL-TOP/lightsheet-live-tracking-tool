@@ -303,10 +303,19 @@ def make_document(doc):
         return Div(text='<div style="background-color: white; width: 20px; height: 1px;"></div>', **kwargs)
 
 
+    #_______________________________________________________
+    def use_same_rect():
+        if 0 in same_rect.active:
+            rect_exist_source.data = rect_source.data
+        else:
+            rect_exist_source.data = dict(x=[], y=[], height=[], width=[])
+    same_rect = CheckboxGroup(labels=["Use same rectangles"], active=[], width=200)
+    same_rect.on_change('active', use_same_rect)
+
 
     select_layout = row(mk_div(), select_button)
     slider_layout = row(mk_div(), slider)
-    next_prev_layout = row(mk_div(), btn_prev, btn_next)
+    next_prev_layout = row(mk_div(), btn_prev, btn_next, mk_div(), same_rect)
     text_layout = row(mk_div(), status)
     save_layout = row(mk_div(), btn_save, mk_div(), btn_delete)
  
