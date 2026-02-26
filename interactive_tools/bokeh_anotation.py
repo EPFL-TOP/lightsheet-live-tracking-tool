@@ -298,6 +298,19 @@ def make_document(doc):
     select_button = Button(label="Browse Folder...", button_type="primary")
     select_button.on_click(open_file_dialog)
 
+
+    #_______________________________________________________
+    def select_folder_callback(attr, old, new):
+        dir_path = new
+        if os.path.isdir(dir_path):
+            status.text = f"Selected folder: {dir_path}"
+            load_images(dir_path)
+            slider.value=0
+        else:
+            status.text = "Invalid directory selected."
+    text_input = TextInput(value="", title="Enter folder path:")
+    text_input.on_change('value', select_folder_callback)
+
     #_______________________________________________________
     def mk_div(**kwargs):
         return Div(text='<div style="background-color: white; width: 20px; height: 1px;"></div>', **kwargs)
@@ -316,7 +329,7 @@ def make_document(doc):
     same_rect.on_change('active', use_same_rect)
 
 
-    select_layout = row(mk_div(), select_button)
+    select_layout = row(mk_div(), select_button, text_input)
     slider_layout = row(mk_div(), slider)
     next_prev_layout = row(mk_div(), btn_prev, btn_next, mk_div(), same_rect)
     text_layout = row(mk_div(), status)
