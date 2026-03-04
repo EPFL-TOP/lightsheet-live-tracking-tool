@@ -217,7 +217,7 @@ def make_document(doc):
             img = Image.fromarray(image).convert("RGB")
             draw = ImageDraw.Draw(img)
             for r in roi:
-                draw.rectangle(roi, outline="red", width=2)
+                draw.rectangle(r, outline="red", width=2)
             draw.text((5, 5), f"Frame {i}", fill="white")
            
             frames.append(img)
