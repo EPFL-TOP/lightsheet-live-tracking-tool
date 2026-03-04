@@ -120,7 +120,7 @@ def make_document(doc):
     btn_delete.on_click(delete_selected)
 
     #___________________________________________________________________________________________
-    def check_existing_image(imgname):
+    def check_existing_image(imgname, noflip=False):
 
         outdir, image_name = get_image_name(imgname)
         exist=False
@@ -128,6 +128,8 @@ def make_document(doc):
             f=os.path.join(outdir,d,image_name)
             if os.path.exists(f):
                 exist=True
+                if noflip:
+                    return True
                 im =  tifffile.imread(f)
                 max_value = np.max(im)
                 min_value = np.min(im)
@@ -159,6 +161,8 @@ def make_document(doc):
                 rect_exist_source.data = dict(x=x, y=y, height=h, width=w)
 
         if not exist:
+            if noflip:
+                return False
             image_exist_source.data =  {'image':[initial_img_white], 
                 'x':[0],
                 'y':[0],
@@ -198,8 +202,8 @@ def make_document(doc):
             with open(log_file, 'r') as f:
                 log_data = json.load(f)
             for entry in log_data:
-                check_existing_image(images_source.data['name'][int(entry)-2])
-                if len(rect_exist_source.data['x'])==0: continue
+                if not check_existing_image(images_source.data['name'][int(entry)-2], noflip=True): continue
+
                 exp_dict_tmp[int(entry)-2]= log_data[entry]['roi'][0]
             exp_dict[exp] = exp_dict_tmp
 
