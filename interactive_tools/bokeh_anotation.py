@@ -200,7 +200,7 @@ def make_document(doc):
             for entry in log_data:
                 check_existing_image(images_source.data['name'][int(entry)-2])
                 if len(rect_exist_source.data['x'])==0: continue
-                exp_dict_tmp[int(entry)]= log_data[entry]['roi'][0]
+                exp_dict_tmp[int(entry)-2]= log_data[entry]['roi'][0]
             exp_dict[exp] = exp_dict_tmp
 
 
