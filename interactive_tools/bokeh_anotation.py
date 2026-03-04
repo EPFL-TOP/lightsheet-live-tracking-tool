@@ -198,7 +198,7 @@ def make_document(doc):
             with open(log_file, 'r') as f:
                 log_data = json.load(f)
             for entry in log_data:
-                check_existing_image(images_source.data['name'][int(entry)])
+                check_existing_image(images_source.data['name'][int(entry)-2])
                 if len(rect_exist_source.data['x'])==0: continue
                 exp_dict_tmp[int(entry)]= log_data[entry]['roi'][0]
             exp_dict[exp] = exp_dict_tmp
