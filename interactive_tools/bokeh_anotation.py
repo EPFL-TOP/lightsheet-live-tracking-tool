@@ -119,6 +119,17 @@ def make_document(doc):
     btn_delete = Button(label="Delete Selected", button_type="danger")
     btn_delete.on_click(delete_selected)
 
+  #___________________________________________________________________________________________
+    def check_existing_image_simple(imgname):
+
+        outdir, image_name = get_image_name(imgname)
+        exist=False
+        for d in ["train", "valid"]:
+            f=os.path.join(outdir,d,image_name)
+            if os.path.exists(f):
+                exist=True
+        return exist
+
     #___________________________________________________________________________________________
     def check_existing_image(imgname, noflip=False):
 
@@ -201,8 +212,8 @@ def make_document(doc):
             with open(log_file, 'r') as f:
                 log_data = json.load(f)
             for entry in log_data:
-                check_existing_image(images_source.data['name'][int(entry)-2], noflip=True)
-                if len(rect_exist_source.data['x'])==0: continue
+                if check_existing_image_simple(images_source.data['name'][int(entry)-2]) == False: continue
+                #if len(rect_exist_source.data['x'])==0: continue
 
                 exp_dict_tmp[int(entry)-2]= log_data[entry]['roi'][0]
             exp_dict[exp] = exp_dict_tmp
