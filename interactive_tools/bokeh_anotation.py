@@ -225,7 +225,7 @@ def make_document(doc):
         for i in range(slider.start, slider.end+1):
             check_existing_image(images_source.data['name'][i])
             if len(rect_exist_source.data['x'])==0: continue
-            images.append( np.flip(image_exist_source.data['image'][0]), axis=0)
+            images.append( np.flip(image_exist_source.data['image'][0], axis=0))
             rois.append(rect_exist_source.data)
             index.append(i)
         
@@ -266,7 +266,7 @@ def make_document(doc):
                     width_val = r['width']
                     height_val = r['height']
                     if width_val > 0 and height_val > 0:
-                        draw.rectangle((x_val - width_val / 2., y_val - height_val / 2., x_val + width_val / 2., y_val + height_val / 2.), outline=exp_color[exp], width=3, style="dashed")
+                        draw.rectangle((x_val - width_val / 2., y_val - height_val / 2., x_val + width_val / 2., y_val + height_val / 2.), outline=exp_color[exp], width=3)
             draw.text((5, 5), f"Frame {ind}", fill="white")
            
             frames.append(img)
