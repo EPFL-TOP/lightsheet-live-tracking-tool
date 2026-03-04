@@ -198,10 +198,10 @@ def make_document(doc):
 
         rois_per_frame=[]
         for i in range(len(rois)):
-            x = rois['x']
-            y = rois['y']
-            width = rois['width']
-            height = rois['height']
+            x = rois[i]['x']
+            y = rois[i]['y']
+            width = rois[i]['width']
+            height = rois[i]['height']
             local_rois=[]
             for j in range(len(x)):
                 x_val = x[j]
