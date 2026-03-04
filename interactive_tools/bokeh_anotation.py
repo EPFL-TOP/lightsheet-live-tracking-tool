@@ -128,14 +128,12 @@ def make_document(doc):
             f=os.path.join(outdir,d,image_name)
             if os.path.exists(f):
                 exist=True
-                if noflip:
-                    return True
                 im =  tifffile.imread(f)
                 max_value = np.max(im)
                 min_value = np.min(im)
                 max_proj_norm = (im - min_value)/(max_value-min_value)*255
                 max_proj_norm = max_proj_norm.astype(np.uint8)
-                max_proj_norm = np.flip(max_proj_norm,0)
+                if not noflip:max_proj_norm = np.flip(max_proj_norm,0)
 
                 with open(f.replace('.tif','.json'), 'r') as file:                    
                     data_pos = json.load(file)
@@ -146,7 +144,9 @@ def make_document(doc):
                 w=[]
                 for roi in data_pos['RoIs']:
                     x.append(roi['x'])
-                    y.append(im.shape[1]-roi['y'])
+                    if not noflip:y.append(im.shape[1]-roi['y'])
+                    else:y.append(roi['y'])
+
                     w.append(roi['width'])
                     h.append(roi['height'])
 
@@ -161,8 +161,6 @@ def make_document(doc):
                 rect_exist_source.data = dict(x=x, y=y, height=h, width=w)
 
         if not exist:
-            if noflip:
-                return False
             image_exist_source.data =  {'image':[initial_img_white], 
                 'x':[0],
                 'y':[0],
@@ -202,7 +200,8 @@ def make_document(doc):
             with open(log_file, 'r') as f:
                 log_data = json.load(f)
             for entry in log_data:
-                if not check_existing_image(images_source.data['name'][int(entry)-2], noflip=True): continue
+                check_existing_image(images_source.data['name'][int(entry)-2], noflip=True)
+                if len(rect_exist_source.data['x'])==0: continue
 
                 exp_dict_tmp[int(entry)-2]= log_data[entry]['roi'][0]
             exp_dict[exp] = exp_dict_tmp
