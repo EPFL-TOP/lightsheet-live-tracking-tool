@@ -225,7 +225,7 @@ def make_document(doc):
         for i in range(slider.start, slider.end+1):
             check_existing_image(images_source.data['name'][i])
             if len(rect_exist_source.data['x'])==0: continue
-            images.append( np.flip(image_exist_source.data['image'][0]))
+            images.append( np.flip(image_exist_source.data['image'][0]), axis=0)
             rois.append(rect_exist_source.data)
             index.append(i)
         
