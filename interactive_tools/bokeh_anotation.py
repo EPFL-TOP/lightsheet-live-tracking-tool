@@ -233,6 +233,8 @@ def make_document(doc):
         print("Number of frames: ", len(images))
         print("Number of frames with ROIs: ", len(rois_per_frame))
         print("Number of ROIs in each frame: ", [len(roi) for roi in rois_per_frame])
+        print("Experiments to consider: ", exp_to_consider)
+        print("Experiment dict keys: ", exp_dict)
         for i, (image, roi) in enumerate(zip(images, rois_per_frame)):
             img = Image.fromarray(image).convert("RGB")
             draw = ImageDraw.Draw(img)
