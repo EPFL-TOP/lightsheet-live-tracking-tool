@@ -192,6 +192,7 @@ def make_document(doc):
         rois=[]
         for i in range(slider.start, slider.end+1):
             check_existing_image(images_source.data['name'][i])
+            if len(rect_exist_source.data['x'])==0: continue
             images.append(image_exist_source.data['image'][0])
             rois.append(rect_exist_source.data)
         
@@ -213,6 +214,9 @@ def make_document(doc):
             rois_per_frame.append(local_rois)
         frames = []
 
+        print("Number of frames: ", len(images))
+        print("Number of frames with ROIs: ", len(rois_per_frame))
+        print("Number of ROIs in each frame: ", [len(roi) for roi in rois_per_frame])
         for i, (image, roi) in enumerate(zip(images, rois_per_frame)):
             img = Image.fromarray(image).convert("RGB")
             draw = ImageDraw.Draw(img)
