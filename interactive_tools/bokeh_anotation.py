@@ -191,6 +191,7 @@ def make_document(doc):
         from PIL import Image, ImageDraw
 
         exp_to_consider = ["noblur_detection",'noblur','blur14']
+        exp_color = {"noblur_detection":"blue", 'noblur':"green", 'blur14':"yellow"}
         outdir_comp=r'E:\Clement\papermovies\20260211_162323_Experiment'
         exp_dict = {}
 
@@ -249,11 +250,12 @@ def make_document(doc):
                 if ind in exp_dict[exp]:
                     r=exp_dict[exp][ind]
                     x_val = r['x']
-                    y_val = image.shape[1]-r['y']
+                    #y_val = image.shape[1]-r['y']
+                    y_val = r['y']
                     width_val = r['width']
                     height_val = r['height']
                     if width_val > 0 and height_val > 0:
-                        draw.rectangle((x_val - width_val / 2., y_val - height_val / 2., x_val + width_val / 2., y_val + height_val / 2.), outline="blue", width=2)
+                        draw.rectangle((x_val - width_val / 2., y_val - height_val / 2., x_val + width_val / 2., y_val + height_val / 2.), outline=exp_color[exp], width=2)
             draw.text((5, 5), f"Frame {ind}", fill="white")
            
             frames.append(img)
