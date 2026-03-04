@@ -266,7 +266,7 @@ def make_document(doc):
                     width_val = r['width']
                     height_val = r['height']
                     if width_val > 0 and height_val > 0:
-                        draw.rectangle((x_val - width_val / 2., y_val - height_val / 2., x_val + width_val / 2., y_val + height_val / 2.), outline=exp_color[exp], width=2)
+                        draw.rectangle((x_val - width_val / 2., y_val - height_val / 2., x_val + width_val / 2., y_val + height_val / 2.), outline=exp_color[exp], width=3, style="dashed")
             draw.text((5, 5), f"Frame {ind}", fill="white")
            
             frames.append(img)
