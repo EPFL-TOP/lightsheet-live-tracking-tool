@@ -206,7 +206,7 @@ def make_document(doc):
             local_rois=[]
             for j in range(len(x)):
                 x_val = x[j]
-                y_val = images[0].shape[0]-y[j]
+                y_val = y[j]
                 width_val = width[j]
                 height_val = height[j]
                 if width_val > 0 and height_val > 0:
