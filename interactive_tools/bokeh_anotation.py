@@ -188,12 +188,28 @@ def make_document(doc):
     def make_video():
         from PIL import Image, ImageDraw
 
+        exp_to_consider = ["noblur_detection",'noblur','blur14']
+        outdir_comp=r'E:\Clement\papermovies\20260211_162323_Experiment'
+        exp_dict = {}
+
+        for exp in exp_to_consider:
+            log_file=os.path.join(outdir_comp, f"logs_{exp}.json")
+            exp_dict_tmp= {}
+            with open(log_file, 'r') as f:
+                log_data = json.load(f)
+            for entry in log_data:
+                check_existing_image(images_source.data['name'][int(entry)])
+                if len(rect_exist_source.data['x'])==0: continue
+                exp_dict_tmp[int(entry)]= log_data[entry]['roi'][0]
+            exp_dict[exp] = exp_dict_tmp
+
+
         images=[]
         rois=[]
         for i in range(slider.start, slider.end+1):
             check_existing_image(images_source.data['name'][i])
             if len(rect_exist_source.data['x'])==0: continue
-            images.append(image_exist_source.data['image'][0])
+            images.append( np.flip(image_exist_source.data['image'][0]))
             rois.append(rect_exist_source.data)
         
 
@@ -206,7 +222,7 @@ def make_document(doc):
             local_rois=[]
             for j in range(len(x)):
                 x_val = x[j]
-                y_val = y[j]
+                y_val = images[0].shape[1]-y[j]
                 width_val = width[j]
                 height_val = height[j]
                 if width_val > 0 and height_val > 0:
@@ -222,6 +238,15 @@ def make_document(doc):
             draw = ImageDraw.Draw(img)
             for r in roi:
                 draw.rectangle(r, outline="red", width=2)
+            for exp in exp_to_consider:
+                if i in exp_dict[exp]:
+                    r=exp_dict[exp][i]
+                    x_val = r['x']
+                    y_val = image.shape[1]-r['y']
+                    width_val = r['width']
+                    height_val = r['height']
+                    if width_val > 0 and height_val > 0:
+                        draw.rectangle((x_val - width_val / 2., y_val - height_val / 2., x_val + width_val / 2., y_val + height_val / 2.), outline="blue", width=2)
             draw.text((5, 5), f"Frame {i}", fill="white")
            
             frames.append(img)
