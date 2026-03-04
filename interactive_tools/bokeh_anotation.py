@@ -206,11 +206,13 @@ def make_document(doc):
 
         images=[]
         rois=[]
+        index=[]
         for i in range(slider.start, slider.end+1):
             check_existing_image(images_source.data['name'][i])
             if len(rect_exist_source.data['x'])==0: continue
             images.append( np.flip(image_exist_source.data['image'][0]))
             rois.append(rect_exist_source.data)
+            index.append(i)
         
 
         rois_per_frame=[]
@@ -235,21 +237,21 @@ def make_document(doc):
         print("Number of ROIs in each frame: ", [len(roi) for roi in rois_per_frame])
         print("Experiments to consider: ", exp_to_consider)
         print("Experiment dict keys: ", exp_dict)
-        for i, (image, roi) in enumerate(zip(images, rois_per_frame)):
+        for i, (image, roi, ind) in enumerate(zip(images, rois_per_frame,index)):
             img = Image.fromarray(image).convert("RGB")
             draw = ImageDraw.Draw(img)
             for r in roi:
                 draw.rectangle(r, outline="red", width=2)
             for exp in exp_to_consider:
-                if i in exp_dict[exp]:
-                    r=exp_dict[exp][i]
+                if ind in exp_dict[exp]:
+                    r=exp_dict[exp][ind]
                     x_val = r['x']
                     y_val = image.shape[1]-r['y']
                     width_val = r['width']
                     height_val = r['height']
                     if width_val > 0 and height_val > 0:
                         draw.rectangle((x_val - width_val / 2., y_val - height_val / 2., x_val + width_val / 2., y_val + height_val / 2.), outline="blue", width=2)
-            draw.text((5, 5), f"Frame {i}", fill="white")
+            draw.text((5, 5), f"Frame {ind}", fill="white")
            
             frames.append(img)
 
