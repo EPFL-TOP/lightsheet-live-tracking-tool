@@ -185,6 +185,60 @@ def make_document(doc):
 
 
     #_______________________________________________________
+    def make_video():
+        from PIL import Image, ImageDraw
+
+        images=[]
+        rois=[]
+        for i in range(slider.start, slider.end+1):
+            check_existing_image(images_source.data['name'][i])
+            images.append(image_exist_source.data['image'][0])
+            rois.append(rect_exist_source.data)
+        
+
+        rois_per_frame=[]
+        for i in range(len(rois)):
+            x = rois['x']
+            y = rois['y']
+            width = rois['width']
+            height = rois['height']
+            local_rois=[]
+            for j in range(len(x)):
+                x_val = x[j]
+                y_val = images[0].shape[0]-y[j]
+                width_val = width[j]
+                height_val = height[j]
+                if width_val > 0 and height_val > 0:
+                    local_rois.append((x_val - width_val / 2., y_val - height_val / 2., x_val + width_val / 2., y_val + height_val / 2.))
+            rois_per_frame.append(local_rois)
+        frames = []
+
+        for i, (image, roi) in enumerate(zip(images, rois_per_frame)):
+            img = Image.fromarray(image).convert("RGB")
+            draw = ImageDraw.Draw(img)
+            for r in roi:
+                draw.rectangle(roi, outline="red", width=2)
+            draw.text((5, 5), f"Frame {i}", fill="white")
+           
+            frames.append(img)
+
+        name="{}/movie.gif".format(status.text.replace("Selected folder: ",""))
+        print(os.path.split(status.text.replace("Selected folder: ","")))
+        print(name)
+        print("Saved  movie as ",name)
+        button_save.label = "Save movie"
+        button_save.button_type = "success"
+        frames[0].save(name, save_all=True, append_images=frames[1:], duration=100, loop=0)
+
+        import moviepy as mp
+
+        clip = mp.VideoFileClip(name)
+        clip.write_videofile(name.replace(".gif",".mp4"))
+
+    button_save = Button(label="Save movie", button_type="primary")
+    button_save.on_click(make_video)
+
+    #_______________________________________________________
     def next_image():
         n_img = slider.end+1
         current_index = slider.value
@@ -336,7 +390,7 @@ def make_document(doc):
     save_layout = row(mk_div(), btn_save, mk_div(), btn_delete)
  
     left_col  = column(select_layout, p_img, slider_layout,next_prev_layout, save_layout, text_layout)
-    right_col = column(mk_div(), p_img_exist)
+    right_col = column(mk_div(), p_img_exist, button_save)
     layout = row(left_col, mk_div(), right_col)
 
     doc.title = 'Annotation'
