@@ -711,7 +711,7 @@ def make_layout():
     reload_layout = row(mk_div(), btn_reload, button_save, button_save_backtrack)
     box_points_layout = row(mk_div(), roipoints_checkboxgroup)
     
-    left_col  = column(select_layout, p_img, slider_layout, reload_layout, text_layout, row(mk_div(),contrast_slider))
+    left_col  = column(select_layout, p_img, slider_layout, reload_layout, box_points_layout, text_layout, row(mk_div(),contrast_slider))
     trajectory_row = row(p_trajectory_xy, p_trajectory_xz, p_trajectory_yz)
     shifts_row = row(p_shifts, shifts_text, invert_axis_checkboxgroup)
     right_col = column(mk_div(), shifts_row, trajectory_row)
