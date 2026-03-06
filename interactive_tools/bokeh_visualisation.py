@@ -43,6 +43,7 @@ def make_layout():
     dropdown_position = Select(value="", title='Position', options=positions)
 
     invert_axis_checkboxgroup = CheckboxGroup(labels=["Invert x", "Invert y", "Invert z"], active=[])
+    roipoints_checkboxgroup = CheckboxGroup(labels=["display ROI", "display points"], active=[0,1])
 
     # Figure setup
     p_img = figure(
@@ -228,9 +229,9 @@ def make_layout():
         out_name = os.path.join(dir_path,"embryo_tracking","max_proj")
         if not os.path.isdir(out_name):
             raise IsADirectoryError(f"{out_name} is not a directory")
-        #     os.mkdir(out_name)
-        #     img_list=glob.glob(os.path.join(dir_path,"*.tif"))
-        #     create_images(dir_path, img_list)
+            #os.mkdir(out_name)
+            #img_list=glob.glob(os.path.join(dir_path,"*.tif"))
+            #create_images(dir_path, img_list)
 
         img_list=glob.glob(os.path.join(out_name,"*.tif"))
         img_list = sorted(img_list)
@@ -522,12 +523,14 @@ def make_layout():
         for i, (img_array, rois, pts) in enumerate(zip(images, rois_per_frame, points)):
             img = Image.fromarray(img_array).convert("RGB")
             draw = ImageDraw.Draw(img)
-            for roi in rois:
-                draw.rectangle(roi, outline="red", width=2)
+            if 0 in roipoints_checkboxgroup.active:
+                for roi in rois:
+                    draw.rectangle(roi, outline="red", width=2)
             draw.text((5, 5), f"Frame {i}", fill="white")
-            for x, y in pts:
-                r = 3
-                draw.ellipse((x - r, y - r, x + r, y + r), fill="red")
+            if 1 in roipoints_checkboxgroup.active:
+                for x, y in pts:
+                    r = 3
+                    draw.ellipse((x - r, y - r, x + r, y + r), fill="red")
            
             frames.append(img)
 
@@ -706,6 +709,7 @@ def make_layout():
     slider_layout = row(mk_div(), slider)
     text_layout = row(mk_div(), status)
     reload_layout = row(mk_div(), btn_reload, button_save, button_save_backtrack)
+    box_points_layout = row(mk_div(), roipoints_checkboxgroup)
     
     left_col  = column(select_layout, p_img, slider_layout, reload_layout, text_layout, row(mk_div(),contrast_slider))
     trajectory_row = row(p_trajectory_xy, p_trajectory_xz, p_trajectory_yz)
