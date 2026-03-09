@@ -270,6 +270,9 @@ def make_document(doc):
             draw.text((5, 5), f"Frame {ind}", fill="white")
            
             frames.append(img)
+            name="{}/t{}.png".format(status.text.replace("Selected folder: ",""),i)
+
+            img.save(name)
 
         name="{}/movie.gif".format(status.text.replace("Selected folder: ",""))
         print(os.path.split(status.text.replace("Selected folder: ","")))
