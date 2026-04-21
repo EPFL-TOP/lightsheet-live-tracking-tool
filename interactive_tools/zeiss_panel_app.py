@@ -113,8 +113,8 @@ w_start_tp = pn.widgets.IntInput(
  
 # ─── Run / Stop ───────────────────────────────────────────────────────────────
  
-btn_run  = pn.widgets.Button(label='▶  Run Tracking', button_type='success', width=180)
-btn_stop = pn.widgets.Button(label='■  Stop',         button_type='danger',  width=120)
+btn_run  = pn.widgets.Button(label='Run Tracking', button_type='success', width=180)
+btn_stop = pn.widgets.Button(label='Stop',         button_type='danger',  width=120)
 btn_stop.disabled = True
  
 w_log = pn.widgets.TextAreaInput(
