@@ -47,24 +47,34 @@ class TrackingRunner() :
         # Set default logger
         self.logger = init_logger(self.__class__.__name__)
         self.to_save = {}
-
+        # Populated by run_zeiss(); positions whose ROI JSON was modified at runtime
+        self._pending_reinit = set()
+        self._roi_observer   = None
 
     # ------------------------------------
     # Tracking Loops
     # -----------------------------------
     
     def run_LS1(self) :
+        self._pending_reinit = set()
         # Initialize trackers before main loop
         self.logger.info(f"Initializing trackers")
         for position_name in self.positions_config.keys() :
             self.initialize_tracker(position_name)
 
         # Enable pause after position after initialisation to avoid timing problems
+        self._start_roi_watcher()
         self.microscope.pause_after_position()
         self.logger.info(f"Main tracking loop")
 
+        
         while not self.stop_requested :
             # Wait for a new image
+                # Reinitialize any trackers whose ROI file changed since last frame
+            for pos in list(self._pending_reinit):
+                self.reinitialize_tracker(pos)
+            self._pending_reinit.clear()
+
             image, time_point, position_name = self.microscope.wait_for_image(timeout_ms=self.timeout_ms)
 
             # If tracker for position do not exist, skip
@@ -76,10 +86,13 @@ class TrackingRunner() :
                 self.microscope.continue_from_pause()
 
         self.microscope.no_pause_after_position()
+        self._stop_roi_watcher()
         self.microscope.disconnect()
         
 
     def run_general(self) :
+
+        
         # Initialize trackers before main loop
         self.logger.info(f"Initializing trackers")
         for position_name in self.positions_config.keys() :
@@ -187,3 +200,152 @@ class TrackingRunner() :
         # self.microscope.no_pause_after_position()
         self.stop_requested = True
         
+
+    # -----------------------------------------------------------------------
+    # Zeiss / ZEN API tracking loop
+    # -----------------------------------------------------------------------
+ 
+    def run_zeiss(self):
+        """
+        Main tracking loop for a Zeiss microscope controlled via the ZEN API
+        (or its CZI-file simulation).
+ 
+        Differences from ``run_LS1``:
+        * No pause/resume cycle — the inter-timepoint gap in ZEN is long enough
+          for the tracker to compute and apply its correction (Option A).
+        * A ``watchdog`` file-watcher monitors every ``tracking_RoIs.json``; if
+          the user edits an ROI in the Bokeh dashboard while the loop is running,
+          the affected tracker is reinitialized at the start of the next iteration.
+        * The microscope's ``connect()`` / ``disconnect()`` are called here so
+          that the gRPC stream lifetime is tied to the tracking loop.
+        """
+        self._pending_reinit = set()
+ 
+        self.logger.info("Initializing trackers")
+        for position_name in self.positions_config:
+            self.initialize_tracker(position_name)
+ 
+        self._start_roi_watcher()
+        self.microscope.connect()
+        self.logger.info("Zeiss tracking loop started")
+ 
+        try:
+            while not self.stop_requested:
+                # Reinitialize any trackers whose ROI file changed since last frame
+                for pos in list(self._pending_reinit):
+                    self.reinitialize_tracker(pos)
+                self._pending_reinit.clear()
+ 
+                image, time_point, position_name = self.microscope.wait_for_image(
+                    timeout_ms=self.timeout_ms
+                )
+ 
+                if image is None:
+                    continue
+ 
+                if position_name not in self.trackers:
+                    self.logger.warning(
+                        f"No tracker for position [{position_name}] — skipping"
+                    )
+                    continue
+ 
+                if self.tracking_state_dict.get(position_name) != TrackingState.TRACKING_OFF:
+                    self.track_and_correct(position_name, time_point, image)
+ 
+        finally:
+            self._stop_roi_watcher()
+            self.microscope.disconnect()
+ 
+    # -----------------------------------------------------------------------
+    # Runtime ROI update support
+    # -----------------------------------------------------------------------
+ 
+    def _start_roi_watcher(self):
+        """
+        Start a ``watchdog`` filesystem observer that watches every
+        ``tracking_RoIs.json`` file listed in ``positions_config``.
+ 
+        When a file is modified (e.g. the user saves new ROIs from the Bokeh
+        dashboard), the corresponding position name is added to
+        ``_pending_reinit`` so the main loop can reinitialize its tracker
+        between frames.
+ 
+        If ``watchdog`` is not installed, a warning is logged and the feature
+        is silently disabled.
+        """
+        try:
+            from watchdog.observers import Observer
+            from watchdog.events import FileSystemEventHandler
+        except ImportError:
+            self.logger.warning(
+                "watchdog not installed — runtime ROI updates disabled. "
+                "Install with: pip install watchdog"
+            )
+            self._roi_observer = None
+            return
+ 
+        runner = self
+ 
+        roi_file_to_position = {}
+        watch_dirs = set()
+        for pos_name, cfg in self.positions_config.items():
+            roi_path = os.path.normpath(
+                os.path.join(cfg['log_dir'], 'tracking_RoIs.json')
+            )
+            roi_file_to_position[roi_path] = pos_name
+            watch_dirs.add(os.path.dirname(roi_path))
+ 
+        class _RoIChangeHandler(FileSystemEventHandler):
+            def on_modified(self, event):
+                if event.is_directory:
+                    return
+                path = os.path.normpath(event.src_path)
+                if path in roi_file_to_position:
+                    pos = roi_file_to_position[path]
+                    runner.logger.info(
+                        f"tracking_RoIs.json changed for [{pos}] — "
+                        "tracker will be reinitialized"
+                    )
+                    runner._pending_reinit.add(pos)
+ 
+        handler = _RoIChangeHandler()
+        self._roi_observer = Observer()
+        for watch_dir in watch_dirs:
+            if os.path.isdir(watch_dir):
+                self._roi_observer.schedule(handler, watch_dir, recursive=False)
+ 
+        self._roi_observer.start()
+        self.logger.info(
+            f"ROI file watcher active for {len(watch_dirs)} director(y/ies)"
+        )
+ 
+    def _stop_roi_watcher(self):
+        if self._roi_observer is not None:
+            self._roi_observer.stop()
+            self._roi_observer.join(timeout=3)
+            self._roi_observer = None
+ 
+    def reinitialize_tracker(self, position_name):
+        """
+        Reload ``tracking_RoIs.json`` for *position_name* and recreate its
+        tracker with the updated ROI definitions.
+ 
+        Called automatically by ``run_zeiss`` when the file-watcher detects a
+        change, but can also be called manually.
+        """
+        roi_path = os.path.join(
+            self.positions_config[position_name]['log_dir'], 'tracking_RoIs.json'
+        )
+        try:
+            with open(roi_path) as f:
+                new_config = json.load(f)
+            self.positions_config[position_name]['RoIs'] = new_config['RoIs']
+            self.initialize_tracker(position_name)
+            self.logger.info(
+                f"Tracker for [{position_name}] reinitialized with "
+                f"{len(new_config['RoIs'])} ROI(s)"
+            )
+        except Exception as e:
+            self.logger.error(
+                f"Failed to reinitialize tracker for [{position_name}]: {e}"
+            )

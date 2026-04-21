@@ -73,6 +73,7 @@ def make_layout():
     btn_up = Button(label="Move Up")
     btn_delete = Button(label="Delete Selected", button_type="danger")
     select_image_button = Button(label="Browse Image...", button_type="primary")
+    btn_refresh_latest = Button(label="Refresh Latest Frame", button_type="warning")
     select_model_button = Button(label="Browse Model Folder...", button_type="primary")
     detect_button = Button(label="Run detect model", button_type="primary")
 
@@ -515,6 +516,46 @@ def make_layout():
         select_rectangle_source.selected.indices = [i+1]
 
     #_______________________________________________________
+    def refresh_latest_frame():
+        """
+        Load the most recent TIF from the ``max_proj/`` subfolder of the
+        currently selected image's directory.
+ 
+        This lets the user see the latest acquired frame during a running
+        Zeiss acquisition and adjust ROIs accordingly.
+        """
+        filename = status.text.split("Selected image: ")[-1].strip()
+        if not filename or filename == status.text:
+            status.text = "No image loaded. Browse an image first."
+            return
+ 
+        dirname = pathlib.Path(filename).parent.resolve()
+        max_proj_dir = dirname / "max_proj"
+ 
+        if not max_proj_dir.is_dir():
+            status.text = f"No max_proj folder found in {dirname}"
+            return
+ 
+        tif_files = sorted(max_proj_dir.glob("t*.tif"))
+        if not tif_files:
+            status.text = f"No TIF files in {max_proj_dir}"
+            return
+ 
+        latest_tif = tif_files[-1]
+        try:
+            image = tifffile.imread(str(latest_tif))
+            if image.ndim == 2:
+                # Add a z-dimension so the rest of the dashboard handles it uniformly
+                image = image[np.newaxis, ...]
+            original_source.data = dict(
+                image=[image], x=[0], y=[0],
+                dw=[image.shape[2]], dh=[image.shape[1]]
+            )
+            status.text = f"Selected image: {latest_tif}"
+        except Exception as e:
+            status.text = f"Error loading {latest_tif.name}: {e}"
+ 
+    #_______________________________________________________
     def save_rectangles():
 
         initial_shape = original_source.data["image"][0].shape[1:]
@@ -695,6 +736,7 @@ def make_layout():
     dropdown_downscale.on_change("value", update_rectangles, update_working)
     dropdown_blur_factor.on_change("value", update_working)
     select_image_button.on_click(select_file)
+    btn_refresh_latest.on_click(refresh_latest_frame)
     working_source.on_change("data", update_display, update_mask, update_points)
     original_source.on_change("data", update_working)
     slice_slider.on_change("value", update_working)
@@ -719,7 +761,8 @@ def make_layout():
     layout = column(
         mk_div(),           
         row(
-            mk_div(),select_image_button,mk_div(), select_model_button, 
+            mk_div(),select_image_button,mk_div(),
+            btn_refresh_latest, mk_div(), select_model_button, 
         ), 
                            
 
