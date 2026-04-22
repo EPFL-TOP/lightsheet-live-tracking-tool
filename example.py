@@ -18,7 +18,8 @@ position_tracker_config = {
 }
 roi_tracker_config = {
     "window_length": 10,
-    "server_addresses": ..., # List of server addresses for remote GPU execution. (imaging-server-kit)
+#    "server_addresses": ..., # List of server addresses for remote GPU execution. (imaging-server-kit)
+    "server_addresses": ['http://upoates-tethys.epfl.ch:8000/', 'http://paperino.epfl.ch:8000'], # List of server addresses for remote GPU execution. (imaging-server-kit)
     "kernel_size_z": 5,
     "containment_threshold": 0.4,
     "k": 5.0,
@@ -62,10 +63,13 @@ def setup_global_logging(log_dir):
 if __name__ == "__main__":
 
     import sys
-    if len(sys.argv) < 2:
-        print("Usage: python example.py <path_to_experiments_folder>")
+    if len(sys.argv) < 3:
+        print("Usage: python example.py <path_to_experiments_folder> <position_name(optional)>")
         sys.exit(1)
     dirpath = sys.argv[1] # PATH TO THE EXERIMENTS FOLDER
+    position_name=None
+    if len(sys.argv) == 3:
+        position_name = sys.argv[2] # NAME OF THE EXPERIMENT (OPTIONAL)
     if not os.path.isabs(dirpath):
         dirpath = os.path.abspath(dirpath)
     if not os.path.exists(dirpath):
@@ -74,10 +78,11 @@ if __name__ == "__main__":
 
     setup_global_logging(dirpath)
 
-    position_config = get_pos_config(dirpath, "embryo_tracking")
+    position_config = get_pos_config(dirpath, "embryo_tracking", position_name=position_name)
     print(position_config)
 
-    microscope = SimulatedMicroscopeInterface_General(position_config,starting_timepoint=248, back_track=True)
+#    microscope = SimulatedMicroscopeInterface_General(position_config,starting_timepoint=248, back_track=True)
+    microscope = SimulatedMicroscopeInterface_General(position_config,starting_timepoint=110, back_track=False)
     runner = TrackingRunner(
         microscope_interface=microscope,
         positions_config=position_config,

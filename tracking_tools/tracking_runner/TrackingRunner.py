@@ -40,6 +40,11 @@ class TrackingRunner() :
         self.tracking_state_dict = {k:TrackingState.TRACKING_ON for k in self.positions_config.keys()}
         self.trackers = {}
         self.stop_requested = False
+        # Tracks saved by each previous tracker instance (keyed by position).
+        # Populated in reinitialize_tracker so that tracks.pkl accumulates
+        # across ROI re-initializations.
+        self._tracks_history = {}   # position_name → list of tracks objects
+        self._reinit_epoch   = {}   # position_name → int (increments each reinit)
         self.dirpath = Path(dirpath)
         self.roi_tracker_params = roi_tracker_params
         self.position_tracker_params = position_tracker_params
@@ -166,13 +171,21 @@ class TrackingRunner() :
                 self.to_save[position_name][str(time_point)]['shift_um'] = self.make_json_serializable(current_shift_um)
                 self.to_save[position_name][str(time_point)]['roi'] = self.make_json_serializable(current_roi)
                 tracks = tracker.get_tracks()
-                self.to_save[position_name][str(time_point)]['tracks_id'] = self.make_json_serializable(len(tracks)-1)
+                epoch  = self._reinit_epoch.get(position_name, 0)
+                self.to_save[position_name][str(time_point)]['tracks_id']      = self.make_json_serializable(len(tracks)-1)
                 self.to_save[position_name][str(time_point)]['scaling_factor'] = self.make_json_serializable(tracker.scaling_factor)
+                self.to_save[position_name][str(time_point)]['reinit_epoch']   = epoch
                 with open(log_dir / f"logs.json", 'w') as file :
                     json.dump(self.to_save[position_name], file, indent=4)
                     file.close()
+                # tracks.pkl holds a list of per-epoch track objects so that
+                # history is preserved across ROI re-initializations.
+                # Each entry corresponds to one tracker epoch (epoch index ==
+                # list index).  The current epoch is always the last element.
+                history = self._tracks_history.get(position_name, [])
+                all_tracks = history + [tracks]
                 with open(log_dir / f"tracks.pkl", 'wb') as file :
-                    pickle.dump(tracks, file)
+                    pickle.dump(all_tracks, file)
                     file.close()
                 max_proj_dir = log_dir / "max_proj"
                 max_proj_dir.mkdir(parents=True, exist_ok=True)
@@ -332,9 +345,13 @@ class TrackingRunner() :
         """
         Reload ``tracking_RoIs.json`` for *position_name* and recreate its
         tracker with the updated ROI definitions.
- 
-        Called automatically by ``run_zeiss`` when the file-watcher detects a
-        change, but can also be called manually.
+
+        The outgoing tracker's accumulated tracks are moved to
+        ``_tracks_history`` so that ``tracks.pkl`` continues to hold all
+        epochs and ``logs.json`` entries reference the correct epoch index.
+
+        Called automatically by ``run_zeiss`` / ``run_LS1`` when the
+        file-watcher detects a change, but can also be called manually.
         """
         roi_path = os.path.join(
             self.positions_config[position_name]['log_dir'], 'tracking_RoIs.json'
@@ -343,10 +360,20 @@ class TrackingRunner() :
             with open(roi_path) as f:
                 new_config = json.load(f)
             self.positions_config[position_name]['RoIs'] = new_config['RoIs']
+
+            # Archive the current tracker's tracks before replacing it
+            if position_name in self.trackers:
+                old_tracks = self.trackers[position_name].get_tracks()
+                self._tracks_history.setdefault(position_name, []).append(old_tracks)
+                self._reinit_epoch[position_name] = (
+                    self._reinit_epoch.get(position_name, 0) + 1
+                )
+
             self.initialize_tracker(position_name)
             self.logger.info(
-                f"Tracker for [{position_name}] reinitialized with "
-                f"{len(new_config['RoIs'])} ROI(s)"
+                f"Tracker for [{position_name}] reinitialized "
+                f"(epoch {self._reinit_epoch.get(position_name, 0)}) "
+                f"with {len(new_config['RoIs'])} ROI(s)"
             )
         except Exception as e:
             self.logger.error(

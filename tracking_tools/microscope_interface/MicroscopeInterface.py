@@ -631,15 +631,15 @@ class MicroscopeInterface_Zeiss:
     async def _stream_images(self):
         """
         Subscribe to the ZEN experiment stream and assemble z-stacks.
- 
-        The exact import path and request class may need adjustment depending
-        on the installed zen_api package version.  Cross-check with:
-            OAD/ZEN-API/python_examples/zenapi_streaming.py
+
+        Class and method names match the zen_api wheel shipped with ZEN 3.x:
+            zen_api.acquisition.v1beta
+        Cross-check with OAD/ZEN-API/python_examples/zenapi_streaming.py.
         """
         try:
             from zen_api.acquisition.v1beta import (
                 ExperimentStreamingServiceStub,
-                MonitorAllExperimentsRequest,   # adjust name if needed
+                ExperimentStreamingServiceMonitorAllExperimentsRequest,
             )
         except ImportError as e:
             self.logger.error(
@@ -648,35 +648,39 @@ class MicroscopeInterface_Zeiss:
             )
             self._queue.put((None, None, None))
             return
- 
-        stub = ExperimentStreamingServiceStub(self._channel)
+
+        # Metadata (control token) is passed to the stub constructor, not each RPC call
+        stub = ExperimentStreamingServiceStub(
+            channel=self._channel, metadata=self._metadata
+        )
         # Buffer: {(scene_idx, timepoint_idx): {z_idx: 2-D array}}
         frame_buffer = {}
- 
-        self.logger.info("ZEN image stream active")
-        async for frame in stub.MonitorAllExperiments(
-            MonitorAllExperimentsRequest(), metadata=self._metadata
+
+        self.logger.info("ZEN image stream active — waiting for experiment frames")
+        async for response in stub.monitor_all_experiments(
+            ExperimentStreamingServiceMonitorAllExperimentsRequest(
+                channel_index=self.tracking_channel,
+                enable_raw_data=False,
+            )
         ):
             if self._stop_event.is_set():
                 break
- 
-            scene_idx = frame.scenes_index
-            tp_idx    = frame.time_points_index
-            z_idx     = frame.zstack_slices_index
-            ch_idx    = frame.channels_index
- 
-            if ch_idx != self.tracking_channel:
-                continue
- 
+
+            fp        = response.frame_data.frame_position
+            scene_idx = fp.s
+            tp_idx    = fp.t
+            z_idx     = fp.z
+
             key = (scene_idx, tp_idx)
             if key not in frame_buffer:
                 frame_buffer[key] = {}
- 
-            arr = np.asarray(frame.pixel_data)
-            if arr.ndim == 3:
-                arr = arr[:, :, 0]
+
+            full_size = response.frame_data.frame_size
+            arr = np.frombuffer(
+                response.frame_data.pixel_data.raw_data, dtype=np.uint16
+            ).reshape((full_size.height, full_size.width))
             frame_buffer[key][z_idx] = arr
- 
+
             if len(frame_buffer[key]) >= self._z_slice_count:
                 self._process_complete_stack(frame_buffer.pop(key), scene_idx, tp_idx)
                 # Drop stale keys to prevent unbounded memory growth
@@ -698,9 +702,12 @@ class MicroscopeInterface_Zeiss:
             self.logger.warning(f"No position mapped to scene index {scene_idx}")
             return
  
-        max_proj_dir = os.path.join(self.dirpath, position_name, 'max_proj')
-        os.makedirs(max_proj_dir, exist_ok=True)
-        tif_path = os.path.join(max_proj_dir, f't{tp_idx:04d}.tif')
+        # Save alongside raw acquisitions in the position root folder,
+        # consistent with how LS1 stores images.  TrackingRunner writes its
+        # own copy to embryo_tracking/max_proj/ after the tracker runs.
+        pos_dir = os.path.join(self.dirpath, position_name)
+        os.makedirs(pos_dir, exist_ok=True)
+        tif_path = os.path.join(pos_dir, f't{tp_idx:04d}.tif')
         tifffile.imwrite(tif_path, image)
         self.logger.info(f"Saved {tif_path}")
         self._queue.put((image, tp_idx, position_name))

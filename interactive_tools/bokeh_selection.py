@@ -518,29 +518,27 @@ def make_layout():
     #_______________________________________________________
     def refresh_latest_frame():
         """
-        Load the most recent TIF from the ``max_proj/`` subfolder of the
-        currently selected image's directory.
- 
-        This lets the user see the latest acquired frame during a running
-        Zeiss acquisition and adjust ROIs accordingly.
+        Load the most recent TIF from the position folder of the currently
+        selected image.
+
+        Images acquired by the microscope (Zeiss or LS1) are stored directly
+        in the position root folder as ``t{N:04d}.tif``.  This lets the user
+        see the latest acquired frame during a live acquisition and adjust
+        ROIs accordingly.
         """
         filename = status.text.split("Selected image: ")[-1].strip()
         if not filename or filename == status.text:
             status.text = "No image loaded. Browse an image first."
             return
- 
-        dirname = pathlib.Path(filename).parent.resolve()
-        max_proj_dir = dirname / "max_proj"
- 
-        if not max_proj_dir.is_dir():
-            status.text = f"No max_proj folder found in {dirname}"
-            return
- 
-        tif_files = sorted(max_proj_dir.glob("t*.tif"))
+
+        # The position folder is the parent of the loaded file
+        pos_dir = pathlib.Path(filename).parent.resolve()
+
+        tif_files = sorted(pos_dir.glob("t*.tif"))
         if not tif_files:
-            status.text = f"No TIF files in {max_proj_dir}"
+            status.text = f"No TIF files found in {pos_dir}"
             return
- 
+
         latest_tif = tif_files[-1]
         try:
             image = tifffile.imread(str(latest_tif))

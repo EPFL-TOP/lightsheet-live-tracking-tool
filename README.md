@@ -101,14 +101,15 @@ An integration with **PyMCS** for the **Viventis LS1 microscope** is available.
 This project provides two interactive tools to support the tracking workflow. Both tools are available in the [`interactive_tools`](interactive_tools) directory:
 
 ### 1. **ROI Selection Tool – `bokeh_selection.py`**
-Used to **initialize the Regions of Interest (ROIs)** before tracking begins. This script allows you to manually select the areas in the image where tracking should occur. 
->  This step is **required** to set up the tracking process.
+Used to **initialize the Regions of Interest (ROIs)** before tracking begins. This script allows you to manually select the areas in the image where tracking should occur.
+> This step is **required** to set up the tracking process.
 ```bash
 cd path/to/live/tracking/tool
 source tracking-tool-venv/bin/activate  # On Windows: tracking-tool-venv\Scripts\activate
 python interactive_tools/bokeh_selection.py
 ```
 
+Select the tracking mode
 
 ### 2. **Tracking Monitor – `bokeh_visualization.py`**
 
@@ -129,6 +130,11 @@ This combined interface provides access to ROI selection and tracking visualizat
 cd path/to/live/tracking/tool
 source tracking-tool-venv/bin/activate  # On Windows: tracking-tool-venv\Scripts\activate
 panel serve interactive_tools/panel_app.py --dev
+```
+
+for zeiss
+```bash
+panel serve interactive_tools/zeiss_panel_app.py --show
 ```
 
 ## Local GPU
