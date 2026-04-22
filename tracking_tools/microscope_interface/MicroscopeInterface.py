@@ -637,7 +637,7 @@ class MicroscopeInterface_Zeiss:
             OAD/ZEN-API/python_examples/zenapi_streaming.py
         """
         try:
-            from zen_api.streaming.v2 import (
+            from zen_api.acquisition.v1beta import (
                 ExperimentStreamingServiceStub,
                 MonitorAllExperimentsRequest,   # adjust name if needed
             )
