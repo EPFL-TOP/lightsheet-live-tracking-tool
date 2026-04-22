@@ -116,11 +116,15 @@ w_max_z = pn.widgets.FloatInput(
 w_n_scenes = pn.widgets.IntInput(
     name='Number of scenes / positions', value=1, start=1, width=200,
 )
+w_preview_timeout = pn.widgets.IntInput(
+    name='Preview wait timeout (minutes)', value=20, start=1, width=220,
+)
 btn_preview = pn.widgets.Button(
     name='Capture Preview Frame', button_type='primary', width=220
 )
 _preview_info = pn.pane.Markdown(
-    '_Connect to ZEN and grab one frame per scene so you can define ROIs._',
+    '_Connect to ZEN, wait for the next acquired frame per scene (up to the '
+    'timeout above), save as TIF, then disconnect._',
     width=420,
 )
 
@@ -180,7 +184,8 @@ zen_section = pn.Column(
     pn.layout.Divider(),
     pn.pane.Markdown('**Preview capture** — run before defining ROIs'),
     _preview_info,
-    pn.Row(w_n_scenes, btn_preview),
+    pn.Row(w_n_scenes, w_preview_timeout),
+    btn_preview,
 )
 sim_section = pn.Column(
     pn.pane.Markdown('**Simulation (CZI file)**'),
@@ -266,26 +271,39 @@ def _run_capture_preview():
             zeiss_params=zeiss_params,
         )
         microscope.connect()
+        total_wait_s   = w_preview_timeout.value * 60   # minutes → seconds
+        poll_ms        = 20_000                          # 20 s per poll (keep loop responsive)
+        elapsed_s      = 0
+        received: dict = {}   # position_name → (image, tp)
+
         logging.info(
-            "Connected to ZEN API — waiting for the first frame per position.\n"
-            "Make sure the ZEN experiment is running."
+            f"Connected to ZEN API — waiting up to {w_preview_timeout.value} min "
+            f"for the first frame per scene. Make sure the ZEN experiment is running."
         )
 
-        received: dict = {}   # position_name → (image, tp)
-        timeout_ms = 30_000   # 30 s per frame; ZEN simulated microscope can be slow
+        while len(received) < len(subdirs) and elapsed_s < total_wait_s:
+            image, tp, pos = microscope.wait_for_image(timeout_ms=poll_ms)
+            elapsed_s += poll_ms / 1000
 
-        while len(received) < len(subdirs):
-            image, tp, pos = microscope.wait_for_image(timeout_ms=timeout_ms)
             if image is None:
-                logging.warning(
-                    "Timed out waiting for a frame from ZEN. "
-                    "Check that the experiment is running and the channel index is correct."
-                )
-                break
+                remaining = int(total_wait_s - elapsed_s)
+                if remaining > 0:
+                    logging.info(
+                        f"No frame yet — elapsed {int(elapsed_s)}s, "
+                        f"{remaining}s remaining."
+                    )
+                continue
+
             if pos not in received:
                 received[pos] = (image, tp)
-                tif_path = os.path.join(dirpath, pos, 'max_proj', f't{tp:04d}.tif')
+                tif_path = os.path.join(dirpath, pos, f't{tp:04d}.tif')
                 logging.info(f"  [{pos}] preview saved → {tif_path}")
+
+        if len(received) < len(subdirs) and elapsed_s >= total_wait_s:
+            logging.warning(
+                f"Timeout reached ({w_preview_timeout.value} min) before all "
+                f"scenes were captured. Got: {sorted(received.keys())}"
+            )
 
         microscope.disconnect()
 
