@@ -598,13 +598,13 @@ class MicroscopeInterface_Zeiss:
             if self.cert_path and os.path.exists(self.cert_path):
                 with open(self.cert_path, 'rb') as f:
                     cert_data = f.read()
-                credentials = grpc.aio.ssl_channel_credentials(
+                credentials = grpc.ssl_channel_credentials(
                     root_certificates=cert_data
                 )
             else:
                 # Fall back to system CA bundle; may need --insecure for
                 # self-signed certs in lab environments.
-                credentials = grpc.aio.ssl_channel_credentials()
+                credentials = grpc.ssl_channel_credentials()
                 self.logger.warning(
                     "No cert_path provided — using system CA bundle. "
                     "Set cert_path to the ZEN Gateway certificate if connection fails."
