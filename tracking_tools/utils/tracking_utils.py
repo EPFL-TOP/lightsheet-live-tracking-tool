@@ -392,12 +392,13 @@ def prioritized_intersection(Fis) :
 # Helper to get the positions config
 #####################################################
 
-def get_pos_config(dirpath, log_dir_name) :
+def get_pos_config(dirpath, log_dir_name, position_name=None) :
     import glob
     import os
     import json
     positions_config = {}
-    folder_list = glob.glob(os.path.join(dirpath, "*", log_dir_name))
+    position_name = "*" if position_name==None else position_name
+    folder_list = glob.glob(os.path.join(dirpath, position_name , log_dir_name))
     for folder in folder_list :
         root = os.path.split(folder)[0]
         name = os.path.split(root)[-1]
