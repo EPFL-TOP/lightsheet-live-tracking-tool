@@ -660,10 +660,12 @@ class MicroscopeInterface_Zeiss:
         # Buffer: {(scene_idx, timepoint_idx): {z_idx: 2-D array}}
         frame_buffer = {}
 
+        # Do not filter by channel_index in the request — some ZEN versions
+        # close the stream immediately when that parameter is set.  We filter
+        # per-frame in Python using fp.c instead.
         self.logger.info("ZEN image stream active — waiting for experiment frames")
         async for response in stub.monitor_all_experiments(
             ExperimentStreamingServiceMonitorAllExperimentsRequest(
-                channel_index=self.tracking_channel,
                 enable_raw_data=False,
             )
         ):
@@ -674,6 +676,9 @@ class MicroscopeInterface_Zeiss:
             scene_idx = fp.s
             tp_idx    = fp.t
             z_idx     = fp.z
+
+            if fp.c != self.tracking_channel:
+                continue
 
             key = (scene_idx, tp_idx)
             if key not in frame_buffer:
