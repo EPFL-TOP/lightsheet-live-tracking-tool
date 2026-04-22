@@ -617,19 +617,42 @@ class MicroscopeInterface_Zeiss:
         # so that 'localhost' or an IP address can connect without SNI mismatch.
         ssl_ctx.check_hostname = False
 
-        channel = grpclib.client.Channel(
-            host=self.address, port=int(self.port), ssl=ssl_ctx
-        )
-        self._channel  = channel
-        self._metadata = [("control-token", self.control_token)]
-        self.logger.info("Connected to ZEN API Gateway")
-        try:
-            await self._stream_images()
-        except Exception as e:
-            self.logger.error(f"ZEN API streaming error: {e}", exc_info=True)
-            self._queue.put((None, None, None))
-        finally:
-            channel.close()
+        # ZEN closes the gRPC stream between timepoints (when no acquisition is
+        # happening).  We reconnect automatically so that we catch the next
+        # available frame regardless of when the connection is opened relative
+        # to the experiment schedule.
+        retry_delay_s = 5
+
+        while not self._stop_event.is_set():
+            channel = grpclib.client.Channel(
+                host=self.address, port=int(self.port), ssl=ssl_ctx
+            )
+            self._channel  = channel
+            self._metadata = [("control-token", self.control_token)]
+            try:
+                self.logger.info(
+                    f"Connecting to ZEN API Gateway at {self.address}:{self.port}"
+                )
+                await self._stream_images()
+                # _stream_images returned cleanly (stop_event set inside loop)
+                break
+            except asyncio.CancelledError:
+                # Event loop is shutting down — exit without logging an error
+                break
+            except Exception as e:
+                if self._stop_event.is_set():
+                    break
+                self.logger.info(
+                    f"ZEN stream closed ({type(e).__name__}: {e}). "
+                    f"ZEN may be between timepoints — reconnecting in {retry_delay_s}s"
+                )
+                try:
+                    await asyncio.sleep(retry_delay_s)
+                except asyncio.CancelledError:
+                    break
+            finally:
+                channel.close()
+                self._channel = None
  
     # ------------------------------------------------------------------
     async def _stream_images(self):
