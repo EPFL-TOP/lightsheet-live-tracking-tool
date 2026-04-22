@@ -3,56 +3,68 @@ Zeiss Tracking Panel App
 ========================
 Standalone Panel / Bokeh application for running the live-tracking tool
 against a Zeiss microscope via the ZEN API, or offline from a CZI file.
- 
+
 Launch with::
- 
+
     panel serve interactive_tools/zeiss_panel_app.py --show --port 5022
- 
+
 The app has two tabs:
   * **Tracking** — configure parameters, start / stop the tracking loop,
     and monitor the log output.
   * **ROI Selection** — embedded Bokeh ROI editor (existing ``bokeh_selection``
     dashboard).  Changes saved here are picked up automatically by the running
     tracker via the ``watchdog`` file-watcher in ``TrackingRunner.run_zeiss()``.
+
+Workflow (first time / new experiment)
+--------------------------------------
+1. Fill in the ZEN Connection fields (pre-loaded from ``zeiss_config.ini``).
+2. Set *Data directory* and *Number of scenes*.
+3. Click **Capture Preview Frame** — connects to ZEN, grabs one frame per
+   scene, saves to ``<data_dir>/<scene_folder>/max_proj/t0000.tif``, then
+   disconnects.
+4. Switch to the *ROI Selection* tab, load the preview TIF for each position,
+   draw the ROI(s) and click Save.
+5. Back in *Tracking*, click **Run Tracking**.
 """
- 
+
+import configparser
 import os
 import sys
 import queue
 import logging
 import threading
 import yaml
- 
+
 import panel as pn
 import numpy as np
- 
+
 # Make the repo root importable when running via `panel serve`
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.abspath(os.path.join(_HERE, '..'))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
- 
+
 pn.extension(sizing_mode='stretch_width')
- 
+
 # ─── Log capture ─────────────────────────────────────────────────────────────
- 
+
 _log_queue: queue.Queue = queue.Queue()
- 
- 
+
+
 class _QueueHandler(logging.Handler):
     """Forwards log records to a thread-safe queue for Panel to consume."""
     def emit(self, record):
         _log_queue.put(self.format(record))
- 
- 
+
+
 _queue_handler = _QueueHandler()
 _queue_handler.setFormatter(logging.Formatter(
     '[%(asctime)s] %(name)s %(levelname)s - %(message)s',
     datefmt='%H:%M:%S'
 ))
- 
+
 # ─── Widgets — acquisition parameters ────────────────────────────────────────
- 
+
 w_pixel_xy = pn.widgets.FloatInput(
     name='Pixel size x,y (µm)', value=0.347, step=0.001, width=220
 )
@@ -66,9 +78,9 @@ w_dirpath = pn.widgets.TextInput(
 )
 w_serverkit = pn.widgets.Checkbox(name='Use serverkit', value=True)
 w_simulated = pn.widgets.Checkbox(name='Simulated microscope (CZI)', value=False)
- 
+
 # ─── Widgets — ZEN connection ─────────────────────────────────────────────────
- 
+
 w_zen_address = pn.widgets.TextInput(
     name='ZEN Gateway address', value='localhost', width=220
 )
@@ -98,9 +110,22 @@ w_max_xy = pn.widgets.FloatInput(
 w_max_z = pn.widgets.FloatInput(
     name='Max Z shift (µm)', value=100.0, step=5.0, width=180
 )
- 
+
+# ─── Widgets — preview capture ────────────────────────────────────────────────
+
+w_n_scenes = pn.widgets.IntInput(
+    name='Number of scenes / positions', value=1, start=1, width=200,
+)
+btn_preview = pn.widgets.Button(
+    name='Capture Preview Frame', button_type='primary', width=220
+)
+_preview_info = pn.pane.Markdown(
+    '_Connect to ZEN and grab one frame per scene so you can define ROIs._',
+    width=420,
+)
+
 # ─── Widgets — CZI simulation ─────────────────────────────────────────────────
- 
+
 w_czi_path = pn.widgets.TextInput(
     name='CZI file path', placeholder='/path/to/file.czi', width=420
 )
@@ -110,19 +135,41 @@ w_tp_delay = pn.widgets.IntInput(
 w_start_tp = pn.widgets.IntInput(
     name='Starting timepoint', value=0, width=160
 )
- 
+
 # ─── Run / Stop ───────────────────────────────────────────────────────────────
- 
-btn_run  = pn.widgets.Button(name='▶  Run Tracking', button_type='success', width=180)
-btn_stop = pn.widgets.Button(name='■  Stop',         button_type='danger',  width=120)
+
+btn_run  = pn.widgets.Button(name='Run Tracking', button_type='success', width=180)
+btn_stop = pn.widgets.Button(name='Stop',         button_type='danger',  width=120)
 btn_stop.disabled = True
- 
+
 w_log = pn.widgets.TextAreaInput(
     name='Log output', value='', height=320, disabled=True, width=780
 )
- 
+
+# ─── Load zeiss_config.ini → pre-fill widgets ────────────────────────────────
+
+def _load_zeiss_config():
+    """Read zeiss_config.ini from the repo root and apply values to widgets."""
+    config_path = os.path.join(_ROOT, 'zeiss_config.ini')
+    if not os.path.exists(config_path):
+        return
+    cfg = configparser.ConfigParser()
+    cfg.read(config_path)
+    w_zen_address.value  = cfg.get('host',       'address',            fallback='localhost')
+    w_zen_port.value     = cfg.getint('host',    'port',               fallback=5002)
+    w_zen_cert.value     = cfg.get('cert',        'path',              fallback='')
+    w_zen_token.value    = cfg.get('api',         'control_token',     fallback='')
+    w_zen_expname.value  = cfg.get('experiment',  'name',              fallback='')
+    w_zen_channel.value  = cfg.getint('experiment', 'tracking_channel', fallback=0)
+    w_z_proj.value       = cfg.get('experiment',  'z_projection',      fallback='max')
+    w_max_xy.value       = cfg.getfloat('bounds', 'max_xy_um',         fallback=500.0)
+    w_max_z.value        = cfg.getfloat('bounds', 'max_z_um',          fallback=100.0)
+
+
+_load_zeiss_config()
+
 # ─── Section visibility ───────────────────────────────────────────────────────
- 
+
 zen_section = pn.Column(
     pn.pane.Markdown('**ZEN Connection**'),
     pn.Row(w_zen_address, w_zen_port),
@@ -130,39 +177,160 @@ zen_section = pn.Column(
     w_zen_token,
     pn.Row(w_zen_expname, w_z_proj),
     pn.Row(w_zen_channel, w_max_xy, w_max_z),
+    pn.layout.Divider(),
+    pn.pane.Markdown('**Preview capture** — run before defining ROIs'),
+    _preview_info,
+    pn.Row(w_n_scenes, btn_preview),
 )
 sim_section = pn.Column(
     pn.pane.Markdown('**Simulation (CZI file)**'),
     w_czi_path,
     pn.Row(w_tp_delay, w_start_tp),
 )
- 
- 
+
+
 @pn.depends(w_simulated, watch=True)
 def _toggle_sections(simulated):
     zen_section.visible = not simulated
     sim_section.visible = simulated
- 
- 
+
+
 _toggle_sections(w_simulated.value)   # apply initial state
- 
+
 # ─── Runner state ─────────────────────────────────────────────────────────────
- 
+
 _state: dict = {'runner': None, 'microscope': None, 'thread': None}
- 
- 
+
+
+# ─── Preview capture ──────────────────────────────────────────────────────────
+
+def _run_capture_preview():
+    """
+    Connect to ZEN, wait for one frame per scene/position, save each as
+    ``<data_dir>/<position>/max_proj/t0000.tif``, then disconnect.
+
+    If no sub-folders exist under *data_dir* yet, ``scene_000``,
+    ``scene_001``, … are created automatically (one per *w_n_scenes*).
+    The user can rename them afterwards — alphabetical order must match ZEN
+    scene order.
+    """
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    if _queue_handler not in root_logger.handlers:
+        root_logger.addHandler(_queue_handler)
+
+    try:
+        from tracking_tools.microscope_interface.MicroscopeInterface import (
+            MicroscopeInterface_Zeiss,
+        )
+
+        dirpath = w_dirpath.value.strip()
+        if not dirpath or not os.path.isdir(dirpath):
+            logging.error(
+                "Data directory does not exist. "
+                "Create it (or set a valid path) before capturing a preview."
+            )
+            return
+
+        # Discover existing sub-folders or create scene_NNN placeholders
+        subdirs = sorted([
+            d for d in os.listdir(dirpath)
+            if os.path.isdir(os.path.join(dirpath, d)) and not d.startswith('.')
+        ])
+        if not subdirs:
+            n = w_n_scenes.value
+            for i in range(n):
+                os.makedirs(os.path.join(dirpath, f'scene_{i:03d}'), exist_ok=True)
+            subdirs = sorted([f'scene_{i:03d}' for i in range(n)])
+            logging.info(f"Created {n} position folder(s): {subdirs}")
+
+        # MicroscopeInterface_Zeiss only needs position names from positions_config
+        positions_config = {name: {} for name in subdirs}
+        logging.info(f"Capturing preview for: {subdirs}")
+
+        zeiss_params = {
+            'address':          w_zen_address.value.strip(),
+            'port':             w_zen_port.value,
+            'cert_path':        w_zen_cert.value.strip(),
+            'control_token':    w_zen_token.value,
+            'experiment_name':  w_zen_expname.value.strip(),
+            'z_projection':     w_z_proj.value,
+            'tracking_channel': w_zen_channel.value,
+            'max_xy_um':        w_max_xy.value,
+            'max_z_um':         w_max_z.value,
+        }
+
+        microscope = MicroscopeInterface_Zeiss(
+            positions_config=positions_config,
+            dirpath=dirpath,
+            zeiss_params=zeiss_params,
+        )
+        microscope.connect()
+        logging.info(
+            "Connected to ZEN API — waiting for the first frame per position.\n"
+            "Make sure the ZEN experiment is running."
+        )
+
+        received: dict = {}   # position_name → (image, tp)
+        timeout_ms = 30_000   # 30 s per frame; ZEN simulated microscope can be slow
+
+        while len(received) < len(subdirs):
+            image, tp, pos = microscope.wait_for_image(timeout_ms=timeout_ms)
+            if image is None:
+                logging.warning(
+                    "Timed out waiting for a frame from ZEN. "
+                    "Check that the experiment is running and the channel index is correct."
+                )
+                break
+            if pos not in received:
+                received[pos] = (image, tp)
+                tif_path = os.path.join(dirpath, pos, 'max_proj', f't{tp:04d}.tif')
+                logging.info(f"  [{pos}] preview saved → {tif_path}")
+
+        microscope.disconnect()
+
+        if received:
+            paths = '\n'.join(
+                f'  {dirpath}/{pos}/max_proj/t{tp:04d}.tif'
+                for pos, (_, tp) in sorted(received.items())
+            )
+            logging.info(
+                f"Preview capture complete.\n{paths}\n\n"
+                "Next: open the ROI Selection tab, load each preview TIF,\n"
+                "draw ROI(s) and click Save to create tracking_RoIs.json."
+            )
+        else:
+            logging.error("No frames received — preview failed.")
+
+    except Exception as e:
+        logging.error(f"Preview capture error: {e}", exc_info=True)
+    finally:
+        pn.state.execute(lambda: setattr(btn_preview, 'disabled', False))
+
+
+def _on_preview(event):
+    btn_preview.disabled = True
+    threading.Thread(
+        target=_run_capture_preview, daemon=True, name='PreviewThread'
+    ).start()
+
+
+btn_preview.on_click(_on_preview)
+
+# ─── Tracking run ─────────────────────────────────────────────────────────────
+
 def _run_tracking():
     """Executed in a daemon thread; drives the full tracking lifecycle."""
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
     if _queue_handler not in root_logger.handlers:
         root_logger.addHandler(_queue_handler)
- 
+
     try:
         config_path = os.path.join(_ROOT, 'tracking_tools', 'tracking_config.yaml')
         with open(config_path) as f:
             config = yaml.safe_load(f)
- 
+
         roi_tracker_config               = config['roi_tracker']
         roi_tracker_config['serverkit']  = w_serverkit.value
         position_tracker_config = {
@@ -170,26 +338,28 @@ def _run_tracking():
             'pixel_size_z':  w_pixel_z.value,
         }
         runner_config = config['tracking_runner']
- 
+
         from tracking_tools.tracking_runner.TrackingRunner import TrackingRunner
         from tracking_tools.microscope_interface.MicroscopeInterface import (
             MicroscopeInterface_Zeiss,
             SimulatedMicroscopeInterface_Zeiss,
         )
         from tracking_tools.utils.tracking_utils import get_pos_config
- 
+
         dirpath       = w_dirpath.value.strip()
         log_dir_name  = runner_config['log_dir_name']
         position_config = get_pos_config(dirpath, log_dir_name)
- 
+
         if not position_config:
             logging.error(
                 f"No trackable positions found in '{dirpath}'.\n"
                 "Each position folder must contain "
-                "embryo_tracking/tracking_RoIs.json."
+                "embryo_tracking/tracking_RoIs.json.\n"
+                "Use 'Capture Preview Frame' to get images, then define ROIs "
+                "in the ROI Selection tab."
             )
             return
- 
+
         if w_simulated.value:
             microscope = SimulatedMicroscopeInterface_Zeiss(
                 positions_config=position_config,
@@ -217,9 +387,9 @@ def _run_tracking():
                 dirpath=dirpath,
                 zeiss_params=zeiss_params,
             )
- 
+
         _state['microscope'] = microscope
- 
+
         runner = TrackingRunner(
             positions_config=position_config,
             microscope_interface=microscope,
@@ -230,18 +400,18 @@ def _run_tracking():
         )
         _state['runner'] = runner
         runner.run_zeiss()
- 
+
     except Exception as e:
         logging.error(f"Tracking error: {e}", exc_info=True)
     finally:
         pn.state.execute(_reset_buttons)
- 
- 
+
+
 def _reset_buttons():
     btn_run.disabled  = False
     btn_stop.disabled = True
- 
- 
+
+
 def _on_run(event):
     btn_run.disabled  = True
     btn_stop.disabled = False
@@ -249,8 +419,8 @@ def _on_run(event):
     t = threading.Thread(target=_run_tracking, daemon=True, name='ZeissTrackingThread')
     _state['thread'] = t
     t.start()
- 
- 
+
+
 def _on_stop(event):
     runner    = _state.get('runner')
     microscope = _state.get('microscope')
@@ -260,16 +430,16 @@ def _on_stop(event):
         microscope.stop_requested = True
     btn_run.disabled  = False
     btn_stop.disabled = True
- 
- 
+
+
 btn_run.on_click(_on_run)
 btn_stop.on_click(_on_stop)
- 
+
 # ─── Periodic log refresh ─────────────────────────────────────────────────────
- 
+
 _MAX_LOG_LINES = 300
- 
- 
+
+
 def _update_log():
     lines = []
     try:
@@ -280,14 +450,13 @@ def _update_log():
     if lines:
         current_lines = (w_log.value or '').splitlines()
         all_lines = current_lines + lines
-        # Keep only the last _MAX_LOG_LINES to avoid unbounded growth
         w_log.value = '\n'.join(all_lines[-_MAX_LOG_LINES:]) + '\n'
- 
- 
+
+
 pn.state.add_periodic_callback(_update_log, period=500)
- 
+
 # ─── Layout ───────────────────────────────────────────────────────────────────
- 
+
 tracking_tab = pn.Column(
     pn.pane.Markdown('## Zeiss Microscope Live Tracking'),
     pn.layout.Divider(),
@@ -307,7 +476,7 @@ tracking_tab = pn.Column(
     w_log,
     sizing_mode='stretch_width',
 )
- 
+
 # ROI selection tab — reuse the existing Bokeh dashboard
 try:
     from interactive_tools.bokeh_selection import make_layout as _roi_make_layout
@@ -317,11 +486,11 @@ except Exception as _e:
         f'Could not load ROI selection dashboard: {_e}',
         alert_type='warning',
     )
- 
+
 tabs = pn.Tabs(
     ('Tracking',      tracking_tab),
     ('ROI Selection', roi_tab),
     sizing_mode='stretch_both',
 )
- 
+
 tabs.servable()
