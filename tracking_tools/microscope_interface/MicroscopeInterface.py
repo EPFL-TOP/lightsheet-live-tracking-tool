@@ -472,8 +472,11 @@ class SimulatedMicroscopeInterface_Zeiss:
  
         except Exception as e:
             self.logger.error(f"Error reading CZI file: {e}", exc_info=True)
+        finally:
+            # Signal end-of-simulation so run_zeiss() can exit cleanly
+            self.stop_requested = True
             self._queue.put((None, None, None))
- 
+
     # ------------------------------------------------------------------
     def wait_for_image(self, timeout_ms=1000):
         try:

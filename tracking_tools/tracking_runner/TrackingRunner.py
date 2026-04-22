@@ -241,8 +241,11 @@ class TrackingRunner() :
                 )
  
                 if image is None:
+                    if getattr(self.microscope, 'stop_requested', False):
+                        self.logger.info("Microscope signalled end-of-simulation — stopping loop")
+                        break
                     continue
- 
+
                 if position_name not in self.trackers:
                     self.logger.warning(
                         f"No tracker for position [{position_name}] — skipping"
