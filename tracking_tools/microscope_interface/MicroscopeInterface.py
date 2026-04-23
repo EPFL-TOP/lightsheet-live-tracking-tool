@@ -605,17 +605,24 @@ class MicroscopeInterface_Zeiss:
             self._queue.put((None, None, None))
             return
 
+        # Replicate initialize_zenapi from zen_api_utils/misc.py exactly.
+        # ssl.SSLContext(PROTOCOL_TLS_CLIENT) + set_alpn_protocols(["h2"]) is
+        # required: without the h2 ALPN hint the TLS handshake does not
+        # negotiate HTTP/2 and grpclib terminates the stream immediately.
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         if self.cert_path and os.path.exists(self.cert_path):
-            ssl_ctx = ssl.create_default_context(cafile=self.cert_path)
+            ssl_ctx.load_verify_locations(cafile=self.cert_path)
+            ssl_ctx.verify_mode = ssl.CERT_REQUIRED
+            ssl_ctx.check_hostname = True
         else:
-            ssl_ctx = ssl.create_default_context()
             self.logger.warning(
-                "No cert_path provided — using system CA bundle. "
-                "Set cert_path to the ZEN Gateway certificate if connection fails."
+                "No cert_path provided — TLS certificate verification disabled. "
+                "Set cert_path to the ZEN Gateway CA certificate."
             )
-        # ZEN API Gateway uses a self-signed CA; disable hostname verification
-        # so that 'localhost' or an IP address can connect without SNI mismatch.
-        ssl_ctx.check_hostname = False
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+        # h2 ALPN is mandatory for gRPC-over-HTTP/2
+        ssl_ctx.set_alpn_protocols(["h2"])
 
         # ZEN closes the gRPC stream between timepoints (when no acquisition is
         # happening).  We reconnect automatically so that we catch the next
