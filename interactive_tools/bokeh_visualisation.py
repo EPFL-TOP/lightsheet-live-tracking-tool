@@ -98,7 +98,7 @@ def make_layout():
     # Display image from source with a color mapper for contrast
     color_mapper = LinearColorMapper(palette="Greys256", low=0, high=255)
     p_img.image('image', x='x', y='y', dw='dw', dh='dh', source=image_source,  color_mapper=color_mapper)
-    p_img.scatter(x='x', y='y', source=point_source, size=5, color='red')
+    points_renderer = p_img.scatter(x='x', y='y', source=point_source, size=5, color='red')
 
     slider = Slider(start=0, end=0, value=0, step=1, title="time frame", width=700)
 
@@ -487,10 +487,45 @@ def make_layout():
 
     invert_axis_checkboxgroup.on_change("active", invert_axis_callback)
     #_______________________________________________________
+    def _reset_all():
+        """Clear all data sources and return the image panel to the initial noise state."""
+        global last_tp
+        last_tp = -1
+        image_source.data = dict(
+            image=[initial_img], x=[0], y=[0],
+            dw=[initial_img.shape[1]], dh=[initial_img.shape[0]]
+        )
+        images_source.data = dict(image=[], x=[], y=[], dw=[], dh=[])
+        shift_mu_source.data        = dict(z=[], y=[], x=[], t=[])
+        trajectory_source.data      = dict(z=[], y=[], x=[], t=[])
+        trajectory_highlight_source.data = dict(x=[], y=[], z=[])
+        rects_source.data = dict(
+            x=[], y=[], width=[], height=[],
+            index=[], label_x=[], label_y=[], time_point=[], tracks_idx=[]
+        )
+        rect_source.data  = dict(x=[], y=[], width=[], height=[], index=[], label_x=[], label_y=[])
+        points_source.data = dict(x=[], y=[])
+        point_source.data  = dict(x=[], y=[])
+        slider.start = 0
+        slider.end   = 0
+        slider.value = 0
+        shifts_text.text = ""
+
+    #_______________________________________________________
     def reload_images():
-        load_images(os.path.join(status.text.replace("Selected folder: ",""), dropdown_position.value ), True)
-        load_tracking(os.path.join(status.text.replace("Selected folder: ",""), dropdown_position.value ), True)
-        callback_slider(None, None, None)
+        pos_path = os.path.join(
+            status.text.replace("Selected folder: ", ""),
+            dropdown_position.value
+        )
+        load_images(pos_path, True)
+        load_tracking(pos_path, True)
+        # Jump to the last available frame so the user sees the newest data
+        new_end = slider.end
+        if slider.value != new_end:
+            slider.value = new_end   # triggers callback_slider via on_change
+        else:
+            callback_slider(None, None, None)
+
     btn_reload = Button(label="Reload", button_type="success")
     btn_reload.on_click(reload_images)
 
@@ -671,6 +706,7 @@ def make_layout():
                 for p in pos_list_full:
                     pos_list.append(os.path.split(os.path.split(p)[0])[-1])
 
+                _reset_all()
                 dropdown_position.options = pos_list
 
                 #load_images(dir_path)
@@ -695,6 +731,7 @@ def make_layout():
                 for p in pos_list_full:
                     pos_list.append(os.path.split(os.path.split(p)[0])[-1])
                     pos_list = sorted(pos_list)
+                _reset_all()
                 dropdown_position.options = pos_list
                 dropdown_position.value = ""
 
@@ -713,6 +750,11 @@ def make_layout():
         load_tracking(dir_path)
         
     dropdown_position.on_change('value', update_pos)
+
+    def toggle_roi_display(_attr, _old, new):
+        rect_glyph.visible    = 0 in new
+        points_renderer.visible = 1 in new
+    roipoints_checkboxgroup.on_change('active', toggle_roi_display)
 
     select_button = Button(label="Browse Folder...", button_type="primary")
     select_button.on_click(select_folder)

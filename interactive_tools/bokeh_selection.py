@@ -268,7 +268,8 @@ def make_layout():
         if 0 in checkbox_maxproj.active :
             working = np.max(original, axis=0)
         else :
-            slice_nb = slice_slider.value
+            slice_slider.end = original.shape[0] - 1
+            slice_nb = min(slice_slider.value, original.shape[0] - 1)
             working = original[slice_nb]
         # Downscale image
         scaling_factor = 2 ** int(dropdown_downscale.value)
@@ -538,6 +539,20 @@ def make_layout():
         if not tif_files:
             status.text = f"No TIF files found in {pos_dir}"
             return
+
+        # Filter to same channel as the tracked file, if known
+        import re as _re
+        roi_json_path = pos_dir / "embryo_tracking" / "tracking_RoIs.json"
+        if roi_json_path.exists():
+            with open(roi_json_path) as _f:
+                _roi_data = json.load(_f)
+            _ref = _roi_data.get("filename", "")
+            _m = _re.match(r'^t\d+(.*?)\.tif$', _ref, _re.IGNORECASE)
+            if _m and _m.group(1):
+                _suffix = _m.group(1)
+                _matching = [f for f in tif_files if f.stem.endswith(_suffix)]
+                if _matching:
+                    tif_files = _matching
 
         latest_tif = tif_files[-1]
         try:
