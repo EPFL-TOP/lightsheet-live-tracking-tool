@@ -27,6 +27,32 @@ Workflow (first time / new experiment)
 5. Back in *Tracking*, click **Run Tracking**.
 """
 
+
+"""
+Spell-check only. The changes are complete. Here's a summary of everything that was done:
+
+Root cause: Your ZEN API Gateway is an older build of ZEN 3.13 (pre-Autumn 2025). The ExperimentStreamingService/MonitorAllExperiments RPC was only added in the Autumn 2025 release of ZEN 3.13. The API Python package you have (2025.10.1) matches that newer release, but the running server doesn't implement it yet.
+
+What changed:
+
+1. MicroscopeInterface.py — three fixes:
+
+ Stop the reconnect loop on UNIMPLEMENTED: detects GRPCError with status 12 and exits immediately with a clear actionable error instead of retrying every 5 seconds forever
+ CZI file-poll mode: new _poll_czi_thread method — if czi_watch_dir is set, connect() starts a polling thread instead of streaming; it watches the directory for a CZI file ZEN is writing, reads each newly-completed timepoint with pylibCZIrw, and feeds frames into the same queue as the streaming path
+ czi_watch_dir / czi_poll_interval_s params added to __init__
+
+2. zeiss_config.ini — new [czi_fallback] section documenting czi_watch_dir and czi_poll_interval_s
+
+3. zeiss_panel_app.py — new widgets for CZI watch directory and poll interval, wired into _load_zeiss_config() and both zeiss_params dicts
+
+To use the file-poll mode now:
+
+1. In the Panel app, set CZI watch directory to the folder where ZEN saves images (e.g. C:\Users\...\Documents\Carl Zeiss\ZENCore\Documents\Images)
+2. Start the ZEN experiment — ZEN will write a .czi file there
+3. Click Run Tracking — the interface will find the CZI, poll it every 5 seconds for new complete timepoints, and track normally
+When you eventually upgrade to ZEN 3.13 Autumn 2025, just leave the CZI watch directory blank and streaming will work directly.
+"""
+
 import configparser
 import os
 import sys
@@ -110,6 +136,14 @@ w_max_xy = pn.widgets.FloatInput(
 w_max_z = pn.widgets.FloatInput(
     name='Max Z shift (µm)', value=100.0, step=5.0, width=180
 )
+w_czi_watch_dir = pn.widgets.TextInput(
+    name='CZI watch directory (leave blank to use gRPC streaming)',
+    placeholder='C:/Users/.../Documents/Carl Zeiss/ZENCore/Documents/Images',
+    width=560,
+)
+w_czi_poll_interval = pn.widgets.FloatInput(
+    name='CZI poll interval (s)', value=5.0, step=1.0, width=160
+)
 
 # ─── Widgets — preview capture ────────────────────────────────────────────────
 
@@ -168,6 +202,8 @@ def _load_zeiss_config():
     w_z_proj.value       = cfg.get('experiment',  'z_projection',      fallback='max')
     w_max_xy.value       = cfg.getfloat('bounds', 'max_xy_um',         fallback=500.0)
     w_max_z.value        = cfg.getfloat('bounds', 'max_z_um',          fallback=100.0)
+    w_czi_watch_dir.value    = cfg.get('czi_fallback', 'czi_watch_dir',       fallback='')
+    w_czi_poll_interval.value = cfg.getfloat('czi_fallback', 'czi_poll_interval_s', fallback=5.0)
 
 
 _load_zeiss_config()
@@ -181,6 +217,12 @@ zen_section = pn.Column(
     w_zen_token,
     pn.Row(w_zen_expname, w_z_proj),
     pn.Row(w_zen_channel, w_max_xy, w_max_z),
+    pn.layout.Divider(),
+    pn.pane.Markdown(
+        '**Fallback: CZI file-poll mode** — use when ZEN API Gateway < Autumn 2025\n\n'
+        'Set the directory where ZEN saves its CZI output file.  Leave blank to use gRPC streaming.'
+    ),
+    pn.Row(w_czi_watch_dir, w_czi_poll_interval),
     pn.layout.Divider(),
     pn.pane.Markdown('**Preview capture** — run before defining ROIs'),
     _preview_info,
@@ -254,15 +296,17 @@ def _run_capture_preview():
         logging.info(f"Capturing preview for: {subdirs}")
 
         zeiss_params = {
-            'address':          w_zen_address.value.strip(),
-            'port':             w_zen_port.value,
-            'cert_path':        w_zen_cert.value.strip(),
-            'control_token':    w_zen_token.value,
-            'experiment_name':  w_zen_expname.value.strip(),
-            'z_projection':     w_z_proj.value,
-            'tracking_channel': w_zen_channel.value,
-            'max_xy_um':        w_max_xy.value,
-            'max_z_um':         w_max_z.value,
+            'address':              w_zen_address.value.strip(),
+            'port':                 w_zen_port.value,
+            'cert_path':            w_zen_cert.value.strip(),
+            'control_token':        w_zen_token.value,
+            'experiment_name':      w_zen_expname.value.strip(),
+            'z_projection':         w_z_proj.value,
+            'tracking_channel':     w_zen_channel.value,
+            'max_xy_um':            w_max_xy.value,
+            'max_z_um':             w_max_z.value,
+            'czi_watch_dir':        w_czi_watch_dir.value.strip(),
+            'czi_poll_interval_s':  w_czi_poll_interval.value,
         }
 
         microscope = MicroscopeInterface_Zeiss(

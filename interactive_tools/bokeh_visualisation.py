@@ -394,7 +394,19 @@ def make_layout():
 
         tracks_path = os.path.join(tracking_path,  "tracks.pkl")
         with open(tracks_path, 'rb') as f :
-            tracks = pickle.load(f)
+            raw_tracks = pickle.load(f)
+
+        # New format (multi-epoch): list of per-epoch track lists where each
+        # epoch element is itself a Python list (raw_tracks[0] is a list).
+        # Old format (single-epoch): flat list where raw_tracks[0] is a numpy
+        # array (the initial np.empty((0,2)) placeholder).
+        # Flatten all epochs into one sequence so the rest of the code is
+        # unchanged and both formats are handled transparently.
+        import numpy as _np
+        if raw_tracks and isinstance(raw_tracks[0], list):
+            tracks = [tp for epoch in raw_tracks for tp in epoch]
+        else:
+            tracks = raw_tracks
 
         x_tracks=[]
         y_tracks=[]

@@ -558,7 +558,12 @@ class MicroscopeInterface_Zeiss:
         self.tracking_channel = zeiss_params.get('tracking_channel', 0)
         self.max_xy_um        = float(zeiss_params.get('max_xy_um',  500.0))
         self.max_z_um         = float(zeiss_params.get('max_z_um',   100.0))
- 
+        # Optional: directory where ZEN saves the CZI file.  When set the
+        # interface polls the CZI file for new timepoints instead of using the
+        # gRPC streaming API (required for ZEN API Gateway < Autumn 2025).
+        self.czi_watch_dir    = zeiss_params.get('czi_watch_dir',    '')
+        self.czi_poll_interval_s = float(zeiss_params.get('czi_poll_interval_s', 5.0))
+
         self._queue      = queue.Queue()
         self._stop_event = threading.Event()
         self._loop       = None
@@ -577,16 +582,26 @@ class MicroscopeInterface_Zeiss:
     # ------------------------------------------------------------------
     def connect(self):
         self._stop_event.clear()
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(
-            target=lambda: self._loop.run_until_complete(self._async_main()),
-            daemon=True,
-            name='ZeissAsyncThread',
-        )
+        if self.czi_watch_dir:
+            self.logger.info(
+                f"CZI file-poll mode: watching {self.czi_watch_dir} for new CZI files"
+            )
+            self._thread = threading.Thread(
+                target=self._poll_czi_thread,
+                daemon=True,
+                name='ZeissCziPollThread',
+            )
+        else:
+            self._loop = asyncio.new_event_loop()
+            self._thread = threading.Thread(
+                target=lambda: self._loop.run_until_complete(self._async_main()),
+                daemon=True,
+                name='ZeissAsyncThread',
+            )
+            self.logger.info(
+                f"Streaming mode: connecting to ZEN API Gateway at {self.address}:{self.port}"
+            )
         self._thread.start()
-        self.logger.info(
-            f"Connecting to ZEN API Gateway at {self.address}:{self.port}"
-        )
  
     # ------------------------------------------------------------------
     async def _async_main(self):
@@ -649,6 +664,28 @@ class MicroscopeInterface_Zeiss:
             except Exception as e:
                 if self._stop_event.is_set():
                     break
+                # UNIMPLEMENTED (gRPC status 12): the ZEN API Gateway on this
+                # machine does not support ExperimentStreamingService.
+                # MonitorAllExperiments was added in ZEN 3.13 Autumn 2025.
+                # Retrying would loop forever — give up immediately.
+                try:
+                    from grpclib.exceptions import GRPCError
+                    from grpclib.const import Status as GrpcStatus
+                    if isinstance(e, GRPCError) and e.status == GrpcStatus.UNIMPLEMENTED:
+                        self.logger.error(
+                            "ZEN API Gateway returned UNIMPLEMENTED for "
+                            "ExperimentStreamingService/MonitorAllExperiments.\n"
+                            "This RPC requires ZEN 3.13 Autumn 2025 or later.\n"
+                            "Options:\n"
+                            "  1. Update your ZEN API Gateway to the Autumn 2025 release.\n"
+                            "  2. Use file-polling mode: set 'czi_watch_dir' in zeiss_params\n"
+                            "     to the folder where ZEN saves its CZI output.\n"
+                            f"  Raw error: {e}"
+                        )
+                        self._queue.put((None, None, None))
+                        return
+                except ImportError:
+                    pass
                 self.logger.info(
                     f"ZEN stream closed ({type(e).__name__}: {e}). "
                     f"ZEN may be between timepoints — reconnecting in {retry_delay_s}s"
@@ -727,6 +764,92 @@ class MicroscopeInterface_Zeiss:
                 for k in stale:
                     frame_buffer.pop(k, None)
  
+    # ------------------------------------------------------------------
+    def _poll_czi_thread(self):
+        """
+        Fallback for ZEN API Gateway versions that do not implement the
+        ExperimentStreamingService (pre-Autumn 2025 builds).
+
+        Watches ``self.czi_watch_dir`` for a CZI file written by ZEN, then
+        polls it every ``self.czi_poll_interval_s`` seconds for new complete
+        timepoints and enqueues them exactly as the streaming path would.
+
+        A timepoint T is considered complete once T+1 appears in the file
+        (i.e. we process up to n_t-2 on each poll).  This guarantees we
+        never read a partially-written plane while still keeping the lag at
+        most one inter-timepoint gap.
+        """
+        import glob as glob_module
+        try:
+            from pylibCZIrw import czi as pyczi
+        except ImportError:
+            self.logger.error(
+                "pylibCZIrw is required for CZI file-poll mode. "
+                "Install with:  pip install pylibCZIrw"
+            )
+            self._queue.put((None, None, None))
+            return
+
+        czi_path = None
+        last_t   = {}   # scene_idx → last enqueued timepoint index
+
+        while not self._stop_event.is_set():
+            # Discover the CZI file (it may not exist yet when tracking starts)
+            if czi_path is None or not os.path.exists(czi_path):
+                candidates = glob_module.glob(
+                    os.path.join(self.czi_watch_dir, "*.czi")
+                )
+                if candidates:
+                    czi_path = max(candidates, key=os.path.getmtime)
+                    self.logger.info(f"[FILE-POLL] Found CZI: {czi_path}")
+                else:
+                    self.logger.debug(
+                        f"[FILE-POLL] No CZI file yet in {self.czi_watch_dir} — waiting"
+                    )
+                    self._stop_event.wait(timeout=self.czi_poll_interval_s)
+                    continue
+
+            try:
+                with pyczi.open_czi(czi_path) as czidoc:
+                    bb = czidoc.total_bounding_box
+                    n_t = bb.get('T', (0, 1))[1]
+                    n_s = bb.get('S', (0, 1))[1]
+                    n_z = bb.get('Z', (0, 1))[1]
+                    n_positions = min(n_s, len(self.position_names))
+
+                    # Process all timepoints that are guaranteed complete
+                    # (everything except the last one still being written)
+                    safe_max_t = max(0, n_t - 1)
+
+                    for s in range(n_positions):
+                        start_t = last_t.get(s, -1) + 1
+                        for t in range(start_t, safe_max_t):
+                            z_slices = []
+                            for z in range(n_z):
+                                raw = czidoc.read(
+                                    plane={'T': t, 'Z': z,
+                                           'C': self.tracking_channel, 'S': s}
+                                )
+                                arr = np.asarray(raw)
+                                if arr.ndim == 3:
+                                    arr = arr[:, :, 0]
+                                z_slices.append(arr)
+
+                            if not z_slices:
+                                continue
+
+                            self._process_complete_stack(
+                                {z: z_slices[z] for z in range(len(z_slices))}, s, t
+                            )
+                            last_t[s] = t
+
+            except Exception as e:
+                self.logger.debug(f"[FILE-POLL] Error reading CZI: {e}")
+
+            self._stop_event.wait(timeout=self.czi_poll_interval_s)
+
+        self.logger.info("[FILE-POLL] File-poll thread stopped")
+
     # ------------------------------------------------------------------
     def _process_complete_stack(self, z_slices_dict, scene_idx, tp_idx):
         z_stack = np.stack(
