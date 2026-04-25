@@ -175,19 +175,21 @@ def make_layout():
         # Update shifts vertical bar
         vline.location = time_point
 
-        # Update displyed shift text
-        shifts_text.text = (
-            f"x (&micro;m): {shift_mu_source.data['x'][slider.value]:.2f}<br>"
-            f"y (&micro;m): {shift_mu_source.data['y'][slider.value]:.2f}<br>"
-            f"z (&micro;m): {shift_mu_source.data['z'][slider.value]:.2f}"
-        )
-
-        # Update trajectory point highlight
-        trajectory_highlight_source.data = {
-            "x": [trajectory_source.data["x"][time_point]],
-            "y": [trajectory_source.data["y"][time_point]],
-            "z": [trajectory_source.data["z"][time_point]],
-        }
+        # Update shift text and trajectory highlight only for frames that have
+        # tracking data (n_rects is the number of tracked timepoints)
+        n_shifts = len(shift_mu_source.data['x'])
+        if n_shifts > 0 and time_point < n_shifts:
+            shifts_text.text = (
+                f"x (&micro;m): {shift_mu_source.data['x'][time_point]:.2f}<br>"
+                f"y (&micro;m): {shift_mu_source.data['y'][time_point]:.2f}<br>"
+                f"z (&micro;m): {shift_mu_source.data['z'][time_point]:.2f}"
+            )
+        if len(trajectory_source.data['x']) > 0 and time_point < len(trajectory_source.data['x']):
+            trajectory_highlight_source.data = {
+                "x": [trajectory_source.data["x"][time_point]],
+                "y": [trajectory_source.data["y"][time_point]],
+                "z": [trajectory_source.data["z"][time_point]],
+            }
 
     slider.on_change('value', callback_slider)
 
@@ -528,12 +530,12 @@ def make_layout():
         )
         load_images(pos_path, True)
         load_tracking(pos_path, True)
-        # Guard against race condition: a new TIF may appear between
-        # load_images and load_tracking, making slider.end exceed the
-        # number of images actually loaded.
-        max_valid = len(images_source.data['image']) - 1
-        if slider.end > max_valid:
-            slider.end = max_valid
+        # Ensure the slider covers ALL loaded images, not just tracked ones.
+        # The latest frames may exist in max_proj but not yet have log entries;
+        # callback_slider guards against accessing missing tracking data.
+        n_loaded = len(images_source.data['image'])
+        if n_loaded > 0:
+            slider.end = n_loaded - 1
         # Jump to the last available frame so the user sees the newest data
         new_end = slider.end
         if slider.value != new_end:
@@ -764,6 +766,9 @@ def make_layout():
         print("dir path ", dir_path)
         load_images(dir_path)
         load_tracking(dir_path)
+        n_loaded = len(images_source.data['image'])
+        if n_loaded > 0:
+            slider.end = n_loaded - 1
         callback_slider(None, None, None)
         
     dropdown_position.on_change('value', update_pos)
