@@ -259,16 +259,9 @@ def make_layout():
             dh_ds     = list(images_source.data['dh'])
 
         for idx, img in enumerate(img_list):
-            if reload and idx<=last_tp:
+            if reload and idx <= last_tp:
                 continue
-            im =  tifffile.imread(img)
-
-            #frames = np.stack(im)
-            #q1, q99 = np.quantile(frames, [0.01, 0.99])
-            #print(f"Quantile 1%: {q1}, Quantile 99%: {q99}")
-            #value_range = q99 - q1
-            #normalized_image = np.clip((frames - q1) / value_range, 0, 1)
-            #im = normalized_image
+            im = tifffile.imread(img)
 
             max_value = np.max(im)
             min_value = np.min(im)
@@ -281,8 +274,10 @@ def make_layout():
             y_ds.append(0)
             dw_ds.append(im.shape[1])
             dh_ds.append(im.shape[0])
-            
-            last_tp  = len(img_list)-1
+
+        # Update last_tp AFTER the loop so it doesn't prematurely skip
+        # remaining new images within the same reload call.
+        last_tp = len(img_list) - 1
         x_range = Range1d(start=0, end=images_ds[0].shape[0])
         y_range = Range1d(start=0, end=images_ds[0].shape[1])
         p_img.x_range=x_range
