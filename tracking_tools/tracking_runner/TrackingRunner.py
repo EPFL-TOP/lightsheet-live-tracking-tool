@@ -311,11 +311,14 @@ class TrackingRunner() :
             roi_file_to_position[roi_path] = pos_name
             watch_dirs.add(os.path.dirname(roi_path))
  
+        # Normalise keys to lowercase so Windows case differences don't break matching
+        roi_file_to_position = {k.lower(): v for k, v in roi_file_to_position.items()}
+
         class _RoIChangeHandler(FileSystemEventHandler):
-            def on_modified(self, event):
+            def _handle(self, event):
                 if event.is_directory:
                     return
-                path = os.path.normpath(event.src_path)
+                path = os.path.normpath(event.src_path).lower()
                 if path in roi_file_to_position:
                     pos = roi_file_to_position[path]
                     runner.logger.info(
@@ -323,6 +326,14 @@ class TrackingRunner() :
                         "tracker will be reinitialized"
                     )
                     runner._pending_reinit.add(pos)
+
+            # On Windows json.dump can trigger on_created (atomic overwrite)
+            # instead of on_modified, so handle both.
+            def on_modified(self, event):
+                self._handle(event)
+
+            def on_created(self, event):
+                self._handle(event)
  
         handler = _RoIChangeHandler()
         self._roi_observer = Observer()

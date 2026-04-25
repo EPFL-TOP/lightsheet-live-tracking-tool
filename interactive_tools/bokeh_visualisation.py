@@ -519,6 +519,12 @@ def make_layout():
         )
         load_images(pos_path, True)
         load_tracking(pos_path, True)
+        # Guard against race condition: a new TIF may appear between
+        # load_images and load_tracking, making slider.end exceed the
+        # number of images actually loaded.
+        max_valid = len(images_source.data['image']) - 1
+        if slider.end > max_valid:
+            slider.end = max_valid
         # Jump to the last available frame so the user sees the newest data
         new_end = slider.end
         if slider.value != new_end:
