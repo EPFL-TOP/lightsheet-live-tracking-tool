@@ -138,39 +138,39 @@ def make_layout():
     def callback_slider(attr, old, new):
         time_point = slider.value
 
+        # Guard: nothing to show if sources aren't loaded yet
+        n_images = len(images_source.data['image'])
+        n_rects  = len(rects_source.data['x'])
+        if n_images == 0 or time_point >= n_images:
+            return
+
         # Update image
-        image_source.data = {'image':[images_source.data['image'][time_point]], 
+        image_source.data = {'image':[images_source.data['image'][time_point]],
                             'x':[images_source.data['x'][time_point]],
                             'y':[images_source.data['y'][time_point]],
                             'dw':[images_source.data['dw'][time_point]],
                             'dh':[images_source.data['dh'][time_point]]}
-        
-        # Update ROI
-        if time_point>-1:
-            # rect_source.data = dict(
-            # x=rects_source.data['x'][time_point], 
-            # y=rects_source.data['y'][time_point], 
-            # width=rects_source.data['width'][time_point], 
-            # height=rects_source.data['height'][time_point],
-            # index=[0], label_x=[0], label_y=[0]
-            # )
 
+        # Update ROI (only if tracking data exists for this frame)
+        if time_point > -1 and time_point < n_rects:
             rect_source.data = dict(
-                x=[rects_source.data['x'][time_point][i] for i in range(len(rects_source.data['x'][time_point]))], 
-                y=[rects_source.data['y'][time_point][i] for i in range(len(rects_source.data['y'][time_point]))], 
-                width=rects_source.data['width'][time_point], 
-                height=rects_source.data['height'][time_point], 
-                index=rects_source.data['index'][time_point], 
-                label_x=rects_source.data['label_x'][time_point], 
+                x=[rects_source.data['x'][time_point][i] for i in range(len(rects_source.data['x'][time_point]))],
+                y=[rects_source.data['y'][time_point][i] for i in range(len(rects_source.data['y'][time_point]))],
+                width=rects_source.data['width'][time_point],
+                height=rects_source.data['height'][time_point],
+                index=rects_source.data['index'][time_point],
+                label_x=rects_source.data['label_x'][time_point],
                 label_y=rects_source.data['label_y'][time_point]
             )
 
-        # Update query point
-        tracks_idx = rects_source.data["tracks_idx"][time_point]
-        point_source.data = dict(
-            x=points_source.data['x'][tracks_idx],
-            y=points_source.data['y'][tracks_idx]
-        )
+            # Update query point
+            tracks_idx = rects_source.data["tracks_idx"][time_point]
+            n_point_tracks = len(points_source.data['x'])
+            if n_point_tracks > 0 and tracks_idx < n_point_tracks:
+                point_source.data = dict(
+                    x=points_source.data['x'][tracks_idx],
+                    y=points_source.data['y'][tracks_idx]
+                )
 
         # Update shifts vertical bar
         vline.location = time_point
@@ -246,13 +246,15 @@ def make_layout():
 
         global last_tp
         if not reload:
-            last_tp = len(img_list)-1
+            last_tp = -1
         else:
-            images_ds = images_source.data['image']
-            x_ds      = images_source.data['x']
-            y_ds      = images_source.data['y']
-            dw_ds     = images_source.data['dw']
-            dh_ds     = images_source.data['dh']
+            # list() ensures we have a mutable copy even if Bokeh stored the data
+            # as an immutable sequence internally
+            images_ds = list(images_source.data['image'])
+            x_ds      = list(images_source.data['x'])
+            y_ds      = list(images_source.data['y'])
+            dw_ds     = list(images_source.data['dw'])
+            dh_ds     = list(images_source.data['dh'])
 
         for idx, img in enumerate(img_list):
             if reload and idx<=last_tp:
@@ -400,12 +402,19 @@ def make_layout():
         # epoch element is itself a Python list (raw_tracks[0] is a list).
         # Old format (single-epoch): flat list where raw_tracks[0] is a numpy
         # array (the initial np.empty((0,2)) placeholder).
-        # Flatten all epochs into one sequence so the rest of the code is
-        # unchanged and both formats are handled transparently.
         import numpy as _np
         if raw_tracks and isinstance(raw_tracks[0], list):
+            # Build cumulative epoch offsets so that local tracks_id values
+            # from logs.json can be converted to global indices into the
+            # flattened track list.  After a reinit, tracks_id resets to 0
+            # inside the new epoch; without the offset, those indices would
+            # incorrectly index into epoch-0 tracks.
+            epoch_offsets = [0]
+            for epoch_tracks in raw_tracks[:-1]:
+                epoch_offsets.append(epoch_offsets[-1] + len(epoch_tracks))
             tracks = [tp for epoch in raw_tracks for tp in epoch]
         else:
+            epoch_offsets = [0]
             tracks = raw_tracks
 
         x_tracks=[]
@@ -748,12 +757,14 @@ def make_layout():
 
     #_______________________________________________________
     def update_pos(attr, old, new):
-        
-        dir_path = os.path.join(status.text.replace("Selected folder: ",""), new )
-        slider.value=0
-        print("dir path ",dir_path)
+        if not new:
+            return
+        _reset_all()
+        dir_path = os.path.join(status.text.replace("Selected folder: ",""), new)
+        print("dir path ", dir_path)
         load_images(dir_path)
         load_tracking(dir_path)
+        callback_slider(None, None, None)
         
     dropdown_position.on_change('value', update_pos)
 

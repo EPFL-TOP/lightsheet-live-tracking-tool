@@ -172,7 +172,13 @@ class TrackingRunner() :
                 self.to_save[position_name][str(time_point)]['roi'] = self.make_json_serializable(current_roi)
                 tracks = tracker.get_tracks()
                 epoch  = self._reinit_epoch.get(position_name, 0)
-                self.to_save[position_name][str(time_point)]['tracks_id']      = self.make_json_serializable(len(tracks)-1)
+                history = self._tracks_history.get(position_name, [])
+                # Store a GLOBAL tracks_id: sum of all prior-epoch lengths plus
+                # the local index within the current epoch.  This maps directly
+                # into the flattened track list stored in tracks.pkl so the
+                # visualiser can index without knowing epoch sizes.
+                epoch_offset = sum(len(ep) for ep in history)
+                self.to_save[position_name][str(time_point)]['tracks_id']      = self.make_json_serializable(epoch_offset + len(tracks) - 1)
                 self.to_save[position_name][str(time_point)]['scaling_factor'] = self.make_json_serializable(tracker.scaling_factor)
                 self.to_save[position_name][str(time_point)]['reinit_epoch']   = epoch
                 with open(log_dir / f"logs.json", 'w') as file :
@@ -182,7 +188,6 @@ class TrackingRunner() :
                 # history is preserved across ROI re-initializations.
                 # Each entry corresponds to one tracker epoch (epoch index ==
                 # list index).  The current epoch is always the last element.
-                history = self._tracks_history.get(position_name, [])
                 all_tracks = history + [tracks]
                 with open(log_dir / f"tracks.pkl", 'wb') as file :
                     pickle.dump(all_tracks, file)
