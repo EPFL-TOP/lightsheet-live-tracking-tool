@@ -49,7 +49,10 @@ What changed:
 """
 To use the file-poll mode now:
 
-1. In the Panel app, set CZI watch directory to the folder where ZEN saves images (e.g. C:\Users\...\Documents\Carl Zeiss\ZENCore\Documents\Images)
+1. In the Panel app, set CZI watch directory to the folder where ZEN saves images 
+"""
+"""
+(eg C:\Users\...\Documents\Carl Zeiss\ZENCore\Documents\Images)
 """
 
 """
