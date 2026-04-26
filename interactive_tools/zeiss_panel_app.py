@@ -51,9 +51,7 @@ To use the file-poll mode now:
 
 1. In the Panel app, set CZI watch directory to the folder where ZEN saves images 
 """
-"""
-(eg C:\Users\...\Documents\Carl Zeiss\ZENCore\Documents\Images)
-"""
+
 
 """
 2. Start the ZEN experiment — ZEN will write a .czi file there
