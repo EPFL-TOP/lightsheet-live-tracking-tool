@@ -44,7 +44,9 @@ What changed:
 2. zeiss_config.ini — new [czi_fallback] section documenting czi_watch_dir and czi_poll_interval_s
 
 3. zeiss_panel_app.py — new widgets for CZI watch directory and poll interval, wired into _load_zeiss_config() and both zeiss_params dicts
+"""
 
+"""
 To use the file-poll mode now:
 
 1. In the Panel app, set CZI watch directory to the folder where ZEN saves images (e.g. C:\Users\...\Documents\Carl Zeiss\ZENCore\Documents\Images)
