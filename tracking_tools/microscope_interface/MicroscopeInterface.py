@@ -794,17 +794,30 @@ class MicroscopeInterface_Zeiss:
         last_t   = {}   # scene_idx → last enqueued timepoint index
 
         while not self._stop_event.is_set():
-            # Discover the CZI file (it may not exist yet when tracking starts)
+            # Discover the CZI file. The user-supplied path may be either:
+            #   - a direct CZI file path (use it as-is), or
+            #   - a directory (pick the most recently modified *.czi inside).
             if czi_path is None or not os.path.exists(czi_path):
-                candidates = glob_module.glob(
-                    os.path.join(self.czi_watch_dir, "*.czi")
-                )
-                if candidates:
-                    czi_path = max(candidates, key=os.path.getmtime)
-                    self.logger.info(f"[FILE-POLL] Found CZI: {czi_path}")
+                if (os.path.isfile(self.czi_watch_dir)
+                        and self.czi_watch_dir.lower().endswith('.czi')):
+                    czi_path = self.czi_watch_dir
+                    self.logger.info(f"[FILE-POLL] Using CZI: {czi_path}")
+                elif os.path.isdir(self.czi_watch_dir):
+                    candidates = glob_module.glob(
+                        os.path.join(self.czi_watch_dir, "*.czi")
+                    )
+                    if candidates:
+                        czi_path = max(candidates, key=os.path.getmtime)
+                        self.logger.info(f"[FILE-POLL] Found CZI: {czi_path}")
+                    else:
+                        self.logger.info(
+                            f"[FILE-POLL] No CZI file yet in {self.czi_watch_dir} — waiting"
+                        )
+                        self._stop_event.wait(timeout=self.czi_poll_interval_s)
+                        continue
                 else:
-                    self.logger.debug(
-                        f"[FILE-POLL] No CZI file yet in {self.czi_watch_dir} — waiting"
+                    self.logger.info(
+                        f"[FILE-POLL] Path does not exist yet: {self.czi_watch_dir} — waiting"
                     )
                     self._stop_event.wait(timeout=self.czi_poll_interval_s)
                     continue

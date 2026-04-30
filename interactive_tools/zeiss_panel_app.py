@@ -50,18 +50,9 @@ What changed:
 To use the file-poll mode now:
 
 1. In the Panel app, set CZI watch directory to the folder where ZEN saves images 
-"""
-
-
-"""
 2. Start the ZEN experiment — ZEN will write a .czi file there
-"""
-
-"""
 3. Click Run Tracking — the interface will find the CZI, poll it every 5 seconds for new complete timepoints, and track normally
-"""
 
-"""
 When you eventually upgrade to ZEN 3.13 Autumn 2025, just leave the CZI watch directory blank and streaming will work directly.
 """
 
