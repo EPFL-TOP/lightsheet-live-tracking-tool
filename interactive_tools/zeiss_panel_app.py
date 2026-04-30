@@ -147,6 +147,14 @@ w_czi_watch_dir = pn.widgets.TextInput(
 w_czi_poll_interval = pn.widgets.FloatInput(
     name='CZI poll interval (s)', value=5.0, step=1.0, width=160
 )
+w_tif_watch_dir = pn.widgets.TextInput(
+    name='TIF watch directory (per-frame TIFs from ZEN)',
+    placeholder='H:/.../experiment_folder where ZEN writes individual TIFs',
+    width=560,
+)
+w_tif_poll_interval = pn.widgets.FloatInput(
+    name='TIF poll interval (s)', value=2.0, step=0.5, width=160
+)
 
 # ─── Widgets — preview capture ────────────────────────────────────────────────
 
@@ -207,6 +215,8 @@ def _load_zeiss_config():
     w_max_z.value        = cfg.getfloat('bounds', 'max_z_um',          fallback=100.0)
     w_czi_watch_dir.value    = cfg.get('czi_fallback', 'czi_watch_dir',       fallback='')
     w_czi_poll_interval.value = cfg.getfloat('czi_fallback', 'czi_poll_interval_s', fallback=5.0)
+    w_tif_watch_dir.value    = cfg.get('tif_fallback', 'tif_watch_dir',       fallback='')
+    w_tif_poll_interval.value = cfg.getfloat('tif_fallback', 'tif_poll_interval_s', fallback=2.0)
 
 
 _load_zeiss_config()
@@ -226,6 +236,14 @@ zen_section = pn.Column(
         'Set the directory where ZEN saves its CZI output file.  Leave blank to use gRPC streaming.'
     ),
     pn.Row(w_czi_watch_dir, w_czi_poll_interval),
+    pn.layout.Divider(),
+    pn.pane.Markdown(
+        '**Fallback: per-frame TIF watch mode** — most reliable with older ZEN API Gateway\n\n'
+        'Set the directory where ZEN writes individual TIFs '
+        '(`<exp>_S0000(P4)_T000000_Z0000_C00_M0000_ORG.tif`). '
+        'Takes priority over CZI mode when set.'
+    ),
+    pn.Row(w_tif_watch_dir, w_tif_poll_interval),
     pn.layout.Divider(),
     pn.pane.Markdown('**Preview capture** — run before defining ROIs'),
     _preview_info,
@@ -310,6 +328,8 @@ def _run_capture_preview():
             'max_z_um':             w_max_z.value,
             'czi_watch_dir':        w_czi_watch_dir.value.strip(),
             'czi_poll_interval_s':  w_czi_poll_interval.value,
+            'tif_watch_dir':        w_tif_watch_dir.value.strip(),
+            'tif_poll_interval_s':  w_tif_poll_interval.value,
         }
 
         microscope = MicroscopeInterface_Zeiss(
@@ -437,15 +457,19 @@ def _run_tracking():
             )
         else:
             zeiss_params = {
-                'address':          w_zen_address.value.strip(),
-                'port':             w_zen_port.value,
-                'cert_path':        w_zen_cert.value.strip(),
-                'control_token':    w_zen_token.value,
-                'experiment_name':  w_zen_expname.value.strip(),
-                'z_projection':     w_z_proj.value,
-                'tracking_channel': w_zen_channel.value,
-                'max_xy_um':        w_max_xy.value,
-                'max_z_um':         w_max_z.value,
+                'address':              w_zen_address.value.strip(),
+                'port':                 w_zen_port.value,
+                'cert_path':            w_zen_cert.value.strip(),
+                'control_token':        w_zen_token.value,
+                'experiment_name':      w_zen_expname.value.strip(),
+                'z_projection':         w_z_proj.value,
+                'tracking_channel':     w_zen_channel.value,
+                'max_xy_um':            w_max_xy.value,
+                'max_z_um':             w_max_z.value,
+                'czi_watch_dir':        w_czi_watch_dir.value.strip(),
+                'czi_poll_interval_s':  w_czi_poll_interval.value,
+                'tif_watch_dir':        w_tif_watch_dir.value.strip(),
+                'tif_poll_interval_s':  w_tif_poll_interval.value,
             }
             microscope = MicroscopeInterface_Zeiss(
                 positions_config=position_config,

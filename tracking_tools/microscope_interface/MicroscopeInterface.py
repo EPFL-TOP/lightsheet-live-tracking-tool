@@ -563,6 +563,14 @@ class MicroscopeInterface_Zeiss:
         # gRPC streaming API (required for ZEN API Gateway < Autumn 2025).
         self.czi_watch_dir    = zeiss_params.get('czi_watch_dir',    '')
         self.czi_poll_interval_s = float(zeiss_params.get('czi_poll_interval_s', 5.0))
+        # Optional: directory where ZEN saves individual TIF files (one per
+        # Z-slice / channel / timepoint).  Each TIF has a name like:
+        #   <exp>_H(0)_S0000(P4)_T000000_Z0000_C00_M0000_ORG.tif
+        # When set, watch the folder, group by (S, T) for the tracking
+        # channel, build a max projection once a stack is complete and
+        # enqueue it.  Most reliable mode for older ZEN API Gateway versions.
+        self.tif_watch_dir    = zeiss_params.get('tif_watch_dir',    '')
+        self.tif_poll_interval_s = float(zeiss_params.get('tif_poll_interval_s', 2.0))
 
         self._queue      = queue.Queue()
         self._stop_event = threading.Event()
@@ -582,7 +590,16 @@ class MicroscopeInterface_Zeiss:
     # ------------------------------------------------------------------
     def connect(self):
         self._stop_event.clear()
-        if self.czi_watch_dir:
+        if self.tif_watch_dir:
+            self.logger.info(
+                f"TIF folder-poll mode: watching {self.tif_watch_dir}"
+            )
+            self._thread = threading.Thread(
+                target=self._poll_tif_thread,
+                daemon=True,
+                name='ZeissTifPollThread',
+            )
+        elif self.czi_watch_dir:
             self.logger.info(
                 f"CZI file-poll mode: watching {self.czi_watch_dir} for new CZI files"
             )
@@ -862,6 +879,83 @@ class MicroscopeInterface_Zeiss:
             self._stop_event.wait(timeout=self.czi_poll_interval_s)
 
         self.logger.info("[FILE-POLL] File-poll thread stopped")
+
+    # ------------------------------------------------------------------
+    def _poll_tif_thread(self):
+        """
+        Watch a directory where ZEN saves individual TIFs for every plane.
+
+        File pattern (one TIF per Z-slice per channel per timepoint):
+            <name>_H(0)_S<scene>(P<position>)_T<tp>_Z<z>_C<ch>_M<m>_ORG.tif
+
+        For each (scene, timepoint) on the configured tracking channel we
+        collect every Z-slice that has been written to disk, then build the
+        max projection (or central slice) and enqueue it.
+
+        A timepoint T is treated as 'complete' once T+1 starts appearing on
+        disk — the strict guard avoids reading half-written stacks.  When
+        the experiment ends, the user can press the reload button on the
+        dashboard to flush the very last timepoint.
+        """
+        import re
+        import glob as glob_module
+
+        tif_pattern = re.compile(
+            r'_S(?P<S>\d+)\(P\d+\)_T(?P<T>\d+)_Z(?P<Z>\d+)_C(?P<C>\d+)_'
+            r'M\d+_ORG\.tif$',
+            re.IGNORECASE,
+        )
+
+        last_t = {}                  # scene_idx → last enqueued timepoint
+        # (scene, tp) → {z: filepath} accumulator for the tracking channel
+        stacks = {}
+
+        while not self._stop_event.is_set():
+            if not os.path.isdir(self.tif_watch_dir):
+                self.logger.info(
+                    f"[TIF-POLL] Directory not present yet: {self.tif_watch_dir} — waiting"
+                )
+                self._stop_event.wait(timeout=self.tif_poll_interval_s)
+                continue
+
+            # Scan all TIFs and group by (scene, tp) for the tracking channel
+            tifs = glob_module.glob(os.path.join(self.tif_watch_dir, "*.tif"))
+            highest_t_per_scene = {}
+            for path in tifs:
+                m = tif_pattern.search(os.path.basename(path))
+                if not m:
+                    continue
+                s = int(m.group('S'))
+                t = int(m.group('T'))
+                z = int(m.group('Z'))
+                c = int(m.group('C'))
+                if c != self.tracking_channel:
+                    continue
+                highest_t_per_scene[s] = max(highest_t_per_scene.get(s, -1), t)
+                stacks.setdefault((s, t), {})[z] = path
+
+            # Process every (scene, tp) for which a strictly newer tp exists
+            # on disk — guarantees the stack is complete.
+            for (s, t), z_files in sorted(stacks.items()):
+                if t <= last_t.get(s, -1):
+                    continue
+                if t >= highest_t_per_scene.get(s, -1):
+                    continue
+                try:
+                    z_slices = {z: tifffile.imread(p) for z, p in z_files.items()}
+                except Exception as e:
+                    self.logger.debug(f"[TIF-POLL] Read error for S{s} T{t}: {e}")
+                    continue
+                self._process_complete_stack(z_slices, s, t)
+                last_t[s] = t
+
+            # Garbage-collect entries we've already processed
+            stacks = {k: v for k, v in stacks.items()
+                      if k[1] > last_t.get(k[0], -1)}
+
+            self._stop_event.wait(timeout=self.tif_poll_interval_s)
+
+        self.logger.info("[TIF-POLL] TIF-poll thread stopped")
 
     # ------------------------------------------------------------------
     def _process_complete_stack(self, z_slices_dict, scene_idx, tp_idx):
