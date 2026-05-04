@@ -481,9 +481,20 @@ except Exception as _e:
         alert_type='warning',
     )
 
+# Visualisation tab — reuse the existing Bokeh dashboard
+try:
+    from interactive_tools.bokeh_visualisation import make_layout as _vis_make_layout
+    vis_tab = pn.panel(_vis_make_layout, sizing_mode='stretch_both')
+except Exception as _e:
+    vis_tab = pn.pane.Alert(
+        f'Could not load tracking visualisation dashboard: {_e}',
+        alert_type='warning',
+    )
+
 tabs = pn.Tabs(
-    ('Tracking',      tracking_tab),
-    ('ROI Selection', roi_tab),
+    ('Tracking',       tracking_tab),
+    ('ROI Selection',  roi_tab),
+    ('Visualisation',  vis_tab),
     sizing_mode='stretch_both',
 )
 
