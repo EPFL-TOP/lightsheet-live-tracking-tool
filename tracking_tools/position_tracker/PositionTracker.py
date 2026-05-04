@@ -127,6 +127,8 @@ class PositionTrackerSingleRoI_v2 :
         shift_x_um = self.convert_px_um(shift_px.x, self.pixel_size_xy, invert=False)
         shift_y_um = self.convert_px_um(shift_px.y, self.pixel_size_xy, invert=False)
         shift_z_um = self.convert_px_um(shift_px.z, self.pixel_size_z, invert=False)
+        if getattr(self, 'tracking_2d', False):
+            shift_z_um = 0.0
         shift_um = Shift3D(x=shift_x_um, y=shift_y_um, z=shift_z_um)
         self.shifts_um.append(shift_um)
 
@@ -252,6 +254,10 @@ class PositionTrackerMultiROI :
         self.position_name = position_name
         self.pixel_size_xy = position_tracker_params["pixel_size_xy"]
         self.pixel_size_z = position_tracker_params["pixel_size_z"]
+        # When True, only XY motion is followed; the Z shift is forced to 0
+        # in compute_shift_um so the microscope stage Z stays put.  Useful
+        # when the input is 3-D but Z drift is not expected or wanted.
+        self.tracking_2d = bool(position_tracker_params.get("tracking_2d", False))
         self.log = log
 
         if first_frame :
@@ -356,6 +362,8 @@ class PositionTrackerMultiROI :
         shift_x_um = self.convert_px_um(shift_px.x, self.pixel_size_xy, invert=False)
         shift_y_um = self.convert_px_um(shift_px.y, self.pixel_size_xy, invert=False)
         shift_z_um = self.convert_px_um(shift_px.z, self.pixel_size_z, invert=False)
+        if getattr(self, 'tracking_2d', False):
+            shift_z_um = 0.0
         shift_um = Shift3D(x=shift_x_um, y=shift_y_um, z=shift_z_um)
         self.shifts_um.append(shift_um)
 

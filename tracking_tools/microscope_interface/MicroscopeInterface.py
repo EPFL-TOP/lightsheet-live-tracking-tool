@@ -1085,4 +1085,194 @@ class MicroscopeInterface_Zeiss:
         self.disconnect()
 
 
-    
+# ─────────────────────────────────────────────────────────────────────────────
+# Pure-file microscope interface (no hardware feedback).  Watches per-position
+# folders for new TIFs whose names follow each position's tracking_RoIs.json
+# `filename` field (with the t{NNNN} digits incrementing).  Used for offline
+# tracking and for online tracking when frames are written to disk by the
+# acquisition software (Viventis LS1, ZEN with TIF export, etc.).
+# Compatible with run_zeiss() in TrackingRunner since it uses the same queue
+# and reinit-watcher mechanism.
+# ─────────────────────────────────────────────────────────────────────────────
+class MicroscopeInterface_Files:
+    """
+    File-watching microscope interface.
+
+    For every position in ``positions_config`` the watcher monitors the
+    ``images_dir`` for new files matching the pattern
+    ``<prefix>{tp:04d}<suffix>.tif`` where the prefix and suffix are derived
+    from the ``filename`` saved in that position's ``tracking_RoIs.json``.
+    Channel changes mid-experiment are handled because the saved filename
+    encodes the channel — when ROI is re-saved on a different channel, the
+    runner reinitialises the tracker and calls ``refresh_filename`` on us.
+
+    ``relative_move`` is a no-op stub — no microscope feedback is sent.  Use
+    a hardware interface (e.g. ``MicroscopeInterface_Zeiss``) once feedback
+    is enabled.
+    """
+
+    def __init__(self, positions_config, dirpath, file_params=None):
+        import re
+        self._re = re
+
+        self.positions_config = positions_config
+        self.dirpath = dirpath
+        # Position names == positions_config keys (matches what TrackingRunner
+        # uses as keys for trackers / state).
+        self.position_names = list(positions_config.keys())
+
+        file_params = file_params or {}
+        self.poll_interval_s = float(file_params.get('poll_interval_s', 1.0))
+
+        # Per-position state
+        self._patterns = {}     # pos_name → (prefix, suffix)
+        self._next_tp  = {}     # pos_name → next timepoint we expect to see
+        self._json_mtime = {}   # pos_name → last seen mtime of tracking_RoIs.json
+        for pos_name in self.position_names:
+            self._refresh_filename_unlocked(pos_name)
+            self._next_tp[pos_name] = 0
+
+        self._queue      = queue.Queue()
+        self._stop_event = threading.Event()
+        self._thread     = None
+        self.stop_requested = False
+        self.logger = init_logger(self.__class__.__name__)
+
+    # ------------------------------------------------------------------
+    def _parse_pattern(self, filename):
+        """
+        Split filename around the t{NNNN} number.
+
+        Examples:
+          't0000_C00.tif'        → ('t', '_C00.tif')
+          't0001_Channel 1.tif'  → ('t', '_Channel 1.tif')   # Viventis
+          't0001.tif'            → ('t', '.tif')              # LS1
+        """
+        m = self._re.match(r'^(.*?)t(\d+)(.*\.tif)$', filename, self._re.IGNORECASE)
+        if not m:
+            return ('t', '.tif')
+        return (m.group(1) + 't', m.group(3))
+
+    def _refresh_filename_unlocked(self, pos_name):
+        """Re-parse the filename pattern for a position from its config."""
+        cfg = self.positions_config.get(pos_name, {})
+        filename = cfg.get('filename', '')
+        self._patterns[pos_name] = self._parse_pattern(filename)
+        # Track the JSON mtime so we can detect external edits and re-read
+        # without the runner having to call us explicitly.
+        log_dir = cfg.get('log_dir')
+        if log_dir:
+            roi_path = os.path.join(log_dir, 'tracking_RoIs.json')
+            if os.path.isfile(roi_path):
+                self._json_mtime[pos_name] = os.path.getmtime(roi_path)
+
+    def refresh_filename(self, pos_name):
+        """Public hook called by TrackingRunner.reinitialize_tracker."""
+        self._refresh_filename_unlocked(pos_name)
+        self.logger.info(
+            f"[{pos_name}] tracking filename updated to "
+            f"{self._patterns[pos_name][0]}{{N}}{self._patterns[pos_name][1]}"
+        )
+
+    # ------------------------------------------------------------------
+    def connect(self):
+        self._stop_event.clear()
+        self.stop_requested = False
+        self._thread = threading.Thread(
+            target=self._poll_loop,
+            daemon=True,
+            name='FileWatchThread',
+        )
+        self._thread.start()
+        self.logger.info(
+            f"File-watch mode active — polling every {self.poll_interval_s:.1f}s "
+            f"for {len(self.position_names)} position(s)"
+        )
+
+    def _poll_loop(self):
+        while not self._stop_event.is_set():
+            for pos_name in self.position_names:
+                self._maybe_reread_json(pos_name)
+                self._scan_position(pos_name)
+            self._stop_event.wait(timeout=self.poll_interval_s)
+
+    def _maybe_reread_json(self, pos_name):
+        """If tracking_RoIs.json mtime changed, re-parse the filename."""
+        cfg = self.positions_config.get(pos_name, {})
+        log_dir = cfg.get('log_dir')
+        if not log_dir:
+            return
+        roi_path = os.path.join(log_dir, 'tracking_RoIs.json')
+        if not os.path.isfile(roi_path):
+            return
+        try:
+            mtime = os.path.getmtime(roi_path)
+        except OSError:
+            return
+        if mtime != self._json_mtime.get(pos_name):
+            try:
+                import json
+                with open(roi_path) as f:
+                    new_cfg = json.load(f)
+                if 'filename' in new_cfg:
+                    cfg['filename'] = new_cfg['filename']
+                    old_pattern = self._patterns.get(pos_name)
+                    self._patterns[pos_name] = self._parse_pattern(new_cfg['filename'])
+                    if old_pattern != self._patterns[pos_name]:
+                        self.logger.info(
+                            f"[{pos_name}] filename pattern changed → "
+                            f"{self._patterns[pos_name][0]}{{N}}"
+                            f"{self._patterns[pos_name][1]}"
+                        )
+                self._json_mtime[pos_name] = mtime
+            except Exception as e:
+                self.logger.warning(f"[{pos_name}] could not re-read tracking_RoIs.json: {e}")
+
+    def _scan_position(self, pos_name):
+        cfg = self.positions_config.get(pos_name, {})
+        images_dir = cfg.get('images_dir') or os.path.join(self.dirpath, pos_name)
+        if not os.path.isdir(images_dir):
+            return
+        prefix, suffix = self._patterns[pos_name]
+        # Drain timepoints sequentially starting from next_tp.  Files must
+        # already exist on disk; we don't speculatively wait.
+        next_tp = self._next_tp[pos_name]
+        while not self._stop_event.is_set():
+            target = f"{prefix}{next_tp:04d}{suffix}"
+            target_path = os.path.join(images_dir, target)
+            if not os.path.isfile(target_path):
+                break
+            try:
+                image = tifffile.imread(target_path)
+            except Exception as e:
+                self.logger.warning(f"[{pos_name}] failed to read {target}: {e}")
+                break
+            self.logger.info(f"[{pos_name}] queued {target}")
+            self._queue.put((image, next_tp, pos_name))
+            next_tp += 1
+        self._next_tp[pos_name] = next_tp
+
+    # ------------------------------------------------------------------
+    def wait_for_image(self, timeout_ms=1000):
+        try:
+            return self._queue.get(timeout=timeout_ms / 1000)
+        except queue.Empty:
+            return None, None, None
+
+    def relative_move(self, position_name, shift_x, shift_y, shift_z):
+        """No-op stub — file-watching tracker doesn't drive a stage."""
+        self.logger.debug(
+            f"[{position_name}] (no feedback) shift_um xyz="
+            f"({shift_x:.2f}, {shift_y:.2f}, {shift_z:.2f})"
+        )
+
+    def disconnect(self):
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+
+    def stop(self):
+        self.stop_requested = True
+        self.disconnect()
+

@@ -375,7 +375,21 @@ class TrackingRunner() :
         try:
             with open(roi_path) as f:
                 new_config = json.load(f)
-            self.positions_config[position_name]['RoIs'] = new_config['RoIs']
+            # Merge ALL keys (RoIs, filename, scaling_factor, blur_factor, ...)
+            # so that channel changes saved through the ROI dashboard propagate
+            # to the tracker and the microscope-interface file watcher.
+            for k, v in new_config.items():
+                self.positions_config[position_name][k] = v
+
+            # Notify any file-watching microscope interface that the source
+            # filename / channel may have changed.
+            if hasattr(self.microscope, 'refresh_filename'):
+                try:
+                    self.microscope.refresh_filename(position_name)
+                except Exception as e:
+                    self.logger.warning(
+                        f"microscope.refresh_filename failed for [{position_name}]: {e}"
+                    )
 
             # Archive the current tracker's tracks before replacing it
             if position_name in self.trackers:

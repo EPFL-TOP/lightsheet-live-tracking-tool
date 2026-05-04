@@ -535,12 +535,19 @@ def make_layout():
         # The position folder is the parent of the loaded file
         pos_dir = pathlib.Path(filename).parent.resolve()
 
-        tif_files = sorted(pos_dir.glob("t*.tif"))
+        # Glob all TIFs (case-insensitive on the extension to support .TIF too)
+        tif_files = sorted(
+            list(pos_dir.glob("t*.tif")) + list(pos_dir.glob("t*.TIF"))
+        )
         if not tif_files:
             status.text = f"No TIF files found in {pos_dir}"
             return
 
-        # Filter to same channel as the tracked file, if known
+        # Filter to the same channel as the tracked file when possible.
+        # Recognised patterns (the suffix between t{NNNN} and .tif):
+        #   t0000_C00.tif         → suffix "_C00"   (zeiss 3-D stack)
+        #   t0001_Channel 1.tif   → suffix "_Channel 1"  (Viventis)
+        #   t0001.tif             → suffix "" (LS1) — no filter applied.
         import re as _re
         roi_json_path = pos_dir / "embryo_tracking" / "tracking_RoIs.json"
         if roi_json_path.exists():
