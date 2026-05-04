@@ -63,14 +63,17 @@ _queue_handler.setFormatter(logging.Formatter(
 # ─── Acquisition / experiment widgets ───────────────────────────────────────
 
 w_dirpath = pn.widgets.TextInput(
-    name='Experiment root (3-D stacks + embryo_tracking outputs)',
-    placeholder='/path/to/experiment',
+    name='Experiment root — base folder; ingest creates scene_NNN inside',
+    placeholder='/path/to/experiment-name',
     width=560,
 )
-w_position_names = pn.widgets.TextInput(
-    name='Position folders (comma-separated, ordered by scene index)',
-    placeholder='pos1, pos2',
-    width=560,
+w_n_scenes = pn.widgets.IntInput(
+    name='Number of scenes (auto-creates scene_NNN subfolders)',
+    value=1, start=1, width=320
+)
+w_n_channels = pn.widgets.IntInput(
+    name='Number of channels (used for ingest validation)',
+    value=1, start=1, width=320
 )
 w_pixel_xy = pn.widgets.FloatInput(
     name='Pixel size x,y (µm)', value=0.347, step=0.001, width=200
@@ -80,10 +83,6 @@ w_pixel_z = pn.widgets.FloatInput(
 )
 w_n_z = pn.widgets.IntInput(
     name='Number of Z-slices per stack', value=1, start=1, width=200
-)
-w_tracking_channel = pn.widgets.IntInput(
-    name='Tracking channel (0-based, used for relative_move target)',
-    value=0, width=320
 )
 w_tracking_2d = pn.widgets.Checkbox(
     name='2-D tracking only (Z stays constant)',
@@ -109,10 +108,14 @@ btn_ingest_stop = pn.widgets.Button(
     name='Stop Ingest', button_type='warning', width=160, disabled=True
 )
 ingest_info = pn.pane.Markdown(
-    '_Watches the ZEN source folder, assembles 3-D stacks per (timepoint, '
-    'channel), saves them under *Experiment root* / *position* / '
-    '`t{T:04d}_C{C:02d}.tif`._  All channels are saved so you can switch '
-    'tracking channel mid-experiment.',
+    '_The ZEN source folder is a single flat folder where ZEN drops every '
+    "TIF (e.g. `pos2_S0001(P3)_T000002_Z0005_C02_M0000_ORG.tif`). The "
+    'ingest groups files by (S, T, C), waits for all Z-slices, and writes '
+    '3-D stacks under `Experiment root / scene_NNN / t{T:04d}_C{C:02d}.tif` — '
+    "one stack per channel.  All channels are saved so you can switch the "
+    'tracking channel mid-experiment by re-saving the ROI on a different '
+    'channel from the ROI Selection tab.  Tracking later runs only on '
+    'scenes that contain an `embryo_tracking/` subfolder._',
     width=600,
 )
 
@@ -172,7 +175,6 @@ def _load_zeiss_config():
     w_zen_cert.value     = cfg.get('cert',         'path',             fallback='')
     w_zen_token.value    = cfg.get('api',          'control_token',    fallback='')
     w_zen_expname.value  = cfg.get('experiment',   'name',             fallback='')
-    w_tracking_channel.value = cfg.getint('experiment', 'tracking_channel', fallback=0)
     w_z_proj.value       = cfg.get('experiment',   'z_projection',     fallback='max')
     w_max_xy.value       = cfg.getfloat('bounds',  'max_xy_um',        fallback=500.0)
     w_max_z.value        = cfg.getfloat('bounds',  'max_z_um',         fallback=100.0)
@@ -194,17 +196,15 @@ _state: dict = {
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 def _get_position_names():
-    """Parse the comma-separated names box, falling back to subfolder discovery."""
-    raw = (w_position_names.value or '').strip()
-    if raw:
-        return [n.strip() for n in raw.split(',') if n.strip()]
-    dirpath = (w_dirpath.value or '').strip()
-    if dirpath and os.path.isdir(dirpath):
-        return sorted([
-            d for d in os.listdir(dirpath)
-            if os.path.isdir(os.path.join(dirpath, d)) and not d.startswith('.')
-        ])
-    return []
+    """Position folder names auto-derived from the scene count.
+
+    Each ZEN scene S{i:04d} is mapped to ``scene_{i:03d}`` under the
+    experiment root.  The user picks which subset to track by saving an ROI
+    in only those scenes' ``embryo_tracking/`` folders — the tracking step
+    discovers them via ``get_pos_config``.
+    """
+    n = max(1, int(w_n_scenes.value or 0))
+    return [f'scene_{i:03d}' for i in range(n)]
 
 
 def _ensure_root_logger():
@@ -232,10 +232,7 @@ def _on_ingest_start(event):
 
         position_names = _get_position_names()
         if not position_names:
-            logging.error(
-                "Position folders box is empty and no existing subfolders "
-                "found under the experiment root. Provide names, e.g. 'pos1, pos2'."
-            )
+            logging.error("Number of scenes must be at least 1.")
             return
 
         os.makedirs(out_root, exist_ok=True)
@@ -247,6 +244,7 @@ def _on_ingest_start(event):
             out_root=out_root,
             position_names=position_names,
             n_z=w_n_z.value,
+            n_channels=w_n_channels.value,
             poll_interval_s=w_ingest_poll.value,
         )
         ingest.start()
@@ -312,6 +310,10 @@ def _run_tracking():
             return
 
         if w_use_streaming.value:
+            # In streaming mode the tracking channel is read from each
+            # position's tracking_RoIs.json filename suffix (the same way
+            # the file-watcher derives it).  We pass channel=0 as a benign
+            # default for the stream subscription itself.
             zeiss_params = {
                 'address':         w_zen_address.value.strip(),
                 'port':            w_zen_port.value,
@@ -319,7 +321,7 @@ def _run_tracking():
                 'control_token':   w_zen_token.value,
                 'experiment_name': w_zen_expname.value.strip(),
                 'z_projection':    w_z_proj.value,
-                'tracking_channel': w_tracking_channel.value,
+                'tracking_channel': 0,
                 'max_xy_um':       w_max_xy.value,
                 'max_z_um':        w_max_z.value,
                 'feedback_enabled': w_use_feedback.value,
@@ -423,9 +425,9 @@ pn.state.add_periodic_callback(_update_log, period=500)
 acquisition_section = pn.Column(
     pn.pane.Markdown('### Acquisition / experiment'),
     w_dirpath,
-    w_position_names,
+    pn.Row(w_n_scenes, w_n_channels),
     pn.Row(w_pixel_xy, w_pixel_z, w_n_z),
-    pn.Row(w_tracking_channel, w_tracking_2d),
+    w_tracking_2d,
     w_serverkit,
 )
 
