@@ -71,8 +71,14 @@ def _parse_zen_filename(name):
 class ZenIngest:
     """Background service that converts ZEN per-Z TIFs into our 3-D stacks."""
 
+    # A z-slice file must be at least this many seconds old before we
+    # trust it to be fully written by ZEN.  Tweakable per instance via
+    # ``min_file_age_s``.
+    DEFAULT_MIN_FILE_AGE_S = 1.5
+
     def __init__(self, source_dir, out_root, position_names, n_z,
-                 n_channels=None, poll_interval_s=2.0):
+                 n_channels=None, poll_interval_s=2.0,
+                 min_file_age_s=None):
         """
         Parameters
         ----------
@@ -100,11 +106,18 @@ class ZenIngest:
         self.n_z = int(n_z)
         self.n_channels = int(n_channels) if n_channels else None
         self.poll_interval_s = float(poll_interval_s)
+        self.min_file_age_s = (
+            float(min_file_age_s)
+            if min_file_age_s is not None
+            else self.DEFAULT_MIN_FILE_AGE_S
+        )
 
         self._stop_event = threading.Event()
         self._thread = None
         # (S, T, C) → True once we have written the stack
         self._written = set()
+        # (S, T, C) → number of write attempts so far (for diagnostics)
+        self._attempts = {}
         self.logger = init_logger(self.__class__.__name__)
 
     # ------------------------------------------------------------------
@@ -167,7 +180,10 @@ class ZenIngest:
                 continue
             stacks.setdefault((s, t, c), {})[z] = path
 
-        # Flush any (S, T, C) that has all expected Z-slices
+        # Flush any (S, T, C) that has all expected Z-slices AND has been
+        # quiet long enough for ZEN to finish writing every slice.
+        import time as _time
+        now = _time.time()
         for (s, t, c), z_files in sorted(stacks.items()):
             if len(z_files) < self.n_z:
                 continue
@@ -177,6 +193,14 @@ class ZenIngest:
                     f"(have {len(self.position_names)} names) — skipping"
                 )
                 self._written.add((s, t, c))
+                continue
+            # File-age guard: skip if any source slice was modified in the
+            # last `min_file_age_s` seconds — likely still being written.
+            try:
+                newest = max(os.path.getmtime(p) for p in z_files.values())
+            except OSError:
+                continue
+            if (now - newest) < self.min_file_age_s:
                 continue
             self._write_stack(s, t, c, z_files)
 
@@ -200,15 +224,31 @@ class ZenIngest:
         os.makedirs(pos_dir, exist_ok=True)
         out_name = f't{t:04d}_C{c:02d}.tif'
         out_path = os.path.join(pos_dir, out_name)
+        tmp_path = out_path + '.tmp'
 
         if os.path.isfile(out_path):
+            # Existing output: assume previous run already produced it.
             self._written.add((s, t, c))
             return
+
+        # Track retries so a stuck stack is visible in the log instead of
+        # silently looping forever.
+        self._attempts[(s, t, c)] = self._attempts.get((s, t, c), 0) + 1
+        if self._attempts[(s, t, c)] > 1:
+            self.logger.warning(
+                f"Retrying stack S{s} T{t} C{c} "
+                f"(attempt {self._attempts[(s, t, c)]}) — previous attempt "
+                "did not complete successfully"
+            )
 
         try:
             z_arrays = [tifffile.imread(z_files[z]) for z in sorted(z_files)]
             stack = np.stack(z_arrays)
-            tifffile.imwrite(out_path, stack)
+            # Atomic write: write to .tmp then rename.  Prevents a half-
+            # written stack from being mistaken for a finished one if the
+            # process is interrupted.
+            tifffile.imwrite(tmp_path, stack)
+            os.replace(tmp_path, out_path)
             self.logger.info(
                 f"Wrote {out_path}  (Z={len(z_arrays)}, shape={stack.shape}, "
                 f"dtype={stack.dtype})"
@@ -218,3 +258,9 @@ class ZenIngest:
             self.logger.warning(
                 f"Failed to assemble stack S{s} T{t} C{c}: {e}"
             )
+            # Clean up any partial .tmp so it doesn't accumulate.
+            try:
+                if os.path.isfile(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
