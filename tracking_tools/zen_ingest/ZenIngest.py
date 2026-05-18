@@ -33,11 +33,39 @@ import tifffile
 from ..logger.logger import init_logger
 
 
-_FILENAME_RE = re.compile(
-    r'_S(?P<S>\d+)\(P\d+\)_T(?P<T>\d+)_Z(?P<Z>\d+)_C(?P<C>\d+)_'
-    r'M\d+_ORG\.tif$',
-    re.IGNORECASE,
-)
+# Each ZEN dimension token (S, T, Z, C, M) appears as `_<X><digits>` and any
+# of them can be omitted when the corresponding dimension has size 1
+# (no scenes, single Z, single channel, no tiling).  The only field we
+# require is T — without a timepoint there is nothing to track.
+_TOKEN_RES = {
+    'S': re.compile(r'_S(\d+)',  re.IGNORECASE),
+    'T': re.compile(r'_T(\d+)',  re.IGNORECASE),
+    'Z': re.compile(r'_Z(\d+)',  re.IGNORECASE),
+    'C': re.compile(r'_C(\d+)',  re.IGNORECASE),
+}
+
+
+def _parse_zen_filename(name):
+    """Return ``(S, T, Z, C)`` from a ZEN-style TIF filename.
+
+    Missing axes default to 0 so single-scene / single-Z / single-channel
+    acquisitions still parse.  ``None`` is returned when no T token is
+    present or the file extension is not ``.tif`` (case-insensitive).
+    """
+    if not name.lower().endswith('.tif'):
+        return None
+    t_m = _TOKEN_RES['T'].search(name)
+    if t_m is None:
+        return None
+    s_m = _TOKEN_RES['S'].search(name)
+    z_m = _TOKEN_RES['Z'].search(name)
+    c_m = _TOKEN_RES['C'].search(name)
+    return (
+        int(s_m.group(1)) if s_m else 0,
+        int(t_m.group(1)),
+        int(z_m.group(1)) if z_m else 0,
+        int(c_m.group(1)) if c_m else 0,
+    )
 
 
 class ZenIngest:
@@ -123,17 +151,18 @@ class ZenIngest:
             )
             return
 
-        # Group files by (S, T, C) → {Z: src_path}
+        # Group files by (S, T, C) → {Z: src_path}.  Filenames missing any
+        # of S/Z/C are treated as that axis having index 0 (e.g. a single-
+        # channel acquisition produces files without `_C00`).
         stacks = {}
         for path in glob.iglob(
             os.path.join(self.source_dir, '**', '*.tif'),
             recursive=True,
         ):
-            m = _FILENAME_RE.search(os.path.basename(path))
-            if not m:
+            parsed = _parse_zen_filename(os.path.basename(path))
+            if parsed is None:
                 continue
-            s = int(m.group('S')); t = int(m.group('T'))
-            z = int(m.group('Z')); c = int(m.group('C'))
+            s, t, z, c = parsed
             if (s, t, c) in self._written:
                 continue
             stacks.setdefault((s, t, c), {})[z] = path

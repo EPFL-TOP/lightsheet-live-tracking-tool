@@ -21,7 +21,9 @@ class MicroscopeInterface_LS1:
         for pos_name in positions_config.keys() :
             position_settings_splitted = pos_name.rsplit("_", 1)
             self.pos_to_PosSettings[position_settings_splitted[0]] = pos_name
-            self.pos_to_Channel[position_settings_splitted[0]] = positions_config[pos_name]["filename"].replace(".tif","").split("_")[-1]
+            self.pos_to_Channel[position_settings_splitted[0]] = self._channel_from_filename(
+                positions_config[pos_name].get("filename", "")
+            )
 
         self.PosSettings_to_pos = {v:k for k, v in self.pos_to_PosSettings.items()}
         self.microscope = pymcs.Microscope()
@@ -30,6 +32,39 @@ class MicroscopeInterface_LS1:
         self.stage_xyz = pymcs.StageXYZ(self.microscope, "STAGE")
         self.logger = init_logger(self.__class__.__name__)
         self.stop_requested = False
+
+    @staticmethod
+    def _channel_from_filename(filename):
+        """Extract the channel suffix from a saved Viventis-style filename.
+
+        ``t0001_Channel 1.tif`` → ``'Channel 1'``.  Empty filenames return
+        ``''`` so ``read_image`` can still build a path (and fail loudly).
+        """
+        if not filename:
+            return ''
+        return filename.replace(".tif", "").split("_", 1)[-1] if "_" in filename else ""
+
+    def refresh_filename(self, position_name):
+        """Re-derive the tracking channel for *position_name* after the ROI
+        dashboard saved a new ``tracking_RoIs.json``.
+
+        ``TrackingRunner.reinitialize_tracker`` has just merged the new
+        config (including the new ``filename``) into ``positions_config``.
+        Here we update the cached channel suffix so subsequent calls to
+        ``read_image`` pull frames from the new channel.
+        """
+        cfg = self.positions_config.get(position_name, {})
+        filename = cfg.get("filename", "")
+        if not filename:
+            return
+        stripped = position_name.rsplit("_", 1)[0]
+        new_channel = self._channel_from_filename(filename)
+        old = self.pos_to_Channel.get(stripped)
+        self.pos_to_Channel[stripped] = new_channel
+        if old != new_channel:
+            self.logger.info(
+                f"[{position_name}] LS1 tracking channel: {old!r} → {new_channel!r}"
+            )
 
     # Waits for a new image
     def wait_for_image(self, timeout_ms) :
