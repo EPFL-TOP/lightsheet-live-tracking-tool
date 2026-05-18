@@ -1165,7 +1165,6 @@ class MicroscopeInterface_Files:
         self._json_mtime = {}   # pos_name → last seen mtime of tracking_RoIs.json
         for pos_name in self.position_names:
             self._refresh_filename_unlocked(pos_name)
-            self._next_tp[pos_name] = 0
 
         self._queue      = queue.Queue()
         self._stop_event = threading.Event()
@@ -1178,21 +1177,30 @@ class MicroscopeInterface_Files:
         """
         Split filename around the t{NNNN} number.
 
+        Returns ``(prefix, suffix, start_tp)`` where ``start_tp`` is the
+        integer value of the digits found in the filename — used so the
+        watcher begins reading at exactly the timepoint at which the ROI
+        was defined.  Crucial after a mid-experiment channel switch: the
+        new tracker must start from the timepoint of the new ROI, not from
+        T=0 (the ROI may not be valid at earlier frames).
+
         Examples:
-          't0000_C00.tif'        → ('t', '_C00.tif')
-          't0001_Channel 1.tif'  → ('t', '_Channel 1.tif')   # Viventis
-          't0001.tif'            → ('t', '.tif')              # LS1
+          't0001_C00.tif'        → ('t', '_C00.tif',  1)
+          't0001_Channel 1.tif'  → ('t', '_Channel 1.tif', 1)   # Viventis
+          't0005.tif'            → ('t', '.tif',      5)        # LS1
         """
         m = self._re.match(r'^(.*?)t(\d+)(.*\.tif)$', filename, self._re.IGNORECASE)
         if not m:
-            return ('t', '.tif')
-        return (m.group(1) + 't', m.group(3))
+            return ('t', '.tif', 0)
+        return (m.group(1) + 't', m.group(3), int(m.group(2)))
 
     def _refresh_filename_unlocked(self, pos_name):
-        """Re-parse the filename pattern for a position from its config."""
+        """Re-parse the filename pattern and reset the next-timepoint cursor."""
         cfg = self.positions_config.get(pos_name, {})
         filename = cfg.get('filename', '')
-        self._patterns[pos_name] = self._parse_pattern(filename)
+        prefix, suffix, start_tp = self._parse_pattern(filename)
+        self._patterns[pos_name] = (prefix, suffix)
+        self._next_tp[pos_name] = start_tp
         # Track the JSON mtime so we can detect external edits and re-read
         # without the runner having to call us explicitly.
         log_dir = cfg.get('log_dir')
@@ -1204,9 +1212,10 @@ class MicroscopeInterface_Files:
     def refresh_filename(self, pos_name):
         """Public hook called by TrackingRunner.reinitialize_tracker."""
         self._refresh_filename_unlocked(pos_name)
+        prefix, suffix = self._patterns[pos_name]
         self.logger.info(
             f"[{pos_name}] tracking filename updated to "
-            f"{self._patterns[pos_name][0]}{{N}}{self._patterns[pos_name][1]}"
+            f"{prefix}{{N}}{suffix} — starting at T={self._next_tp[pos_name]}"
         )
 
     # ------------------------------------------------------------------
@@ -1252,12 +1261,15 @@ class MicroscopeInterface_Files:
                 if 'filename' in new_cfg:
                     cfg['filename'] = new_cfg['filename']
                     old_pattern = self._patterns.get(pos_name)
-                    self._patterns[pos_name] = self._parse_pattern(new_cfg['filename'])
-                    if old_pattern != self._patterns[pos_name]:
+                    prefix, suffix, start_tp = self._parse_pattern(new_cfg['filename'])
+                    self._patterns[pos_name] = (prefix, suffix)
+                    # Reset the cursor so tracking begins at the timepoint the
+                    # ROI was redefined on, not from where we happened to be.
+                    self._next_tp[pos_name] = start_tp
+                    if old_pattern != (prefix, suffix):
                         self.logger.info(
                             f"[{pos_name}] filename pattern changed → "
-                            f"{self._patterns[pos_name][0]}{{N}}"
-                            f"{self._patterns[pos_name][1]}"
+                            f"{prefix}{{N}}{suffix} — starting at T={start_tp}"
                         )
                 self._json_mtime[pos_name] = mtime
             except Exception as e:
