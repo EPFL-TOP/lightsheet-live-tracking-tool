@@ -332,20 +332,24 @@ def _run_tracking():
                 zeiss_params=zeiss_params,
             )
         else:
+            # File-watching for INPUT.  When feedback is on, we also open a
+            # gRPC channel to ZEN so the tracker-computed shifts are sent
+            # back as StageService.move_to calls.
             file_params = {
                 'poll_interval_s': w_ingest_poll.value,
+                'zen_feedback':       w_use_feedback.value,
+                'zen_address':        w_zen_address.value.strip(),
+                'zen_port':           w_zen_port.value,
+                'zen_cert_path':      w_zen_cert.value.strip(),
+                'zen_control_token':  w_zen_token.value,
+                'max_xy_um':          w_max_xy.value,
+                'max_z_um':           w_max_z.value,
             }
             microscope = MicroscopeInterface_Files(
                 positions_config=position_config,
                 dirpath=dirpath,
                 file_params=file_params,
             )
-            if w_use_feedback.value:
-                logging.warning(
-                    "Stage feedback is enabled but the file-watching mode does "
-                    "not contact the microscope. relative_move will no-op. "
-                    "Enable 'Use ZEN gRPC streaming' to send shifts back."
-                )
 
         _state['microscope'] = microscope
 

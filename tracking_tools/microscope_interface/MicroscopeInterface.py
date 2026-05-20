@@ -1,5 +1,6 @@
 import time
 import os
+import ssl
 import math
 import queue
 import threading
@@ -1159,6 +1160,26 @@ class MicroscopeInterface_Files:
         file_params = file_params or {}
         self.poll_interval_s = float(file_params.get('poll_interval_s', 1.0))
 
+        # ZEN gRPC feedback (optional).  When ``zen_feedback`` is True we
+        # open a gRPC channel to the ZEN Gateway just so we can call
+        # StageService.move_to / FocusService.move_to_position with each
+        # tracker-computed shift.  Frames keep flowing from disk via the
+        # poll loop — only the OUTPUT side talks to ZEN.
+        self.zen_feedback     = bool(file_params.get('zen_feedback', False))
+        self.zen_address      = file_params.get('zen_address', 'localhost')
+        self.zen_port         = int(file_params.get('zen_port', 5002))
+        self.zen_cert_path    = file_params.get('zen_cert_path', '')
+        self.zen_control_token = file_params.get('zen_control_token', '')
+        self.max_xy_um        = float(file_params.get('max_xy_um', 500.0))
+        self.max_z_um         = float(file_params.get('max_z_um', 100.0))
+
+        # asyncio loop + gRPC channel for stage commands.  Lazily created
+        # in connect() when feedback is enabled.
+        self._zen_loop    = None
+        self._zen_thread  = None
+        self._zen_channel = None
+        self._zen_metadata = None
+
         # Per-position state
         self._patterns = {}     # pos_name → (prefix, suffix)
         self._next_tp  = {}     # pos_name → next timepoint we expect to see
@@ -1222,6 +1243,17 @@ class MicroscopeInterface_Files:
     def connect(self):
         self._stop_event.clear()
         self.stop_requested = False
+
+        if self.zen_feedback:
+            try:
+                self._open_zen_channel()
+            except Exception as e:
+                self.logger.error(
+                    f"Could not open ZEN feedback channel — continuing without "
+                    f"stage moves: {e}"
+                )
+                self.zen_feedback = False
+
         self._thread = threading.Thread(
             target=self._poll_loop,
             daemon=True,
@@ -1230,7 +1262,57 @@ class MicroscopeInterface_Files:
         self._thread.start()
         self.logger.info(
             f"File-watch mode active — polling every {self.poll_interval_s:.1f}s "
-            f"for {len(self.position_names)} position(s)"
+            f"for {len(self.position_names)} position(s) — "
+            f"stage feedback: {'ON' if self.zen_feedback else 'OFF'}"
+        )
+
+    # ------------------------------------------------------------------
+    def _open_zen_channel(self):
+        """Start a private asyncio loop in a daemon thread and open a gRPC
+        channel + metadata to ZEN.  Mirrors the SSL setup used by
+        ``MicroscopeInterface_Zeiss._async_main`` (h2 ALPN is mandatory)."""
+        try:
+            import grpclib.client
+        except ImportError as e:
+            raise RuntimeError(
+                "grpclib is required for ZEN feedback. "
+                "Run: pip install grpclib"
+            ) from e
+
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        if self.zen_cert_path and os.path.exists(self.zen_cert_path):
+            ssl_ctx.load_verify_locations(cafile=self.zen_cert_path)
+            ssl_ctx.verify_mode = ssl.CERT_REQUIRED
+            ssl_ctx.check_hostname = True
+        else:
+            self.logger.warning(
+                "No ZEN cert_path provided — TLS verification disabled."
+            )
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+        ssl_ctx.set_alpn_protocols(["h2"])
+
+        self._zen_loop = asyncio.new_event_loop()
+
+        def _run_loop():
+            asyncio.set_event_loop(self._zen_loop)
+            self._zen_loop.run_forever()
+
+        self._zen_thread = threading.Thread(
+            target=_run_loop, daemon=True, name='ZenFeedbackLoop'
+        )
+        self._zen_thread.start()
+
+        async def _open():
+            self._zen_channel = grpclib.client.Channel(
+                host=self.zen_address, port=self.zen_port, ssl=ssl_ctx
+            )
+            self._zen_metadata = [("control-token", self.zen_control_token)]
+
+        future = asyncio.run_coroutine_threadsafe(_open(), self._zen_loop)
+        future.result(timeout=10)
+        self.logger.info(
+            f"ZEN feedback channel opened to {self.zen_address}:{self.zen_port}"
         )
 
     def _poll_loop(self):
@@ -1307,17 +1389,115 @@ class MicroscopeInterface_Files:
             return None, None, None
 
     def relative_move(self, position_name, shift_x, shift_y, shift_z):
-        """No-op stub — file-watching tracker doesn't drive a stage."""
-        self.logger.debug(
-            f"[{position_name}] (no feedback) shift_um xyz="
-            f"({shift_x:.2f}, {shift_y:.2f}, {shift_z:.2f})"
+        """Forward a tracker-computed shift to ZEN when feedback is on.
+
+        When ``zen_feedback`` is False this is a logging no-op so the
+        tracker can be exercised against on-disk frames without touching
+        the microscope.  When True we soft-clamp the shift to the
+        configured limits and call ``StageService.move_to`` /
+        ``FocusService.move_to_position`` on the ZEN gateway.
+
+        Stage moves are global on the ZEN side (one shared XYZ stage),
+        so ``position_name`` is only used for logging here.
+        """
+        if not self.zen_feedback or self._zen_loop is None:
+            self.logger.debug(
+                f"[{position_name}] (no feedback) shift_um xyz="
+                f"({shift_x:.2f}, {shift_y:.2f}, {shift_z:.2f})"
+            )
+            return
+
+        def _clamp(v, limit, axis):
+            if abs(v) > limit:
+                self.logger.warning(
+                    f"[{position_name}] {axis} shift {v:.1f} µm exceeds "
+                    f"limit {limit:.0f} µm — clamped"
+                )
+                return math.copysign(limit, v)
+            return v
+
+        shift_x = _clamp(shift_x, self.max_xy_um, 'X')
+        shift_y = _clamp(shift_y, self.max_xy_um, 'Y')
+        shift_z = _clamp(shift_z, self.max_z_um,  'Z')
+
+        future = asyncio.run_coroutine_threadsafe(
+            self._async_relative_move(shift_x, shift_y, shift_z),
+            self._zen_loop,
         )
+        try:
+            future.result(timeout=10)
+            self.logger.info(
+                f"[{position_name}] sent relative move xyz="
+                f"({shift_x:.2f}, {shift_y:.2f}, {shift_z:.2f}) µm to ZEN"
+            )
+        except Exception as e:
+            self.logger.error(f"[{position_name}] stage move failed: {e}")
+
+    async def _async_relative_move(self, dx_um, dy_um, dz_um):
+        """Query current stage / focus, apply relative offset.  Mirrors
+        ``MicroscopeInterface_Zeiss._async_relative_move`` — see that
+        method for cross-references with the official ZEN API examples."""
+        try:
+            from zen_api.lm.hardware.v2 import (
+                StageServiceStub,
+                StageServiceGetPositionRequest,
+                StageServiceMoveToRequest,
+            )
+            from zen_api.focus.v2 import (
+                FocusServiceStub,
+                FocusServiceGetPositionRequest,
+                FocusServiceMoveToPositionRequest,
+            )
+        except ImportError as e:
+            self.logger.error(f"zen_api hardware stubs not found: {e}")
+            return
+
+        stage_stub = StageServiceStub(channel=self._zen_channel, metadata=self._zen_metadata)
+        focus_stub = FocusServiceStub(channel=self._zen_channel, metadata=self._zen_metadata)
+
+        if abs(dx_um) > 1e-3 or abs(dy_um) > 1e-3:
+            pos = await stage_stub.get_position(StageServiceGetPositionRequest())
+            await stage_stub.move_to(
+                StageServiceMoveToRequest(
+                    x=pos.x + dx_um * 1e-6,
+                    y=pos.y + dy_um * 1e-6,
+                )
+            )
+
+        if abs(dz_um) > 1e-3:
+            z_pos = await focus_stub.get_position(FocusServiceGetPositionRequest())
+            current_z = getattr(z_pos, 'z', None) or getattr(z_pos, 'position', 0.0)
+            await focus_stub.move_to_position(
+                FocusServiceMoveToPositionRequest(
+                    position=current_z + dz_um * 1e-6
+                )
+            )
 
     def disconnect(self):
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=5)
             self._thread = None
+
+        # Tear down the ZEN feedback loop + channel
+        if self._zen_loop is not None:
+            try:
+                if self._zen_channel is not None:
+                    async def _close():
+                        self._zen_channel.close()
+                    asyncio.run_coroutine_threadsafe(_close(), self._zen_loop).result(timeout=5)
+            except Exception as e:
+                self.logger.warning(f"Error closing ZEN channel: {e}")
+            try:
+                self._zen_loop.call_soon_threadsafe(self._zen_loop.stop)
+            except Exception:
+                pass
+            if self._zen_thread is not None:
+                self._zen_thread.join(timeout=5)
+                self._zen_thread = None
+            self._zen_loop = None
+            self._zen_channel = None
+            self._zen_metadata = None
 
     def stop(self):
         self.stop_requested = True
