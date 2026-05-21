@@ -48,12 +48,27 @@ _log_queue: queue.Queue = queue.Queue()
 
 
 class _QueueHandler(logging.Handler):
-    """Forwards log records to a thread-safe queue for Panel to consume."""
+    """Forwards log records to a thread-safe queue for Panel to consume.
+
+    The queue is held as an instance attribute (not looked up via the
+    module's globals) so that background threads still emitting logs
+    during interpreter shutdown do not hit a NameError when the module's
+    globals have been cleared.
+    """
+    def __init__(self, log_queue, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._queue = log_queue
+
     def emit(self, record):
-        _log_queue.put(self.format(record))
+        try:
+            self._queue.put_nowait(self.format(record))
+        except Exception:
+            # Swallow errors during shutdown / when the formatter chokes
+            # on a partially-torn-down logger
+            pass
 
 
-_queue_handler = _QueueHandler()
+_queue_handler = _QueueHandler(_log_queue)
 _queue_handler.setFormatter(logging.Formatter(
     '[%(asctime)s] %(name)s %(levelname)s - %(message)s',
     datefmt='%H:%M:%S'
