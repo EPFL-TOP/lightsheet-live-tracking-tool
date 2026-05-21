@@ -141,9 +141,6 @@ w_zen_token = pn.widgets.PasswordInput(
     placeholder='Paste token from GlobalControlToken.txt',
     width=420,
 )
-w_zen_expname = pn.widgets.TextInput(
-    name='Experiment name in ZEN', placeholder='MyTimeLapse', width=280
-)
 w_z_proj = pn.widgets.Select(
     name='Z projection', options=['max', 'central_slice'], value='max', width=180
 )
@@ -174,7 +171,6 @@ def _load_zeiss_config():
     w_zen_port.value     = cfg.getint('host',      'port',             fallback=5002)
     w_zen_cert.value     = cfg.get('cert',         'path',             fallback='')
     w_zen_token.value    = cfg.get('api',          'control_token',    fallback='')
-    w_zen_expname.value  = cfg.get('experiment',   'name',             fallback='')
     w_z_proj.value       = cfg.get('experiment',   'z_projection',     fallback='max')
     w_max_xy.value       = cfg.getfloat('bounds',  'max_xy_um',        fallback=500.0)
     w_max_z.value        = cfg.getfloat('bounds',  'max_z_um',         fallback=100.0)
@@ -319,7 +315,6 @@ def _run_tracking():
                 'port':            w_zen_port.value,
                 'cert_path':       w_zen_cert.value.strip(),
                 'control_token':   w_zen_token.value,
-                'experiment_name': w_zen_expname.value.strip(),
                 'z_projection':    w_z_proj.value,
                 'tracking_channel': 0,
                 'max_xy_um':       w_max_xy.value,
@@ -455,8 +450,7 @@ advanced_section = pn.Card(
     pn.Row(w_zen_address, w_zen_port),
     w_zen_cert,
     w_zen_token,
-    pn.Row(w_zen_expname, w_z_proj),
-    pn.Row(w_max_xy, w_max_z),
+    pn.Row(w_z_proj, w_max_xy, w_max_z),
     title='Advanced — ZEN streaming & stage feedback',
     collapsed=True,
 )
