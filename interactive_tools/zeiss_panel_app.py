@@ -329,6 +329,24 @@ async def _list_experiments_async():
         channel.close()
 
 
+async def _get_image_output_path_async():
+    """Return the folder ZEN saves CZIs into (the *automated TIF export*
+    folder is a separate setting that the API does not expose)."""
+    from zen_api.acquisition.v1beta import (
+        ExperimentServiceStub,
+        ExperimentServiceGetImageOutputPathRequest,
+    )
+    channel, metadata = _open_grpc_channel_sync()
+    try:
+        svc = ExperimentServiceStub(channel=channel, metadata=metadata)
+        resp = await svc.get_image_output_path(
+            ExperimentServiceGetImageOutputPathRequest()
+        )
+        return resp.image_output_path
+    finally:
+        channel.close()
+
+
 async def _start_experiment_async(exp_name, output_name):
     from zen_api.acquisition.v1beta import (
         ExperimentServiceStub,
@@ -388,26 +406,71 @@ def _on_start_exp(event):
     name = (w_exp_name_select.value or '').strip()
     out  = (w_exp_output_name.value or '').strip()
     if not name:
-        logging.error("No experiment selected — click 'Refresh experiment list' first.")
+        msg = "No experiment selected — click 'Refresh experiment list' first."
+        logging.error(msg)
+        exp_status_md.object = f"⚠️ {msg}"
         return
     if not out:
         out = f"track_{name}"
         logging.info(f"Output filename was empty, defaulting to '{out}'")
+
+    # Resolve ZEN's image output folder up-front so we can show it both on
+    # success and on ALREADY_EXISTS errors.  The lookup is cheap and lets
+    # the user actually find / delete the conflicting file if needed.
+    try:
+        out_dir = _run_coro_blocking(_get_image_output_path_async())
+    except Exception as e:
+        out_dir = ''
+        logging.warning(f"Could not query ZEN image output path: {e}")
+
     try:
         exp_id = _run_coro_blocking(_start_experiment_async(name, out))
-        _state['experiment_id']   = exp_id
-        _state['experiment_name'] = name
-        exp_status_md.object = (
-            f"**Running**: `{name}` → `{out}.czi`  \n"
-            f"experiment_id: `{exp_id}`"
-        )
-        btn_start_exp.disabled = True
-        btn_stop_exp.disabled  = False
-        logging.info(
-            f"Started ZEN experiment {name!r} → '{out}.czi'  id={exp_id}"
-        )
     except Exception as e:
-        logging.error(f"Start experiment failed: {e}", exc_info=True)
+        # Friendly dashboard message for the common failures.  We classify
+        # by the GRPCError status integer (6 = ALREADY_EXISTS) because the
+        # actual grpclib.exceptions.GRPCError class isn't always importable
+        # in the panel context.
+        status_code = getattr(getattr(e, 'status', None), 'value', None)
+        grpc_msg    = getattr(e, 'message', None) or str(e)
+        if status_code == 6 or 'already exists' in str(e).lower():
+            folder_hint = (
+                f"\n\nZEN's image output folder: `{out_dir}`"
+                if out_dir else ''
+            )
+            exp_status_md.object = (
+                f"⚠️ **Cannot start:** ZEN refuses to overwrite an existing "
+                f"output named `{out}.czi`.\n\n"
+                f"**Fix:** pick a different *Output filename* (e.g. "
+                f"`{out}_v2`) and click *Start* again, **or** delete the "
+                f"existing file from ZEN.{folder_hint}"
+            )
+            logging.error(
+                f"Start experiment refused: '{out}.czi' already exists "
+                f"in {out_dir or '<unknown>'}"
+            )
+        else:
+            exp_status_md.object = (
+                f"⚠️ **Start failed:** {grpc_msg}"
+                f"{(chr(10) + chr(10) + 'Output folder: `' + out_dir + '`') if out_dir else ''}"
+            )
+            logging.error(f"Start experiment failed: {e}", exc_info=True)
+        return
+
+    _state['experiment_id']   = exp_id
+    _state['experiment_name'] = name
+    folder_line = (
+        f"  \n📁 Files at: `{out_dir}`" if out_dir else ''
+    )
+    exp_status_md.object = (
+        f"✅ **Running**: `{name}` → `{out}.czi`  \n"
+        f"experiment_id: `{exp_id}`{folder_line}"
+    )
+    btn_start_exp.disabled = True
+    btn_stop_exp.disabled  = False
+    logging.info(
+        f"Started ZEN experiment {name!r} → '{out}.czi'  id={exp_id}  "
+        f"output_folder={out_dir or '<unknown>'}"
+    )
 
 
 def _on_stop_exp(event):
