@@ -25,8 +25,10 @@ Launch with::
     panel serve interactive_tools/zeiss_panel_app.py --show --port 5022
 """
 
+import asyncio
 import configparser
 import os
+import ssl
 import sys
 import queue
 import logging
@@ -163,6 +165,34 @@ w_max_xy = pn.widgets.FloatInput(name='Max XY shift (µm)', value=500.0, step=10
 w_max_z = pn.widgets.FloatInput(name='Max Z shift (µm)', value=100.0, step=5.0, width=180)
 
 
+# ─── ZEN experiment control (API-started) ──────────────────────────────────
+#
+# ZEN's API can only manipulate (Status / TilesService / etc.) experiments
+# that the API itself started.  To do multi-position position-list updates
+# we need ZEN to run the experiment through ExperimentService.start_experiment
+# rather than the ZEN UI's Start button — that way we own the experiment_id
+# and can call TilesService.add_positions per acquisition cycle.
+
+w_exp_name_select = pn.widgets.Select(
+    name='Experiment name in ZEN', options=[''], value='', width=320,
+)
+w_exp_output_name = pn.widgets.TextInput(
+    name='Output filename (no .czi extension)',
+    placeholder='track_run_001',
+    width=320,
+)
+btn_refresh_exps = pn.widgets.Button(
+    name='Refresh experiment list', button_type='light', width=200,
+)
+btn_start_exp = pn.widgets.Button(
+    name='Start experiment via ZEN API', button_type='primary', width=240,
+)
+btn_stop_exp = pn.widgets.Button(
+    name='Stop experiment', button_type='warning', width=160, disabled=True,
+)
+exp_status_md = pn.pane.Markdown('_No experiment started via API_', width=560)
+
+
 # ─── Run / Stop ─────────────────────────────────────────────────────────────
 
 btn_run  = pn.widgets.Button(name='Run Tracking', button_type='success', width=180)
@@ -201,6 +231,10 @@ _state: dict = {
     'microscope': None,
     'tracking_thread': None,
     'ingest': None,
+    # ZEN-API-started experiment bookkeeping (Phase 1: just track the id;
+    # Phase 2 will use it for TilesService position updates per cycle).
+    'experiment_id':   None,
+    'experiment_name': None,
 }
 
 
@@ -223,6 +257,157 @@ def _ensure_root_logger():
     root_logger.setLevel(logging.DEBUG)
     if _queue_handler not in root_logger.handlers:
         root_logger.addHandler(_queue_handler)
+
+
+# ─── ZEN experiment control (API-started) ──────────────────────────────────
+
+def _open_grpc_channel_sync():
+    """Open a fresh grpclib channel using the panel's ZEN connection widgets.
+
+    Returns ``(channel, metadata)``.  Caller must close the channel.
+    SSL setup mirrors MicroscopeInterface_Zeiss / _Files: h2 ALPN is
+    mandatory for the ZEN Gateway to negotiate HTTP/2.
+    """
+    import grpclib.client
+    host  = w_zen_address.value.strip()
+    port  = int(w_zen_port.value)
+    cert  = w_zen_cert.value.strip()
+    token = w_zen_token.value
+
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    if cert and os.path.exists(cert):
+        ctx.load_verify_locations(cafile=cert)
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        ctx.check_hostname = True
+    else:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    ctx.set_alpn_protocols(["h2"])
+    channel = grpclib.client.Channel(host=host, port=port, ssl=ctx)
+    metadata = [("control-token", token)]
+    return channel, metadata
+
+
+async def _list_experiments_async():
+    from zen_api.acquisition.v1beta import (
+        ExperimentServiceStub,
+        ExperimentServiceGetAvailableExperimentsRequest,
+    )
+    channel, metadata = _open_grpc_channel_sync()
+    try:
+        svc = ExperimentServiceStub(channel=channel, metadata=metadata)
+        resp = await svc.get_available_experiments(
+            ExperimentServiceGetAvailableExperimentsRequest()
+        )
+        return [e.name for e in resp.experiments]
+    finally:
+        channel.close()
+
+
+async def _start_experiment_async(exp_name, output_name):
+    from zen_api.acquisition.v1beta import (
+        ExperimentServiceStub,
+        ExperimentServiceLoadRequest,
+        ExperimentServiceStartExperimentRequest,
+    )
+    channel, metadata = _open_grpc_channel_sync()
+    try:
+        svc = ExperimentServiceStub(channel=channel, metadata=metadata)
+        loaded = await svc.load(
+            ExperimentServiceLoadRequest(experiment_name=exp_name)
+        )
+        exp_id = loaded.experiment_id
+        await svc.start_experiment(
+            ExperimentServiceStartExperimentRequest(
+                experiment_id=exp_id,
+                output_name=output_name,
+            )
+        )
+        return exp_id
+    finally:
+        channel.close()
+
+
+async def _stop_experiment_async(exp_id):
+    from zen_api.acquisition.v1beta import (
+        ExperimentServiceStub,
+        ExperimentServiceStopRequest,
+    )
+    channel, metadata = _open_grpc_channel_sync()
+    try:
+        svc = ExperimentServiceStub(channel=channel, metadata=metadata)
+        await svc.stop(ExperimentServiceStopRequest(experiment_id=exp_id))
+    finally:
+        channel.close()
+
+
+def _on_refresh_exps(event):
+    _ensure_root_logger()
+    try:
+        names = asyncio.run(_list_experiments_async())
+        if not names:
+            w_exp_name_select.options = ['']
+            w_exp_name_select.value = ''
+            logging.warning("No experiments found on ZEN gateway.")
+        else:
+            w_exp_name_select.options = names
+            if w_exp_name_select.value not in names:
+                w_exp_name_select.value = names[0]
+        logging.info(f"Found {len(names)} ZEN experiment(s): {names}")
+    except Exception as e:
+        logging.error(f"List experiments failed: {e}", exc_info=True)
+
+
+def _on_start_exp(event):
+    _ensure_root_logger()
+    name = (w_exp_name_select.value or '').strip()
+    out  = (w_exp_output_name.value or '').strip()
+    if not name:
+        logging.error("No experiment selected — click 'Refresh experiment list' first.")
+        return
+    if not out:
+        out = f"track_{name}"
+        logging.info(f"Output filename was empty, defaulting to '{out}'")
+    try:
+        exp_id = asyncio.run(_start_experiment_async(name, out))
+        _state['experiment_id']   = exp_id
+        _state['experiment_name'] = name
+        exp_status_md.object = (
+            f"**Running**: `{name}` → `{out}.czi`  \n"
+            f"experiment_id: `{exp_id}`"
+        )
+        btn_start_exp.disabled = True
+        btn_stop_exp.disabled  = False
+        logging.info(
+            f"Started ZEN experiment {name!r} → '{out}.czi'  id={exp_id}"
+        )
+    except Exception as e:
+        logging.error(f"Start experiment failed: {e}", exc_info=True)
+
+
+def _on_stop_exp(event):
+    _ensure_root_logger()
+    exp_id = _state.get('experiment_id')
+    name   = _state.get('experiment_name') or '?'
+    if not exp_id:
+        logging.warning("No API-started experiment to stop.")
+        return
+    try:
+        asyncio.run(_stop_experiment_async(exp_id))
+        logging.info(f"Stopped ZEN experiment {name!r}  id={exp_id}")
+    except Exception as e:
+        logging.error(f"Stop experiment failed: {e}", exc_info=True)
+    finally:
+        _state['experiment_id']   = None
+        _state['experiment_name'] = None
+        exp_status_md.object = '_Stopped_'
+        btn_start_exp.disabled = False
+        btn_stop_exp.disabled  = True
+
+
+btn_refresh_exps.on_click(_on_refresh_exps)
+btn_start_exp.on_click(_on_start_exp)
+btn_stop_exp.on_click(_on_stop_exp)
 
 
 # ─── Ingest control ─────────────────────────────────────────────────────────
@@ -452,6 +637,22 @@ ingest_section = pn.Column(
     pn.Row(w_ingest_poll, btn_ingest_start, btn_ingest_stop),
 )
 
+experiment_section = pn.Column(
+    pn.pane.Markdown(
+        '### ZEN experiment control (API-started)\n\n'
+        '_Start the experiment from here instead of the ZEN UI button.  '
+        'That way our tool owns the running `experiment_id` and can update '
+        'stored scene positions per cycle via `TilesService.add_positions`.  '
+        'Refresh the list, pick an experiment, type an output filename, '
+        'then **Start experiment via ZEN API**.  Verify TIFs spit out in '
+        'the source folder as expected before relying on this for tracking._'
+    ),
+    pn.Row(w_exp_name_select, btn_refresh_exps),
+    w_exp_output_name,
+    pn.Row(btn_start_exp, btn_stop_exp),
+    exp_status_md,
+)
+
 advanced_section = pn.Card(
     pn.pane.Markdown(
         '_Streaming mode contacts the ZEN API Gateway directly via gRPC.  '
@@ -474,6 +675,8 @@ tracking_tab = pn.Column(
     pn.pane.Markdown('## Live Tracking'),
     pn.layout.Divider(),
     acquisition_section,
+    pn.layout.Divider(),
+    experiment_section,
     pn.layout.Divider(),
     ingest_section,
     pn.layout.Divider(),
