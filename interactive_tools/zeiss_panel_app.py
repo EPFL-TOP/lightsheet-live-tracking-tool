@@ -552,16 +552,32 @@ def _run_tracking():
                 zeiss_params=zeiss_params,
             )
         else:
-            # File-watching for INPUT.  When feedback is on, we also open a
-            # gRPC channel to ZEN so the tracker-computed shifts are sent
-            # back as StageService.move_to calls.
+            # File-watching for INPUT.  When feedback is on the file
+            # watcher also opens a gRPC channel to ZEN.  Mode is inferred:
+            #   - n_scenes == 1  → StageService.move_to per frame
+            #   - n_scenes > 1   → TilesService.clear + add_positions
+            #                      between cycles (requires experiment_id
+            #                      from an API-started experiment)
+            n_scenes = int(w_n_scenes.value or 1)
+            running_exp_id = _state.get('experiment_id') or ''
+            if (w_use_feedback.value and n_scenes > 1 and not running_exp_id):
+                logging.error(
+                    "Multi-scene feedback requires an API-started experiment. "
+                    "Click 'Start experiment via ZEN API' first, then Run Tracking. "
+                    "Continuing this run WITHOUT ZEN feedback."
+                )
+                use_feedback = False
+            else:
+                use_feedback = w_use_feedback.value
             file_params = {
-                'poll_interval_s': w_ingest_poll.value,
-                'zen_feedback':       w_use_feedback.value,
+                'poll_interval_s':    w_ingest_poll.value,
+                'zen_feedback':       use_feedback,
                 'zen_address':        w_zen_address.value.strip(),
                 'zen_port':           w_zen_port.value,
                 'zen_cert_path':      w_zen_cert.value.strip(),
                 'zen_control_token':  w_zen_token.value,
+                'zen_experiment_id':  running_exp_id,
+                'n_scenes':           n_scenes,
                 'max_xy_um':          w_max_xy.value,
                 'max_z_um':           w_max_z.value,
             }

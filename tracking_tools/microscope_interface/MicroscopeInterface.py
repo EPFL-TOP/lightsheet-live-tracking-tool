@@ -772,6 +772,7 @@ class MicroscopeInterface_Zeiss:
             )
             self._queue.put((None, None, None))
             return
+            
 
         # Metadata (control token) is passed to the stub constructor, not each RPC call
         stub = ExperimentStreamingServiceStub(
@@ -1170,6 +1171,23 @@ class MicroscopeInterface_Files:
         self.zen_control_token = file_params.get('zen_control_token', '')
         self.max_xy_um        = float(file_params.get('max_xy_um', 500.0))
         self.max_z_um         = float(file_params.get('max_z_um', 100.0))
+        # ZEN-API-started experiment id (required for multi-scene feedback
+        # via TilesService.add_positions).  Empty string ⇒ single-scene
+        # mode using StageService.move_to.
+        self.zen_experiment_id = file_params.get('zen_experiment_id', '')
+        # Total scenes ZEN's running experiment exposes — needed so we can
+        # provide a complete position list to TilesService.add_positions.
+        # Defaults to len(positions_config) which counts only the scenes
+        # the user is tracking; bump it via file_params['n_scenes'] when
+        # not every scene has a tracking_RoIs.json.
+        self.n_scenes = int(file_params.get('n_scenes',
+                                            len(self.position_names)))
+        # Multi-scene feedback uses TilesService instead of StageService.
+        self.multi_scene_mode = (
+            self.zen_feedback
+            and self.n_scenes > 1
+            and bool(self.zen_experiment_id)
+        )
 
         # asyncio loop + gRPC channel for stage commands.  Lazily created
         # in connect() when feedback is enabled.
@@ -1177,16 +1195,25 @@ class MicroscopeInterface_Files:
         self._zen_thread  = None
         self._zen_channel = None
         self._zen_metadata = None
-        # Per-position cumulative drift in µm (for diagnostics).  ZEN's
-        # current API does not expose a "modify stored position" RPC for a
-        # running experiment, so for multi-position runs our stage moves
-        # may be overridden by ZEN re-snapping to each scene's stored
-        # location.  We still log the per-position drift so the user can
-        # judge whether tracking is converging.
+        self._zen_status_task = None
+        # Per-position cumulative drift in µm (for diagnostics + as the
+        # source of truth for multi-scene TilesService updates).
         self._cum_drift = {pos: [0.0, 0.0, 0.0] for pos in self.position_names}
         # Serialise moves across positions so multiple in-flight RPCs
         # cannot interleave on the ZEN channel.
         self._move_lock = threading.Lock()
+        # Multi-scene-mode bookkeeping (only populated when
+        # ``multi_scene_mode`` is True).  ``_initial_pos_m[i]`` is the
+        # uncorrected stage+focus position of scene i in METERS, captured
+        # the first time we see ZEN acquiring that scene via
+        # register_on_status_changed.  Until every scene has its initial
+        # position captured we cannot apply corrections (we'd be wiping
+        # ZEN's stored positions with bogus values).
+        self._initial_pos_m   = [None] * self.n_scenes
+        self._pending_drift_um = [[0.0, 0.0, 0.0] for _ in range(self.n_scenes)]
+        self._pos_update_needed = False
+        self._last_acq_running  = False
+        self._pos_state_lock    = threading.Lock()
 
         # Per-position state
         self._patterns = {}     # pos_name → (prefix, suffix)
@@ -1331,11 +1358,152 @@ class MicroscopeInterface_Files:
                 host=self.zen_address, port=self.zen_port, ssl=ssl_ctx
             )
             self._zen_metadata = [("control-token", self.zen_control_token)]
+            # In multi-scene mode, also start the long-running status
+            # monitor.  We schedule it as a background task on this same
+            # loop so it shares the gRPC channel.
+            if self.multi_scene_mode:
+                self._zen_status_task = asyncio.create_task(
+                    self._status_monitor_loop()
+                )
 
         future = asyncio.run_coroutine_threadsafe(_open(), self._zen_loop)
         future.result(timeout=10)
         self.logger.info(
-            f"ZEN feedback channel opened to {self.zen_address}:{self.zen_port}"
+            f"ZEN feedback channel opened to {self.zen_address}:{self.zen_port} "
+            f"— mode: {'multi-scene (TilesService)' if self.multi_scene_mode else 'single-scene (StageService)'}"
+        )
+
+    async def _status_monitor_loop(self):
+        """Subscribe to ExperimentService.RegisterOnStatusChanged and:
+
+          1. On the first ``is_acquisition_running`` ⇒ True transition for
+             each ``scenes_index``, capture that scene's current
+             (XY, Z) via StageService + FocusService.  This gives us the
+             uncorrected baseline ZEN snapped to before acquiring.
+          2. Whenever acquisition stops (True ⇒ False), if any tracker
+             drift is pending AND every scene's baseline has been
+             captured, call TilesService.clear + add_positions with
+             (baseline + cum_drift) for every scene.
+
+        The stream is provided by gRPC as an async iterator and ends when
+        the experiment terminates.
+        """
+        try:
+            from zen_api.acquisition.v1beta import (
+                ExperimentServiceStub,
+                ExperimentServiceRegisterOnStatusChangedRequest,
+            )
+            from zen_api.lm.hardware.v2 import (
+                StageServiceStub,
+                StageServiceGetPositionRequest,
+                FocusServiceStub,
+                FocusServiceGetPositionRequest,
+            )
+        except ImportError as e:
+            self.logger.error(f"zen_api stubs not found: {e}")
+            return
+
+        exp_stub   = ExperimentServiceStub(channel=self._zen_channel,
+                                           metadata=self._zen_metadata)
+        stage_stub = StageServiceStub(channel=self._zen_channel,
+                                      metadata=self._zen_metadata)
+        focus_stub = FocusServiceStub(channel=self._zen_channel,
+                                      metadata=self._zen_metadata)
+
+        try:
+            async for resp in exp_stub.register_on_status_changed(
+                ExperimentServiceRegisterOnStatusChangedRequest(
+                    self.zen_experiment_id
+                )
+            ):
+                s = resp.status
+                if s.is_acquisition_running:
+                    idx = int(getattr(s, 'scenes_index', 0))
+                    if 0 <= idx < self.n_scenes and self._initial_pos_m[idx] is None:
+                        try:
+                            p = await stage_stub.get_position(
+                                StageServiceGetPositionRequest()
+                            )
+                            z = await focus_stub.get_position(
+                                FocusServiceGetPositionRequest()
+                            )
+                            self._initial_pos_m[idx] = (p.x, p.y, z.value)
+                            self.logger.info(
+                                f"Captured baseline for scene {idx}: "
+                                f"({p.x*1e6:+.1f}, {p.y*1e6:+.1f}, "
+                                f"{z.value*1e6:+.1f}) µm"
+                            )
+                        except Exception as e:
+                            self.logger.warning(
+                                f"Failed to read stage for scene {idx}: {e}"
+                            )
+                    self._last_acq_running = True
+                else:
+                    # Acquisition idle — safe window to update positions
+                    if self._last_acq_running:
+                        await self._apply_position_updates_async()
+                    self._last_acq_running = False
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            self.logger.warning(f"Status monitor stopped: {e}")
+
+    async def _apply_position_updates_async(self):
+        """Push current (baseline + cum_drift) to ZEN via TilesService."""
+        # Snapshot drift under lock; quickly bail if nothing to do.
+        with self._pos_state_lock:
+            if not self._pos_update_needed:
+                return
+            if any(p is None for p in self._initial_pos_m):
+                # Still waiting on first cycle to capture all baselines
+                return
+            drift = [list(d) for d in self._pending_drift_um]
+            self._pos_update_needed = False
+
+        try:
+            from zen_api.lm.acquisition.v1 import (
+                TilesServiceStub,
+                TilesServiceClearRequest,
+                TilesServiceAddPositionsRequest,
+                Position3D,
+            )
+        except ImportError as e:
+            self.logger.error(f"zen_api.lm.acquisition stubs not found: {e}")
+            return
+
+        tiles = TilesServiceStub(channel=self._zen_channel,
+                                 metadata=self._zen_metadata)
+        new_positions = []
+        for i in range(self.n_scenes):
+            ox, oy, oz = self._initial_pos_m[i]
+            dx, dy, dz = drift[i]
+            new_positions.append(Position3D(
+                x=ox + dx * 1e-6,
+                y=oy + dy * 1e-6,
+                z=oz + dz * 1e-6,
+            ))
+
+        try:
+            await tiles.clear(TilesServiceClearRequest(
+                experiment_id=self.zen_experiment_id
+            ))
+            await tiles.add_positions(TilesServiceAddPositionsRequest(
+                experiment_id=self.zen_experiment_id,
+                positions=new_positions,
+            ))
+        except Exception as e:
+            self.logger.error(f"TilesService update failed: {e}")
+            # Re-mark needed so we retry on the next idle window
+            with self._pos_state_lock:
+                self._pos_update_needed = True
+            return
+
+        self.logger.info(
+            "Applied TilesService position update — "
+            + ", ".join(
+                f"scene {i}: ({p.x*1e6:+.1f}, {p.y*1e6:+.1f}, {p.z*1e6:+.1f}) µm"
+                for i, p in enumerate(new_positions)
+            )
         )
 
     def _poll_loop(self):
@@ -1414,21 +1582,19 @@ class MicroscopeInterface_Files:
     def relative_move(self, position_name, shift_x, shift_y, shift_z):
         """Forward a tracker-computed shift to ZEN when feedback is on.
 
-        When ``zen_feedback`` is False this is a logging no-op so the
-        tracker can be exercised against on-disk frames without touching
-        the microscope.  When True we soft-clamp the shift to the
-        configured limits, take a global lock so concurrent per-position
-        moves can't interleave, and call ``StageService.move_to`` /
-        ``FocusService.move_to`` on the ZEN gateway.
-
-        Multi-position note:
-        ZEN's stage is global — one shared XYZ.  The current ZEN API does
-        not expose a "modify stored position for scene N" RPC, so for
-        multi-scene experiments the shift we apply here may be overwritten
-        when ZEN moves the stage back to the scene's stored location
-        before the next acquisition.  We track per-position cumulative
-        drift so you can monitor whether tracking is converging even when
-        the stage commands aren't being honoured.
+        Three modes:
+          - ``zen_feedback`` False → no-op (logging only).  Use this when
+            replaying recorded TIFs offline.
+          - ``multi_scene_mode`` True (n_scenes > 1, experiment_id set)
+            → don't move the stage live.  Accumulate per-scene drift; the
+            background status-monitor task applies it via
+            ``TilesService.clear`` + ``add_positions`` whenever ZEN is
+            between acquisitions.  This is the right path for tile /
+            multi-position experiments because ZEN re-snaps the stage to
+            each scene's stored position before every acquisition.
+          - Otherwise → single-scene live stage moves via
+            ``StageService.move_to`` + ``FocusService.move_to`` (the
+            previous default).
         """
         if not self.zen_feedback or self._zen_loop is None:
             self.logger.debug(
@@ -1450,13 +1616,39 @@ class MicroscopeInterface_Files:
         shift_y = _clamp(shift_y, self.max_xy_um, 'Y')
         shift_z = _clamp(shift_z, self.max_z_um,  'Z')
 
-        # Accumulate per-position drift before issuing the move so we
-        # have a record even if the gRPC call fails.
+        # Accumulate per-position drift (diagnostic copy used by the
+        # cumulative-drift log line and end-of-run summary).
         drift = self._cum_drift.setdefault(position_name, [0.0, 0.0, 0.0])
         drift[0] += shift_x
         drift[1] += shift_y
         drift[2] += shift_z
 
+        # ── Multi-scene mode ──────────────────────────────────────────────
+        # Do NOT touch the stage live; the status monitor will apply the
+        # accumulated drift via TilesService when ZEN is idle between
+        # acquisitions.
+        if self.multi_scene_mode:
+            scene_idx = self._scene_index_for(position_name)
+            if scene_idx is None:
+                self.logger.warning(
+                    f"[{position_name}] could not map to a scene index — "
+                    "drift recorded but won't be pushed to ZEN."
+                )
+                return
+            with self._pos_state_lock:
+                self._pending_drift_um[scene_idx][0] += shift_x
+                self._pending_drift_um[scene_idx][1] += shift_y
+                self._pending_drift_um[scene_idx][2] += shift_z
+                self._pos_update_needed = True
+            self.logger.info(
+                f"[{position_name}] scene_idx={scene_idx} queued drift "
+                f"({shift_x:+.2f}, {shift_y:+.2f}, {shift_z:+.2f}) µm  "
+                f"cumulative=({drift[0]:+.2f}, {drift[1]:+.2f}, "
+                f"{drift[2]:+.2f}) µm"
+            )
+            return
+
+        # ── Single-scene mode ─────────────────────────────────────────────
         with self._move_lock:
             future = asyncio.run_coroutine_threadsafe(
                 self._async_relative_move(shift_x, shift_y, shift_z),
@@ -1472,6 +1664,22 @@ class MicroscopeInterface_Files:
                 )
             except Exception as e:
                 self.logger.error(f"[{position_name}] stage move failed: {e}")
+
+    def _scene_index_for(self, position_name):
+        """Map a tracker position name to the ZEN scene index.
+
+        Convention from ``ZenIngest``: position folders are named
+        ``scene_{i:03d}`` (zero-padded).  We parse the trailing integer.
+        Falls back to ``self.position_names.index(position_name)`` for
+        legacy / custom names.
+        """
+        m = self._re.match(r'^scene_(\d+)$', position_name)
+        if m:
+            return int(m.group(1))
+        try:
+            return self.position_names.index(position_name)
+        except ValueError:
+            return None
 
     async def _async_relative_move(self, dx_um, dy_um, dz_um):
         """Query current stage / focus and apply a relative offset.
