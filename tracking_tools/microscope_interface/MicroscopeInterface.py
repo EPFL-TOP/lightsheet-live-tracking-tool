@@ -1410,6 +1410,11 @@ class MicroscopeInterface_Files:
         focus_stub = FocusServiceStub(channel=self._zen_channel,
                                       metadata=self._zen_metadata)
 
+        self.logger.info(
+            f"Status monitor subscribing to experiment {self.zen_experiment_id} "
+            f"(watching {self.n_scenes} scene(s))"
+        )
+        last_idx_logged = None
         try:
             async for resp in exp_stub.register_on_status_changed(
                 ExperimentServiceRegisterOnStatusChangedRequest(
@@ -1417,8 +1422,21 @@ class MicroscopeInterface_Files:
                 )
             ):
                 s = resp.status
-                if s.is_acquisition_running:
-                    idx = int(getattr(s, 'scenes_index', 0))
+                idx = int(getattr(s, 'scenes_index', 0))
+                acq = bool(s.is_acquisition_running)
+                tp  = int(getattr(s, 'time_points_index', 0))
+                # Verbose per-event log so we can see exactly what ZEN
+                # sends us (acq running, which scene index, which tp).
+                # Filtered to only fire when something interesting changes
+                # — otherwise the stream can be very chatty.
+                if (idx, acq) != last_idx_logged:
+                    self.logger.info(
+                        f"[status] tp={tp} scene_idx={idx} "
+                        f"acq_running={acq}"
+                    )
+                    last_idx_logged = (idx, acq)
+
+                if acq:
                     if 0 <= idx < self.n_scenes and self._initial_pos_m[idx] is None:
                         try:
                             p = await stage_stub.get_position(
