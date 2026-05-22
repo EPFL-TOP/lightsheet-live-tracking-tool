@@ -1241,10 +1241,15 @@ class MicroscopeInterface_Files:
     def refresh_filename(self, pos_name):
         """Public hook called by TrackingRunner.reinitialize_tracker."""
         self._refresh_filename_unlocked(pos_name)
+        # Reset per-position cumulative drift — the new tracker tracks a
+        # (possibly different) target on a (possibly different) channel,
+        # so the previous drift no longer reflects anything meaningful.
+        self._cum_drift[pos_name] = [0.0, 0.0, 0.0]
         prefix, suffix = self._patterns[pos_name]
         self.logger.info(
             f"[{pos_name}] tracking filename updated to "
-            f"{prefix}{{N}}{suffix} — starting at T={self._next_tp[pos_name]}"
+            f"{prefix}{{N}}{suffix} — starting at T={self._next_tp[pos_name]}, "
+            f"cumulative drift reset to 0"
         )
 
     # ------------------------------------------------------------------
@@ -1273,6 +1278,16 @@ class MicroscopeInterface_Files:
             f"for {len(self.position_names)} position(s) — "
             f"stage feedback: {'ON' if self.zen_feedback else 'OFF'}"
         )
+        # Explicit per-position summary at startup so a multi-scene run
+        # makes obvious which positions are being watched and with which
+        # filename pattern / starting timepoint.
+        for pos_name in self.position_names:
+            prefix, suffix = self._patterns.get(pos_name, ('t', '.tif'))
+            self.logger.info(
+                f"  [{pos_name}] pattern={prefix}{{N:04d}}{suffix} "
+                f"start_T={self._next_tp.get(pos_name, 0)} "
+                f"cumulative=(0.00, 0.00, 0.00) µm"
+            )
 
     # ------------------------------------------------------------------
     def _open_zen_channel(self):
@@ -1511,6 +1526,16 @@ class MicroscopeInterface_Files:
         if self._thread is not None:
             self._thread.join(timeout=5)
             self._thread = None
+
+        # Final per-position drift summary so the user can see at a glance
+        # how much each scene drifted over the whole run.
+        if any(any(v != 0.0 for v in d) for d in self._cum_drift.values()):
+            self.logger.info("Final cumulative drift per position:")
+            for pos_name, d in self._cum_drift.items():
+                self.logger.info(
+                    f"  [{pos_name}] cumulative=({d[0]:+.2f}, "
+                    f"{d[1]:+.2f}, {d[2]:+.2f}) µm"
+                )
 
         # Tear down the ZEN feedback loop + channel
         if self._zen_loop is not None:
