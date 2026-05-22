@@ -261,6 +261,31 @@ def _ensure_root_logger():
 
 # ─── ZEN experiment control (API-started) ──────────────────────────────────
 
+def _run_coro_blocking(coro):
+    """Run an asyncio coroutine in a worker thread with its own event loop.
+
+    Panel button callbacks fire inside Tornado's running event loop, so a
+    plain ``asyncio.run(...)`` raises "cannot be called from a running event
+    loop".  This helper offloads the coroutine to a dedicated daemon thread,
+    blocks until it returns, and surfaces the result or exception to the
+    caller.
+    """
+    out = {}
+
+    def _worker():
+        try:
+            out['v'] = asyncio.run(coro)
+        except BaseException as e:  # noqa: BLE001 — re-raise on the caller
+            out['e'] = e
+
+    t = threading.Thread(target=_worker, daemon=True, name='ZenApiCall')
+    t.start()
+    t.join()
+    if 'e' in out:
+        raise out['e']
+    return out.get('v')
+
+
 def _open_grpc_channel_sync():
     """Open a fresh grpclib channel using the panel's ZEN connection widgets.
 
@@ -344,7 +369,7 @@ async def _stop_experiment_async(exp_id):
 def _on_refresh_exps(event):
     _ensure_root_logger()
     try:
-        names = asyncio.run(_list_experiments_async())
+        names = _run_coro_blocking(_list_experiments_async())
         if not names:
             w_exp_name_select.options = ['']
             w_exp_name_select.value = ''
@@ -369,7 +394,7 @@ def _on_start_exp(event):
         out = f"track_{name}"
         logging.info(f"Output filename was empty, defaulting to '{out}'")
     try:
-        exp_id = asyncio.run(_start_experiment_async(name, out))
+        exp_id = _run_coro_blocking(_start_experiment_async(name, out))
         _state['experiment_id']   = exp_id
         _state['experiment_name'] = name
         exp_status_md.object = (
@@ -393,7 +418,7 @@ def _on_stop_exp(event):
         logging.warning("No API-started experiment to stop.")
         return
     try:
-        asyncio.run(_stop_experiment_async(exp_id))
+        _run_coro_blocking(_stop_experiment_async(exp_id))
         logging.info(f"Stopped ZEN experiment {name!r}  id={exp_id}")
     except Exception as e:
         logging.error(f"Stop experiment failed: {e}", exc_info=True)
