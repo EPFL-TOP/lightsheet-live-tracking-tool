@@ -172,13 +172,28 @@ async def main(cfg_path):
             if not xml_str:
                 print("      export: <empty XML>")
             else:
+                # Always save the full XML so we can grep / inspect it
+                # offline.  This is the most useful artifact for figuring
+                # out the position-tag schema when our heuristic walker
+                # comes up empty.
+                safe_name = re.sub(r'[^A-Za-z0-9._-]+', '_', name)
+                out_path = os.path.abspath(f'export_{safe_name}.xml')
+                with open(out_path, 'w', encoding='utf-8') as f:
+                    f.write(xml_str)
+                print(f"      export XML saved to: {out_path}  ({len(xml_str)} chars)")
+
                 positions, err = _extract_positions_from_xml(xml_str)
                 if err:
                     print(f"      export XML: {err}")
                 elif not positions:
-                    print("      export XML parsed but no positions found.")
-                    print("      Dumping first 400 chars so you can see the schema:")
-                    print("      " + xml_str[:400].replace("\n", "\n      "))
+                    print("      X/Y/Z heuristic found no positions.")
+                    # Helpful hints for where to look next.
+                    for needle in ('Position', 'Tile', 'SinglePosition',
+                                   'TileRegion', 'CarrierMap', 'X='):
+                        if needle.lower() in xml_str.lower():
+                            print(f"        hint: substring {needle!r} "
+                                  f"appears in the XML — open the file and "
+                                  f"search for it to find the position schema.")
                 else:
                     print(f"      export XML: {len(positions)} position-like element(s):")
                     for tag, (x, y, z) in positions:
