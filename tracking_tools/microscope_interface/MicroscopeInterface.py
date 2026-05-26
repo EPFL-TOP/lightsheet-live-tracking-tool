@@ -1204,12 +1204,29 @@ class MicroscopeInterface_Files:
         self._move_lock = threading.Lock()
         # Multi-scene-mode bookkeeping (only populated when
         # ``multi_scene_mode`` is True).  ``_initial_pos_m[i]`` is the
-        # uncorrected stage+focus position of scene i in METERS, captured
-        # the first time we see ZEN acquiring that scene via
-        # register_on_status_changed.  Until every scene has its initial
-        # position captured we cannot apply corrections (we'd be wiping
-        # ZEN's stored positions with bogus values).
-        self._initial_pos_m   = [None] * self.n_scenes
+        # uncorrected stage+focus position of scene i in METERS.
+        #
+        # Source of truth for these values:
+        #   1. ``file_params['initial_positions_um']`` — if non-empty, the
+        #      user explicitly provided baselines via the panel text area.
+        #      Each entry is ``(x, y, z)`` in µm; we convert to metres.
+        #   2. Auto-capture from ZEN ``StageService.GetPosition`` the first
+        #      time ``register_on_status_changed`` reports a scene as
+        #      acquiring.  This is racy (status events lag the stage), so
+        #      we use it only for slots the user didn't fill in.
+        # Until every slot is populated we won't apply corrections — that
+        # avoids wiping ZEN's stored positions with bogus values.
+        manual_um = file_params.get('initial_positions_um') or []
+        self._initial_pos_m = [None] * self.n_scenes
+        for i, p in enumerate(manual_um[:self.n_scenes]):
+            if p is None:
+                continue
+            x_um, y_um, z_um = p
+            self._initial_pos_m[i] = (
+                float(x_um) * 1e-6,
+                float(y_um) * 1e-6,
+                float(z_um) * 1e-6,
+            )
         self._pending_drift_um = [[0.0, 0.0, 0.0] for _ in range(self.n_scenes)]
         self._pos_update_needed = False
         self._last_acq_running  = False
@@ -1315,6 +1332,19 @@ class MicroscopeInterface_Files:
                 f"start_T={self._next_tp.get(pos_name, 0)} "
                 f"cumulative=(0.00, 0.00, 0.00) µm"
             )
+        # Baseline status for multi-scene mode
+        if self.multi_scene_mode:
+            for i, p in enumerate(self._initial_pos_m):
+                if p is None:
+                    self.logger.info(
+                        f"  scene {i}: baseline = <auto-discover from ZEN>"
+                    )
+                else:
+                    self.logger.info(
+                        f"  scene {i}: baseline = "
+                        f"({p[0]*1e6:+.1f}, {p[1]*1e6:+.1f}, "
+                        f"{p[2]*1e6:+.1f}) µm  [manual]"
+                    )
 
     # ------------------------------------------------------------------
     def _open_zen_channel(self):
@@ -1438,6 +1468,14 @@ class MicroscopeInterface_Files:
 
                 if acq:
                     if 0 <= idx < self.n_scenes and self._initial_pos_m[idx] is None:
+                        # Small settle delay: ZEN reports
+                        # is_acquisition_running=True slightly before the
+                        # stage finishes snapping to the scene's stored
+                        # position.  Without a delay we read mid-transit
+                        # and get the previous scene's coordinates.  This
+                        # only mitigates the race — for production use,
+                        # prefer the manual-baseline text area in the panel.
+                        await asyncio.sleep(0.5)
                         try:
                             p = await stage_stub.get_position(
                                 StageServiceGetPositionRequest()
@@ -1449,7 +1487,7 @@ class MicroscopeInterface_Files:
                             self.logger.info(
                                 f"Captured baseline for scene {idx}: "
                                 f"({p.x*1e6:+.1f}, {p.y*1e6:+.1f}, "
-                                f"{z.value*1e6:+.1f}) µm"
+                                f"{z.value*1e6:+.1f}) µm  [auto, racy]"
                             )
                         except Exception as e:
                             self.logger.warning(

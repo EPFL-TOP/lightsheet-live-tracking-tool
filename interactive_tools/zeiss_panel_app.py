@@ -28,6 +28,7 @@ Launch with::
 import asyncio
 import configparser
 import os
+import re
 import ssl
 import sys
 import queue
@@ -190,7 +191,67 @@ btn_start_exp = pn.widgets.Button(
 btn_stop_exp = pn.widgets.Button(
     name='Stop experiment', button_type='warning', width=160, disabled=True,
 )
+w_initial_positions = pn.widgets.TextAreaInput(
+    name='Initial scene positions in µm (one per line: x, y, z)',
+    placeholder='# Optional — leave blank to auto-discover from ZEN.\n# One line per scene, in scene-index order:\n0, 0, 0\n1000, 1000, 0',
+    height=110, width=560,
+)
+baseline_preview_md = pn.pane.Markdown(
+    '_Leave blank to auto-discover via ZEN status events (racy).  Fill in to '
+    'pre-seed the multi-scene TilesService updates with exact baselines._',
+    width=560,
+)
 exp_status_md = pn.pane.Markdown('_No experiment started via API_', width=560)
+
+
+@pn.depends(w_initial_positions, watch=True)
+def _update_baseline_preview(text):
+    positions, errors = _parse_initial_positions(text)
+    if not positions and not errors:
+        baseline_preview_md.object = (
+            '_Leave blank to auto-discover via ZEN status events (racy).  '
+            'Fill in to pre-seed the multi-scene TilesService updates with '
+            'exact baselines._'
+        )
+        return
+    lines = [f"**Parsed {len(positions)} baseline(s):**"]
+    for i, (x, y, z) in enumerate(positions):
+        lines.append(f"- scene {i}: ({x:+.1f}, {y:+.1f}, {z:+.1f}) µm")
+    if errors:
+        lines.append("")
+        lines.append("**Errors:**")
+        for err in errors:
+            lines.append(f"- ⚠️ {err}")
+    baseline_preview_md.object = "\n".join(lines)
+
+
+def _parse_initial_positions(text):
+    """Parse the manual-baseline text area into a list of ``(x, y, z)``
+    tuples in µm.  Empty lines and ``#`` comments are ignored.  Each
+    line must have 2 (x,y) or 3 (x,y,z) comma- or whitespace-separated
+    floats.  Returns ``(positions, errors)``."""
+    positions = []
+    errors = []
+    for lineno, raw in enumerate((text or '').splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        # Allow comma-, whitespace-, or semicolon-separated values
+        parts = [p for p in re.split(r'[,;\s]+', line) if p]
+        try:
+            nums = [float(p) for p in parts]
+        except ValueError:
+            errors.append(f"line {lineno}: cannot parse '{raw}'")
+            continue
+        if len(nums) == 2:
+            nums.append(0.0)
+        elif len(nums) != 3:
+            errors.append(
+                f"line {lineno}: expected 2 or 3 numbers, got {len(nums)}"
+            )
+            continue
+        positions.append(tuple(nums))
+    return positions, errors
 
 
 # ─── Run / Stop ─────────────────────────────────────────────────────────────
@@ -632,17 +693,35 @@ def _run_tracking():
                 use_feedback = False
             else:
                 use_feedback = w_use_feedback.value
+
+            # Manual baseline positions (µm) override auto-discovery.  Empty
+            # text area → fall back to status-stream auto-capture for every
+            # scene.  Partial entry is allowed: only the scenes for which a
+            # line was given are pre-populated; the rest auto-discover.
+            initial_positions_um, _pos_errors = _parse_initial_positions(
+                w_initial_positions.value
+            )
+            for err in _pos_errors:
+                logging.warning(f"Initial positions: {err}")
+            if initial_positions_um and len(initial_positions_um) != n_scenes:
+                logging.warning(
+                    f"Initial positions: {len(initial_positions_um)} entries "
+                    f"but n_scenes={n_scenes}.  Missing scenes will use "
+                    f"auto-discovery from ZEN status events."
+                )
+
             file_params = {
-                'poll_interval_s':    w_ingest_poll.value,
-                'zen_feedback':       use_feedback,
-                'zen_address':        w_zen_address.value.strip(),
-                'zen_port':           w_zen_port.value,
-                'zen_cert_path':      w_zen_cert.value.strip(),
-                'zen_control_token':  w_zen_token.value,
-                'zen_experiment_id':  running_exp_id,
-                'n_scenes':           n_scenes,
-                'max_xy_um':          w_max_xy.value,
-                'max_z_um':           w_max_z.value,
+                'poll_interval_s':       w_ingest_poll.value,
+                'zen_feedback':          use_feedback,
+                'zen_address':           w_zen_address.value.strip(),
+                'zen_port':              w_zen_port.value,
+                'zen_cert_path':         w_zen_cert.value.strip(),
+                'zen_control_token':     w_zen_token.value,
+                'zen_experiment_id':     running_exp_id,
+                'n_scenes':              n_scenes,
+                'max_xy_um':             w_max_xy.value,
+                'max_z_um':              w_max_z.value,
+                'initial_positions_um':  initial_positions_um,
             }
             microscope = MicroscopeInterface_Files(
                 positions_config=position_config,
@@ -753,6 +832,8 @@ experiment_section = pn.Column(
     ),
     pn.Row(w_exp_name_select, btn_refresh_exps),
     w_exp_output_name,
+    w_initial_positions,
+    baseline_preview_md,
     pn.Row(btn_start_exp, btn_stop_exp),
     exp_status_md,
 )

@@ -31,11 +31,64 @@ from zen_api.acquisition.v1beta import (
     ExperimentServiceGetAvailableExperimentsRequest,
     ExperimentServiceGetStatusRequest,
     ExperimentServiceLoadRequest,
+    ExperimentServiceExportRequest,
 )
 from zen_api.lm.acquisition.v1 import (
     TilesServiceStub,
     TilesServiceIsTilesExperimentRequest,
 )
+
+
+import re
+import xml.etree.ElementTree as ET
+
+
+def _extract_positions_from_xml(xml_str):
+    """Find any (x, y, z) tuples that look like stored stage positions.
+
+    ZEN's .czexp XML layout isn't fully documented, but in observed
+    samples positions show up as elements containing X, Y (and optional Z)
+    child tags under a region like ``SingleTileRegions`` or
+    ``MultiTrackSetup/PositionList``.  Rather than hard-code one path we
+    walk the tree and accept any element whose children include an ``X``
+    and ``Y`` tag with a parseable float value (Z is optional).
+
+    Returns a list of tuples ``(tag_path, (x, y, z))`` so the caller can
+    see *where* in the XML each candidate came from — useful while
+    figuring out the right XPath to use programmatically.
+    """
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError as e:
+        return [], f"XML parse error: {e}"
+
+    out = []
+    # Strip namespaces for easier matching
+    for elem in root.iter():
+        elem.tag = re.sub(r'^\{[^}]+\}', '', elem.tag)
+
+    def _to_float(s):
+        if s is None:
+            return None
+        try:
+            return float(s.strip())
+        except (ValueError, AttributeError):
+            return None
+
+    for elem in root.iter():
+        children = {c.tag: c for c in elem}
+        x_node = children.get('X') or children.get('x')
+        y_node = children.get('Y') or children.get('y')
+        if x_node is None or y_node is None:
+            continue
+        x = _to_float(x_node.text)
+        y = _to_float(y_node.text)
+        if x is None or y is None:
+            continue
+        z_node = children.get('Z') or children.get('z')
+        z = _to_float(z_node.text) if z_node is not None else 0.0
+        out.append((elem.tag, (x, y, z)))
+    return out, None
 
 
 def _open_channel(cfg_path):
@@ -109,6 +162,29 @@ async def main(cfg_path):
                   f"{is_tiles.is_tiles_experiment}")
         except Exception as ex:
             print(f"      is_tiles_experiment FAILED: {ex}")
+
+        # Try to recover stored positions from the experiment XML.
+        try:
+            xml_resp = await exp_svc.export(
+                ExperimentServiceExportRequest(experiment_id=exp_id)
+            )
+            xml_str = xml_resp.xml
+            if not xml_str:
+                print("      export: <empty XML>")
+            else:
+                positions, err = _extract_positions_from_xml(xml_str)
+                if err:
+                    print(f"      export XML: {err}")
+                elif not positions:
+                    print("      export XML parsed but no positions found.")
+                    print("      Dumping first 400 chars so you can see the schema:")
+                    print("      " + xml_str[:400].replace("\n", "\n      "))
+                else:
+                    print(f"      export XML: {len(positions)} position-like element(s):")
+                    for tag, (x, y, z) in positions:
+                        print(f"        <{tag}>  x={x}  y={y}  z={z}")
+        except Exception as ex:
+            print(f"      export FAILED: {ex}")
 
     channel.close()
 
