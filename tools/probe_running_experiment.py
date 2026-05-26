@@ -43,6 +43,56 @@ import re
 import xml.etree.ElementTree as ET
 
 
+def _extract_single_tile_regions(xml_str):
+    """Pull positions out of ZEN's ``<SingleTileRegions>`` block.
+
+    Verified against ``test-tracking-clement.czexp`` in 2026-05.  Schema::
+
+        <SingleTileRegions>
+          <SingleTileRegion Name="P1" Id="…">
+            <X>0</X>
+            <Y>0</Y>
+            <Z>0</Z>
+            …
+          </SingleTileRegion>
+          …
+        </SingleTileRegions>
+
+    Returns a list of ``(name, (x, y, z))`` tuples in whatever unit ZEN
+    stored the values in (µm in observed samples).  X/Y/Z may live
+    directly under ``<SingleTileRegion>`` or one level deeper inside a
+    ``<Center>`` element — we search both.
+    """
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError:
+        return []
+
+    # Strip namespaces so tag lookups are simple
+    for elem in root.iter():
+        elem.tag = re.sub(r'^\{[^}]+\}', '', elem.tag)
+
+    def _f(node):
+        if node is None or node.text is None:
+            return None
+        try:
+            return float(node.text.strip())
+        except ValueError:
+            return None
+
+    out = []
+    for region in root.iter('SingleTileRegion'):
+        name = region.get('Name') or '?'
+        # Try direct children first, then any <Center>-like descendant
+        x = _f(region.find('X')) or _f(region.find('.//Center/X'))
+        y = _f(region.find('Y')) or _f(region.find('.//Center/Y'))
+        z = _f(region.find('Z')) or _f(region.find('.//Center/Z')) or 0.0
+        if x is None or y is None:
+            continue
+        out.append((name, (x, y, z)))
+    return out
+
+
 def _extract_positions_from_xml(xml_str):
     """Find any (x, y, z) tuples that look like stored stage positions.
 
@@ -181,6 +231,13 @@ async def main(cfg_path):
                 with open(out_path, 'w', encoding='utf-8') as f:
                     f.write(xml_str)
                 print(f"      export XML saved to: {out_path}  ({len(xml_str)} chars)")
+
+                # Targeted parse for the ZEN <SingleTileRegions> schema
+                stile = _extract_single_tile_regions(xml_str)
+                if stile:
+                    print(f"      SingleTileRegions: {len(stile)} entry/ies")
+                    for nm, (x, y, z) in stile:
+                        print(f"        {nm}: x={x}  y={y}  z={z}")
 
                 positions, err = _extract_positions_from_xml(xml_str)
                 if err:
