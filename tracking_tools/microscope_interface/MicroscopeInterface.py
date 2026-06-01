@@ -1388,13 +1388,6 @@ class MicroscopeInterface_Files:
                 host=self.zen_address, port=self.zen_port, ssl=ssl_ctx
             )
             self._zen_metadata = [("control-token", self.zen_control_token)]
-            # In multi-scene mode, also start the long-running status
-            # monitor.  We schedule it as a background task on this same
-            # loop so it shares the gRPC channel.
-            if self.multi_scene_mode:
-                self._zen_status_task = asyncio.create_task(
-                    self._status_monitor_loop()
-                )
 
         future = asyncio.run_coroutine_threadsafe(_open(), self._zen_loop)
         future.result(timeout=10)
@@ -1402,6 +1395,32 @@ class MicroscopeInterface_Files:
             f"ZEN feedback channel opened to {self.zen_address}:{self.zen_port} "
             f"— mode: {'multi-scene (TilesService)' if self.multi_scene_mode else 'single-scene (StageService)'}"
         )
+
+        # Start the long-running status monitor as its own scheduled
+        # coroutine.  Using ``run_coroutine_threadsafe`` here (rather than
+        # ``asyncio.create_task`` inside ``_open()``) is the bulletproof
+        # pattern: it returns a concurrent.futures.Future that we keep a
+        # strong reference to, the loop knows it's a top-level task, and
+        # we can observe the task with ``.done()`` / ``.exception()``.
+        if self.multi_scene_mode:
+            self.logger.info(
+                "Scheduling _status_monitor_loop on ZEN feedback loop"
+            )
+            self._zen_status_task = asyncio.run_coroutine_threadsafe(
+                self._status_monitor_loop(), self._zen_loop
+            )
+            # Drain the result asynchronously so any startup error
+            # (e.g. ImportError on zen_api submodules) is surfaced
+            # rather than swallowed.
+            def _on_status_done(fut):
+                try:
+                    fut.result()
+                except Exception as e:
+                    self.logger.error(
+                        f"_status_monitor_loop exited with: {e}",
+                        exc_info=True,
+                    )
+            self._zen_status_task.add_done_callback(_on_status_done)
 
     async def _status_monitor_loop(self):
         """Subscribe to ExperimentService.RegisterOnStatusChanged and:
@@ -1823,6 +1842,14 @@ class MicroscopeInterface_Files:
 
         # Tear down the ZEN feedback loop + channel
         if self._zen_loop is not None:
+            # Cancel the status monitor first so its async-for stream
+            # exits cleanly before the channel is closed under it.
+            if self._zen_status_task is not None:
+                try:
+                    self._zen_status_task.cancel()
+                except Exception:
+                    pass
+                self._zen_status_task = None
             try:
                 if self._zen_channel is not None:
                     async def _close():
