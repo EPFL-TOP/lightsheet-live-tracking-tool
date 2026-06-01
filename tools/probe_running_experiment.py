@@ -80,13 +80,21 @@ def _extract_single_tile_regions(xml_str):
         except ValueError:
             return None
 
+    def _pick(region, child_name):
+        # ``a or b`` would return b when a == 0.0; use ``is None``
+        direct = _f(region.find(child_name))
+        if direct is not None:
+            return direct
+        return _f(region.find(f'.//Center/{child_name}'))
+
     out = []
     for region in root.iter('SingleTileRegion'):
         name = region.get('Name') or '?'
-        # Try direct children first, then any <Center>-like descendant
-        x = _f(region.find('X')) or _f(region.find('.//Center/X'))
-        y = _f(region.find('Y')) or _f(region.find('.//Center/Y'))
-        z = _f(region.find('Z')) or _f(region.find('.//Center/Z')) or 0.0
+        x = _pick(region, 'X')
+        y = _pick(region, 'Y')
+        z = _pick(region, 'Z')
+        if z is None:
+            z = 0.0
         if x is None or y is None:
             continue
         out.append((name, (x, y, z)))
