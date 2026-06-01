@@ -1444,7 +1444,20 @@ class MicroscopeInterface_Files:
             f"Status monitor subscribing to experiment {self.zen_experiment_id} "
             f"(watching {self.n_scenes} scene(s))"
         )
+        # Empirical observation from the smoke test: ZEN sends 2 events per
+        # scene per cycle, with ``is_acquisition_running`` set to True the
+        # whole time (it never flips to False between cycles — it just
+        # stops sending events during the time-lapse interval).  So we
+        # can't use ``acq=False`` as the trigger for "apply position
+        # updates".  Instead we detect the *post-acquire* event of the
+        # last scene in a cycle: scene_idx == n_scenes-1 *and* the same
+        # scene index just reported a previous event (= second event in
+        # a row, i.e. the image was just captured rather than ZEN having
+        # just snapped to a new scene).  After that event ZEN goes idle
+        # for the time-lapse interval, which is exactly when we want to
+        # rewrite the position list.
         last_idx_logged = None
+        prev_scene_idx  = -1
         try:
             async for resp in exp_stub.register_on_status_changed(
                 ExperimentServiceRegisterOnStatusChangedRequest(
@@ -1452,53 +1465,60 @@ class MicroscopeInterface_Files:
                 )
             ):
                 s = resp.status
-                idx = int(getattr(s, 'scenes_index', 0))
-                acq = bool(s.is_acquisition_running)
-                tp  = int(getattr(s, 'time_points_index', 0))
-                # Verbose per-event log so we can see exactly what ZEN
-                # sends us (acq running, which scene index, which tp).
-                # Filtered to only fire when something interesting changes
-                # — otherwise the stream can be very chatty.
+                idx  = int(getattr(s, 'scenes_index', 0))
+                acq  = bool(s.is_acquisition_running)
+                tp   = int(getattr(s, 'time_points_index', 0))
+                imgs = int(getattr(s, 'images_acquired_index', 0))
                 if (idx, acq) != last_idx_logged:
                     self.logger.info(
                         f"[status] tp={tp} scene_idx={idx} "
-                        f"acq_running={acq}"
+                        f"acq_running={acq} imgs={imgs}"
                     )
                     last_idx_logged = (idx, acq)
 
-                if acq:
-                    if 0 <= idx < self.n_scenes and self._initial_pos_m[idx] is None:
-                        # Small settle delay: ZEN reports
-                        # is_acquisition_running=True slightly before the
-                        # stage finishes snapping to the scene's stored
-                        # position.  Without a delay we read mid-transit
-                        # and get the previous scene's coordinates.  This
-                        # only mitigates the race — for production use,
-                        # prefer the manual-baseline text area in the panel.
-                        await asyncio.sleep(0.5)
-                        try:
-                            p = await stage_stub.get_position(
-                                StageServiceGetPositionRequest()
-                            )
-                            z = await focus_stub.get_position(
-                                FocusServiceGetPositionRequest()
-                            )
-                            self._initial_pos_m[idx] = (p.x, p.y, z.value)
-                            self.logger.info(
-                                f"Captured baseline for scene {idx}: "
-                                f"({p.x*1e6:+.1f}, {p.y*1e6:+.1f}, "
-                                f"{z.value*1e6:+.1f}) µm  [auto, racy]"
-                            )
-                        except Exception as e:
-                            self.logger.warning(
-                                f"Failed to read stage for scene {idx}: {e}"
-                            )
-                    self._last_acq_running = True
-                else:
-                    # Acquisition idle — safe window to update positions
-                    if self._last_acq_running:
-                        await self._apply_position_updates_async()
-                    self._last_acq_running = False
+                if acq and 0 <= idx < self.n_scenes \
+                        and self._initial_pos_m[idx] is None:
+                    # Auto-discovery fallback for baselines the user
+                    # didn't manually enter.  Racy because ZEN reports
+                    # ``acq=True`` slightly before the stage settles;
+                    # prefer the panel's manual baseline text area.
+                    await asyncio.sleep(0.5)
+                    try:
+                        p = await stage_stub.get_position(
+                            StageServiceGetPositionRequest()
+                        )
+                        z = await focus_stub.get_position(
+                            FocusServiceGetPositionRequest()
+                        )
+                        self._initial_pos_m[idx] = (p.x, p.y, z.value)
+                        self.logger.info(
+                            f"Captured baseline for scene {idx}: "
+                            f"({p.x*1e6:+.1f}, {p.y*1e6:+.1f}, "
+                            f"{z.value*1e6:+.1f}) µm  [auto, racy]"
+                        )
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Failed to read stage for scene {idx}: {e}"
+                        )
+
+                # Trigger: end-of-cycle = last scene's post-acquire event.
+                # Post-acquire is the *second* event in a row for the
+                # same scene_idx (first event is the pre-acquire snap).
+                if (idx == self.n_scenes - 1
+                        and idx == prev_scene_idx):
+                    self.logger.info(
+                        f"[cycle end] tp={tp} last-scene post-acquire "
+                        f"detected — applying position updates"
+                    )
+                    await self._apply_position_updates_async()
+
+                prev_scene_idx = idx
+
+                # Defensive: keep the old acq=False handler too in case
+                # a future ZEN release does flip the flag between cycles.
+                if not acq and self._last_acq_running:
+                    await self._apply_position_updates_async()
+                self._last_acq_running = acq
         except asyncio.CancelledError:
             pass
         except Exception as e:
