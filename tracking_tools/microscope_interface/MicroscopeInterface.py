@@ -1066,13 +1066,28 @@ class MicroscopeInterface_Zeiss:
         """
         try:
             from zen_api.lm.hardware.v2 import (
-                StageServiceStub,
-                StageServiceGetPositionRequest,
-                StageServiceMoveToRequest,
                 FocusServiceStub,
                 FocusServiceGetPositionRequest,
                 FocusServiceMoveToRequest,
             )
+            try:
+                from zen_api.hardware.v1 import (
+                    StageServiceStub,
+                    StageServiceGetStagePositionRequest as _StageGetReq,
+                    StageServiceMoveToRequest,
+                    StageAxis,
+                    AxisIdentifier,
+                )
+                _stage_api = 'v1_per_axis'
+            except ImportError:
+                from zen_api.lm.hardware.v2 import (
+                    StageServiceStub,
+                    StageServiceGetPositionRequest as _StageGetReq,
+                    StageServiceMoveToRequest,
+                )
+                StageAxis = None
+                AxisIdentifier = None
+                _stage_api = 'lm_v2_xy'
         except ImportError as e:
             self.logger.error(f"zen_api hardware stubs not found: {e}")
             return
@@ -1083,13 +1098,28 @@ class MicroscopeInterface_Zeiss:
         focus_stub = FocusServiceStub(channel=self._channel, metadata=self._metadata)
 
         if abs(dx_um) > 1e-3 or abs(dy_um) > 1e-3:
-            pos = await stage_stub.get_position(StageServiceGetPositionRequest())
-            await stage_stub.move_to(
-                StageServiceMoveToRequest(
-                    x=pos.x + dx_um * 1e-6,
-                    y=pos.y + dy_um * 1e-6,
+            if _stage_api == 'v1_per_axis':
+                resp = await stage_stub.get_stage_position(_StageGetReq())
+                cur_x = cur_y = 0.0
+                for a in resp.axis_positions:
+                    if a.axis == AxisIdentifier.X:
+                        cur_x = a.position
+                    elif a.axis == AxisIdentifier.Y:
+                        cur_y = a.position
+                await stage_stub.move_to(StageServiceMoveToRequest(
+                    axis_to_move=[
+                        StageAxis(axis=AxisIdentifier.X, position=cur_x + dx_um * 1e-6),
+                        StageAxis(axis=AxisIdentifier.Y, position=cur_y + dy_um * 1e-6),
+                    ]
+                ))
+            else:
+                pos = await stage_stub.get_position(_StageGetReq())
+                await stage_stub.move_to(
+                    StageServiceMoveToRequest(
+                        x=pos.x + dx_um * 1e-6,
+                        y=pos.y + dy_um * 1e-6,
+                    )
                 )
-            )
 
         if abs(dz_um) > 1e-3:
             z_pos = await focus_stub.get_position(FocusServiceGetPositionRequest())
@@ -1438,12 +1468,32 @@ class MicroscopeInterface_Files:
                     ExperimentServiceStub,
                     ExperimentServiceRegisterOnStatusChangedRequest,
                 )
+                # Focus stays in lm/hardware/v2 in both 2025.10 and 2026.05.
                 from zen_api.lm.hardware.v2 import (
-                    StageServiceStub,
-                    StageServiceGetPositionRequest,
                     FocusServiceStub,
                     FocusServiceGetPositionRequest,
                 )
+                # Stage moved between releases:
+                #   2025.10:  zen_api.lm.hardware.v2.StageServiceStub
+                #             + StageServiceGetPositionRequest → .x .y
+                #   2026.05:  zen_api.hardware.v1.StageServiceStub
+                #             + StageServiceGetStagePositionRequest →
+                #             .axis_positions: List[StageAxis]
+                # Detect which one is available.
+                try:
+                    from zen_api.hardware.v1 import (
+                        StageServiceStub,
+                        StageServiceGetStagePositionRequest as _StageGetReq,
+                        AxisIdentifier as _AxisId,
+                    )
+                    _stage_api = 'v1_per_axis'
+                except ImportError:
+                    from zen_api.lm.hardware.v2 import (
+                        StageServiceStub,
+                        StageServiceGetPositionRequest as _StageGetReq,
+                    )
+                    _AxisId = None
+                    _stage_api = 'lm_v2_xy'
             except ImportError as e:
                 print(f"[status-monitor] IMPORT FAILED: {e}",
                       file=sys.stderr, flush=True)
@@ -1522,16 +1572,27 @@ class MicroscopeInterface_Files:
                     # prefer the panel's manual baseline text area.
                     await asyncio.sleep(0.5)
                     try:
-                        p = await stage_stub.get_position(
-                            StageServiceGetPositionRequest()
-                        )
+                        # Cross-version stage read
+                        if _stage_api == 'v1_per_axis':
+                            resp = await stage_stub.get_stage_position(
+                                _StageGetReq()
+                            )
+                            px = py = 0.0
+                            for a in resp.axis_positions:
+                                if a.axis == _AxisId.X:
+                                    px = a.position
+                                elif a.axis == _AxisId.Y:
+                                    py = a.position
+                        else:
+                            p = await stage_stub.get_position(_StageGetReq())
+                            px, py = p.x, p.y
                         z = await focus_stub.get_position(
                             FocusServiceGetPositionRequest()
                         )
-                        self._initial_pos_m[idx] = (p.x, p.y, z.value)
+                        self._initial_pos_m[idx] = (px, py, z.value)
                         self.logger.info(
                             f"Captured baseline for scene {idx}: "
-                            f"({p.x*1e6:+.1f}, {p.y*1e6:+.1f}, "
+                            f"({px*1e6:+.1f}, {py*1e6:+.1f}, "
                             f"{z.value*1e6:+.1f}) µm  [auto, racy]"
                         )
                     except Exception as e:
@@ -1812,13 +1873,30 @@ class MicroscopeInterface_Files:
         """
         try:
             from zen_api.lm.hardware.v2 import (
-                StageServiceStub,
-                StageServiceGetPositionRequest,
-                StageServiceMoveToRequest,
                 FocusServiceStub,
                 FocusServiceGetPositionRequest,
                 FocusServiceMoveToRequest,
             )
+            try:
+                # 2026.05: per-axis Stage API in zen_api.hardware.v1
+                from zen_api.hardware.v1 import (
+                    StageServiceStub,
+                    StageServiceGetStagePositionRequest as _StageGetReq,
+                    StageServiceMoveToRequest,
+                    StageAxis,
+                    AxisIdentifier,
+                )
+                _stage_api = 'v1_per_axis'
+            except ImportError:
+                # 2025.10 and earlier: XY-keyed Stage API in lm/hardware/v2
+                from zen_api.lm.hardware.v2 import (
+                    StageServiceStub,
+                    StageServiceGetPositionRequest as _StageGetReq,
+                    StageServiceMoveToRequest,
+                )
+                StageAxis = None
+                AxisIdentifier = None
+                _stage_api = 'lm_v2_xy'
         except ImportError as e:
             self.logger.error(f"zen_api hardware stubs not found: {e}")
             return
@@ -1827,13 +1905,28 @@ class MicroscopeInterface_Files:
         focus_stub = FocusServiceStub(channel=self._zen_channel, metadata=self._zen_metadata)
 
         if abs(dx_um) > 1e-3 or abs(dy_um) > 1e-3:
-            pos = await stage_stub.get_position(StageServiceGetPositionRequest())
-            await stage_stub.move_to(
-                StageServiceMoveToRequest(
-                    x=pos.x + dx_um * 1e-6,
-                    y=pos.y + dy_um * 1e-6,
+            if _stage_api == 'v1_per_axis':
+                resp = await stage_stub.get_stage_position(_StageGetReq())
+                cur_x = cur_y = 0.0
+                for a in resp.axis_positions:
+                    if a.axis == AxisIdentifier.X:
+                        cur_x = a.position
+                    elif a.axis == AxisIdentifier.Y:
+                        cur_y = a.position
+                await stage_stub.move_to(StageServiceMoveToRequest(
+                    axis_to_move=[
+                        StageAxis(axis=AxisIdentifier.X, position=cur_x + dx_um * 1e-6),
+                        StageAxis(axis=AxisIdentifier.Y, position=cur_y + dy_um * 1e-6),
+                    ]
+                ))
+            else:
+                pos = await stage_stub.get_position(_StageGetReq())
+                await stage_stub.move_to(
+                    StageServiceMoveToRequest(
+                        x=pos.x + dx_um * 1e-6,
+                        y=pos.y + dy_um * 1e-6,
+                    )
                 )
-            )
 
         if abs(dz_um) > 1e-3:
             z_pos = await focus_stub.get_position(FocusServiceGetPositionRequest())
