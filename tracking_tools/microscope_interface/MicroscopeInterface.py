@@ -1423,46 +1423,56 @@ class MicroscopeInterface_Files:
             self._zen_status_task.add_done_callback(_on_status_done)
 
     async def _status_monitor_loop(self):
-        """Subscribe to ExperimentService.RegisterOnStatusChanged and:
-
-          1. On the first ``is_acquisition_running`` ⇒ True transition for
-             each ``scenes_index``, capture that scene's current
-             (XY, Z) via StageService + FocusService.  This gives us the
-             uncorrected baseline ZEN snapped to before acquiring.
-          2. Whenever acquisition stops (True ⇒ False), if any tracker
-             drift is pending AND every scene's baseline has been
-             captured, call TilesService.clear + add_positions with
-             (baseline + cum_drift) for every scene.
-
-        The stream is provided by gRPC as an async iterator and ends when
-        the experiment terminates.
-        """
+        """Subscribe to ExperimentService.RegisterOnStatusChanged and apply
+        ``TilesService`` position updates between cycles.  See body for
+        the per-event trigger logic."""
+        # Diagnostic prints (sys.stderr) — needed because we don't yet
+        # know whether the loop is actually running this coroutine on
+        # the user's setup; if the entry log line below never appears
+        # we want a separate channel that bypasses the logger.
+        import sys
+        print("[status-monitor] coroutine ENTERED", file=sys.stderr, flush=True)
         try:
-            from zen_api.acquisition.v1beta import (
-                ExperimentServiceStub,
-                ExperimentServiceRegisterOnStatusChangedRequest,
-            )
-            from zen_api.lm.hardware.v2 import (
-                StageServiceStub,
-                StageServiceGetPositionRequest,
-                FocusServiceStub,
-                FocusServiceGetPositionRequest,
-            )
-        except ImportError as e:
-            self.logger.error(f"zen_api stubs not found: {e}")
-            return
+            try:
+                from zen_api.acquisition.v1beta import (
+                    ExperimentServiceStub,
+                    ExperimentServiceRegisterOnStatusChangedRequest,
+                )
+                from zen_api.lm.hardware.v2 import (
+                    StageServiceStub,
+                    StageServiceGetPositionRequest,
+                    FocusServiceStub,
+                    FocusServiceGetPositionRequest,
+                )
+            except ImportError as e:
+                print(f"[status-monitor] IMPORT FAILED: {e}",
+                      file=sys.stderr, flush=True)
+                self.logger.error(f"zen_api stubs not found: {e}")
+                return
 
-        exp_stub   = ExperimentServiceStub(channel=self._zen_channel,
-                                           metadata=self._zen_metadata)
-        stage_stub = StageServiceStub(channel=self._zen_channel,
-                                      metadata=self._zen_metadata)
-        focus_stub = FocusServiceStub(channel=self._zen_channel,
-                                      metadata=self._zen_metadata)
+            print("[status-monitor] imports OK", file=sys.stderr, flush=True)
 
-        self.logger.info(
-            f"Status monitor subscribing to experiment {self.zen_experiment_id} "
-            f"(watching {self.n_scenes} scene(s))"
-        )
+            exp_stub   = ExperimentServiceStub(channel=self._zen_channel,
+                                               metadata=self._zen_metadata)
+            stage_stub = StageServiceStub(channel=self._zen_channel,
+                                          metadata=self._zen_metadata)
+            focus_stub = FocusServiceStub(channel=self._zen_channel,
+                                          metadata=self._zen_metadata)
+            print("[status-monitor] stubs constructed", file=sys.stderr, flush=True)
+
+            self.logger.info(
+                f"Status monitor subscribing to experiment {self.zen_experiment_id} "
+                f"(watching {self.n_scenes} scene(s))"
+            )
+            print(
+                f"[status-monitor] subscribing to experiment "
+                f"{self.zen_experiment_id} ({self.n_scenes} scenes)",
+                file=sys.stderr, flush=True,
+            )
+        except Exception as e:
+            print(f"[status-monitor] FAILED before subscribe: {e!r}",
+                  file=sys.stderr, flush=True)
+            raise
         # Empirical observation from the smoke test: ZEN sends 2 events per
         # scene per cycle, with ``is_acquisition_running`` set to True the
         # whole time (it never flips to False between cycles — it just
@@ -1477,6 +1487,8 @@ class MicroscopeInterface_Files:
         # rewrite the position list.
         last_idx_logged = None
         prev_scene_idx  = -1
+        import sys as _sys
+        first_event = True
         try:
             async for resp in exp_stub.register_on_status_changed(
                 ExperimentServiceRegisterOnStatusChangedRequest(
@@ -1488,6 +1500,13 @@ class MicroscopeInterface_Files:
                 acq  = bool(s.is_acquisition_running)
                 tp   = int(getattr(s, 'time_points_index', 0))
                 imgs = int(getattr(s, 'images_acquired_index', 0))
+                if first_event:
+                    print(
+                        f"[status-monitor] FIRST event received: "
+                        f"tp={tp} scene={idx} acq={acq} imgs={imgs}",
+                        file=_sys.stderr, flush=True,
+                    )
+                    first_event = False
                 if (idx, acq) != last_idx_logged:
                     self.logger.info(
                         f"[status] tp={tp} scene_idx={idx} "
