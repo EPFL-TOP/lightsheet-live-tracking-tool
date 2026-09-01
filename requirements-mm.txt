@@ -1,0 +1,11 @@
+# Optional dependencies for the Micro-Manager backend.
+# Users on LS1 (Viventis) or the ZEN file-watching path do not need
+# these — the main requirements.txt is sufficient.
+#
+# Install with:  pip install -r requirements-mm.txt
+# After install, run once:  mmcore install  (grabs the MM device DLLs)
+
+pymmcore-plus>=0.18,<0.20
+useq-schema>=0.5
+scipy>=1.11        # for center-of-mass in the smoke test
+# numpy, tifffile already pinned in requirements.txt

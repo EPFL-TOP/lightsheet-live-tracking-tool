@@ -622,7 +622,18 @@ class MicroscopeInterface_Zeiss:
         self.position_to_scene = {n: i for i, n in enumerate(self.position_names)}
  
         self.logger = init_logger(self.__class__.__name__)
- 
+
+    # ------------------------------------------------------------------
+    def refresh_filename(self, pos_name):
+        """No-op on the ZEN backend.
+
+        ZEN cannot repoint the tracking channel mid-acquisition without
+        tearing down and re-establishing the streaming subscription.
+        Users who need mid-run channel switches should use the Files
+        or Micromanager backend instead.
+        """
+        pass
+
     # ------------------------------------------------------------------
     def connect(self):
         self._stop_event.clear()
@@ -1327,6 +1338,19 @@ class MicroscopeInterface_Files:
         )
 
     # ------------------------------------------------------------------
+    # LS1-contract compatibility stubs — the files backend has no
+    # "pause between positions" concept, so these are no-ops.  They
+    # exist so the runner's LS1 path (run_LS1) can dispatch to us
+    # without AttributeError'ing.
+    def wait_for_pause(self, timeout_ms=1000):
+        """LS1 contract compatibility — files backend has no pause cycle."""
+        return self.wait_for_image(timeout_ms)
+
+    def pause_after_position(self):    pass
+    def no_pause_after_position(self): pass
+    def continue_from_pause(self):     pass
+
+    # ------------------------------------------------------------------
     def connect(self):
         self._stop_event.clear()
         self.stop_requested = False
@@ -1984,3 +2008,490 @@ class MicroscopeInterface_Files:
         self.stop_requested = True
         self.disconnect()
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Micro-Manager (pymmcore-plus) — FLAGSHIP backend going forward.
+#
+# This class is the successor to the ZEN interface for hardware feedback: it
+# talks to any Micro-Manager-supported microscope through pymmcore-plus and
+# drives an MDA (Multi-Dimensional Acquisition) sequence that we ourselves
+# enqueue timepoint-by-timepoint.  Feedback loop:
+#
+#   1. connect() loads the MM system config and starts run_mda() with an
+#      infinite iterator-backed event queue.
+#   2. The MDA engine executes each MDAEvent on its own thread; when a frame
+#      is captured, the ``frameReady`` signal fires (on that same MDA thread).
+#   3. Our frameReady handler:
+#        (a) optionally substitutes the DemoCamera image with a synthetic
+#            source (Phase-A smoke test path),
+#        (b) saves the frame to disk (t{NNNN}_{channel}.tif),
+#        (c) pushes (image, tp, pos_name) onto ``self._image_queue`` — the
+#            tracker-facing queue that ``wait_for_image`` reads.
+#      When the LAST scene of a cycle has produced its frameReady, we
+#      UNCONDITIONALLY enqueue MDAEvents for all scenes at the next
+#      timepoint (guarded only by ``stop_after_tp``).  This is Bug 1
+#      prevention: zero-drift 5-cycle runs must complete.
+#   4. relative_move() runs on the tracker thread and only mutates
+#      ``self._cum_drift`` under a lock — this is Bug 2 prevention.
+#      _enqueue_timepoint reads that dict when it builds the NEXT event
+#      for the scene, adding the offset to the baseline stored at __init__.
+#   5. Baselines come from ``positions_config[pos_name]["xyz_um"]`` — never
+#      from ``mmc.getXYPosition``.  This is Bug 3 prevention.
+# ─────────────────────────────────────────────────────────────────────────────
+class MicroscopeInterface_Micromanager:
+    """Live Micro-Manager backend via pymmcore-plus.
+
+    Public interface (matches ``MicroscopeInterface_LS1`` /
+    ``MicroscopeInterface_Files``):
+
+        wait_for_image(timeout_ms) -> (image, tp, pos_name) or (None, None, None)
+        relative_move(pos_name, dx, dy, dz)
+        connect(); disconnect(); stop()
+        refresh_filename(pos_name)
+        pause_after_position(); no_pause_after_position(); continue_from_pause()
+    """
+
+    def __init__(self, positions_config, dirpath, mm_params):
+        # ── Local imports so ZEN / LS1 users don't need pymmcore-plus ──
+        # We import here (not at module level) so importing this module
+        # never fails for LS1 / ZEN / Files users who lack pymmcore-plus.
+        try:
+            import pymmcore_plus  # noqa: F401  (probe availability)
+            from useq import MDAEvent
+        except ImportError as e:
+            raise ImportError(
+                "pymmcore-plus and useq are required for "
+                "MicroscopeInterface_Micromanager. Install with:\n"
+                "    pip install pymmcore-plus useq-schema"
+            ) from e
+        self._MDAEvent = MDAEvent
+
+        self.positions_config = positions_config
+        self.dirpath = str(dirpath)
+        self.position_names = list(positions_config.keys())
+
+        # ── mm_params defaults ────────────────────────────────────────
+        mm_params = mm_params or {}
+        self.cfg_path         = mm_params.get('cfg_path', '')
+        self.channel_group    = mm_params.get('channel_group', 'Channel')
+        self.channel_preset   = mm_params.get('channel_preset', 'Brightfield')
+        self.exposure_ms      = float(mm_params.get('exposure_ms', 100.0))
+        self.z_stack          = mm_params.get('z_stack', None)
+        self.interval_s       = float(mm_params.get('interval_s', 0.0))
+        self.max_xy_um        = float(mm_params.get('max_xy_um', 500.0))
+        self.max_z_um         = float(mm_params.get('max_z_um', 100.0))
+        self.synthetic_source = mm_params.get('synthetic_source', None)
+        self.stop_after_tp    = mm_params.get('stop_after_tp', None)
+
+        self.logger = init_logger(self.__class__.__name__)
+
+        # ── Bug 3 prevention: baselines from positions_config ─────────
+        self._baseline_um = {}
+        for pos_name in self.position_names:
+            xyz = positions_config.get(pos_name, {}).get('xyz_um')
+            if xyz is None:
+                self.logger.warning(
+                    f"[{pos_name}] positions_config missing 'xyz_um' — "
+                    "defaulting to (0.0, 0.0, 0.0). This position will start "
+                    "at MM's current stage location; correct by editing the "
+                    "positions config."
+                )
+                self._baseline_um[pos_name] = (0.0, 0.0, 0.0)
+            else:
+                x, y, z = xyz
+                self._baseline_um[pos_name] = (float(x), float(y), float(z))
+
+        # ── Threading + queue plumbing ────────────────────────────────
+        # _cum_drift is the tracker-owned adjustment applied on top of the
+        # baseline every time we build the next MDAEvent for the scene.
+        self._cum_drift = {p: [0.0, 0.0, 0.0] for p in self.position_names}
+        self._drift_lock = threading.Lock()          # protects _cum_drift
+        self._config_lock = threading.Lock()         # protects _baseline_um & channel_preset
+        self._image_queue = queue.Queue()            # frameReady -> tracker
+        self._mda_queue = queue.Queue()              # us -> MDA engine
+        self._stop_event = threading.Event()
+        self._mda_future = None                      # from run_mda()
+        # Per-cycle bookkeeping (populated in frameReady on the MDA thread)
+        self._current_tp = 0
+        self._scenes_seen_this_tp = set()
+        self._cycle_lock = threading.Lock()
+        self.stop_requested = False
+
+        # Filled in by connect()
+        self.mmc = None
+
+    # ------------------------------------------------------------------
+    def _wait_for_device(self, device, timeout_s=5.0):
+        """Poll ``mmc.deviceBusy`` with 10 ms sleeps, raise on timeout.
+
+        Use this everywhere we'd otherwise call ``mmc.waitForDevice`` —
+        the built-in version has no upper bound and can hang forever if
+        a device gets wedged.
+        """
+        deadline = time.monotonic() + float(timeout_s)
+        while time.monotonic() < deadline:
+            try:
+                if not self.mmc.deviceBusy(device):
+                    return
+            except Exception:
+                # deviceBusy can raise on undefined-yet devices; treat as
+                # transient and keep polling.
+                pass
+            time.sleep(0.01)
+        raise TimeoutError(
+            f"Device {device!r} still busy after {timeout_s:.2f}s"
+        )
+
+    # ------------------------------------------------------------------
+    def connect(self):
+        from pymmcore_plus import CMMCorePlus
+
+        self._stop_event.clear()
+        self.stop_requested = False
+        self.mmc = CMMCorePlus.instance()
+
+        if self.cfg_path:
+            self.logger.info(f"Loading MM config: {self.cfg_path}")
+            self.mmc.loadSystemConfiguration(self.cfg_path)
+        else:
+            self.logger.info("Loading MM demo config (no cfg_path given)")
+            self.mmc.loadSystemConfiguration()
+
+        # Device-interface-version assertion: log so drift is visible
+        try:
+            self.logger.info(f"MMCore API version:    {self.mmc.getAPIVersionInfo()}")
+            self.logger.info(f"MMCore build version:  {self.mmc.getVersionInfo()}")
+        except Exception as e:
+            self.logger.warning(f"Could not read MMCore version info: {e}")
+
+        # Configure channel + exposure
+        with self._config_lock:
+            _cp = self.channel_preset
+        try:
+            self.mmc.setConfig(self.channel_group, _cp)
+        except Exception as e:
+            self.logger.warning(
+                f"Could not set channel {self.channel_group}/"
+                f"{_cp}: {e} — using current setting"
+            )
+        self.mmc.setExposure(self.exposure_ms)
+
+        # Wire frameReady BEFORE starting the MDA
+        self.mmc.mda.events.frameReady.connect(self._on_frame_ready)
+
+        # Prime the MDA queue with tp=0 for every scene
+        self._current_tp = 0
+        self._scenes_seen_this_tp = set()
+        self._enqueue_timepoint(0)
+
+        # Start MDA with a generator that drains _mda_queue.  When the
+        # queue yields a sentinel (None), the generator returns and the
+        # MDA engine finishes cleanly.
+        def _event_iterator():
+            while not self._stop_event.is_set():
+                try:
+                    ev = self._mda_queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                if ev is None:
+                    return
+                yield ev
+
+        self._mda_future = self.mmc.run_mda(_event_iterator())
+        self.logger.info(
+            f"MDA started — {len(self.position_names)} scene(s), "
+            f"interval={self.interval_s:.2f}s, "
+            f"z_stack={'ON' if self.z_stack else 'OFF'}, "
+            f"synthetic_source={'ON' if self.synthetic_source else 'OFF'}"
+        )
+
+    # ------------------------------------------------------------------
+    def _enqueue_timepoint(self, tp):
+        """Build one MDAEvent per scene at timepoint ``tp`` and drop them
+        onto the MDA queue.  Runs on:
+          - the tracker thread (once, from connect() at tp=0), and
+          - the MDA thread (from _on_frame_ready when a cycle completes).
+        Reads ``_cum_drift`` under lock — Bug 2 propagation site.
+        """
+        if self.stop_after_tp is not None and tp >= int(self.stop_after_tp):
+            self.logger.info(
+                f"stop_after_tp={self.stop_after_tp} reached — signalling "
+                "MDA engine to finish"
+            )
+            self._mda_queue.put(None)
+            return
+
+        with self._drift_lock:
+            drift_snapshot = {p: tuple(d) for p, d in self._cum_drift.items()}
+
+        with self._config_lock:
+            channel_preset_snapshot = self.channel_preset
+
+        for scene_idx, pos_name in enumerate(self.position_names):
+            with self._config_lock:
+                baseline_snapshot = self._baseline_um[pos_name]
+            bx, by, bz = baseline_snapshot
+            dx, dy, dz = drift_snapshot.get(pos_name, (0.0, 0.0, 0.0))
+            x_um = bx + dx
+            y_um = by + dy
+            z_um = bz + dz
+
+            # Optional z-stack: enqueue one event per slice; we keep the
+            # position + timepoint metadata identical so frameReady can
+            # collapse them if desired.  For Phase A we treat the middle
+            # slice as the tracker-visible frame (last-slice fires the
+            # cycle-advance).  Simpler path: single-slice event.
+            if self.z_stack:
+                rng = float(self.z_stack.get('range_um', 0.0))
+                step = float(self.z_stack.get('step_um', 1.0))
+                n_slices = max(1, int(round(rng / step)) + 1)
+                zs = np.linspace(z_um - rng / 2.0, z_um + rng / 2.0, n_slices)
+            else:
+                zs = [z_um]
+
+            for z_idx, zv in enumerate(zs):
+                # useq.MDAEvent metadata is user-defined — we stuff the
+                # tracker's per-frame context in there so frameReady can
+                # recover it without needing an external side channel.
+                meta = {
+                    'pos_name': pos_name,
+                    'tp': tp,
+                    'scene_idx': scene_idx,
+                    'z_idx': z_idx,
+                    'n_z': len(zs),
+                    'is_last_scene': (scene_idx == len(self.position_names) - 1),
+                }
+                ev = self._MDAEvent(
+                    index={'t': tp, 'p': scene_idx, 'z': z_idx},
+                    x_pos=x_um,
+                    y_pos=y_um,
+                    z_pos=float(zv),
+                    exposure=self.exposure_ms,
+                    channel={'group': self.channel_group,
+                             'config': channel_preset_snapshot},
+                    min_start_time=(tp * self.interval_s
+                                    if self.interval_s > 0 else None),
+                    metadata=meta,
+                )
+                self._mda_queue.put(ev)
+
+        self.logger.info(
+            f"Enqueued tp={tp} for {len(self.position_names)} scene(s); "
+            f"drift snapshot: "
+            + ", ".join(f"{p}=({d[0]:+.2f},{d[1]:+.2f},{d[2]:+.2f})"
+                        for p, d in drift_snapshot.items())
+        )
+
+    # ------------------------------------------------------------------
+    def _on_frame_ready(self, image, event, metadata=None):
+        """Runs on the MDA engine thread.
+
+        Signature is compatible with pymmcore-plus' ``frameReady`` signal,
+        which emits ``(image, event, metadata)``; older versions emit
+        only ``(image, event)`` — the ``metadata=None`` default handles
+        both.
+        """
+        try:
+            meta = getattr(event, 'metadata', None) or {}
+            pos_name = meta.get('pos_name')
+            tp = meta.get('tp', 0)
+            z_idx = meta.get('z_idx', 0)
+            n_z = meta.get('n_z', 1)
+            is_last_scene = bool(meta.get('is_last_scene', False))
+
+            if pos_name is None:
+                # Not one of our events — ignore
+                return
+
+            # ── Synthetic substitution ──────────────────────────────
+            if self.synthetic_source is not None:
+                try:
+                    synth = self.synthetic_source(
+                        float(event.x_pos), float(event.y_pos),
+                        float(event.z_pos), pos_name,
+                    )
+                    if synth is not None:
+                        image = synth
+                except Exception as e:
+                    self.logger.warning(
+                        f"synthetic_source raised for {pos_name} "
+                        f"tp={tp}: {e} — falling back to camera image"
+                    )
+
+            # ── Save + enqueue only the "representative" slice ──────
+            # For a z-stack we save every slice under a slice-suffixed
+            # name, but only the middle slice is pushed to the tracker
+            # (the tracker consumes 2-D frames).
+            save_dir = os.path.join(self.dirpath, pos_name)
+            os.makedirs(save_dir, exist_ok=True)
+            with self._config_lock:
+                channel_preset_snapshot = self.channel_preset
+            if n_z > 1:
+                tif_name = f"t{tp:04d}_{channel_preset_snapshot}_z{z_idx:03d}.tif"
+            else:
+                tif_name = f"t{tp:04d}_{channel_preset_snapshot}.tif"
+            tif_path = os.path.join(save_dir, tif_name)
+            try:
+                tifffile.imwrite(tif_path, np.asarray(image))
+            except Exception as e:
+                self.logger.warning(f"Could not save {tif_path}: {e}")
+
+            tracker_slice = (z_idx == n_z // 2)
+            if tracker_slice:
+                self._image_queue.put((np.asarray(image), tp, pos_name))
+                self.logger.info(
+                    f"[{pos_name}] tp={tp} frame queued -> tracker "
+                    f"(saved {tif_name})"
+                )
+
+            # ── Bug 1 prevention: cycle advance ─────────────────────
+            # When the LAST scene of a cycle has emitted its LAST z-slice,
+            # UNCONDITIONALLY enqueue the next timepoint.  We do NOT gate
+            # this on drift, so zero-drift runs complete.  We use a lock
+            # to keep the "scenes_seen" bookkeeping consistent when
+            # z-stack events for the same tp interleave.
+            do_enqueue = False
+            next_tp = tp + 1
+            if is_last_scene and z_idx == n_z - 1:
+                with self._cycle_lock:
+                    self._scenes_seen_this_tp.add(pos_name)
+                    if len(self._scenes_seen_this_tp) >= len(self.position_names):
+                        self._scenes_seen_this_tp.clear()
+                        self._current_tp = next_tp
+                        do_enqueue = True
+            elif not is_last_scene and z_idx == n_z - 1:
+                with self._cycle_lock:
+                    self._scenes_seen_this_tp.add(pos_name)
+
+            if do_enqueue:
+                # Enqueue outside cycle lock — Bug 1: UNCONDITIONAL.
+                self._enqueue_timepoint(next_tp)
+
+        except Exception as e:
+            self.logger.error(f"frameReady handler crashed: {e}",
+                              exc_info=True)
+
+    # ------------------------------------------------------------------
+    def wait_for_image(self, timeout_ms=1000):
+        try:
+            return self._image_queue.get(timeout=timeout_ms / 1000.0)
+        except queue.Empty:
+            return None, None, None
+
+    # ------------------------------------------------------------------
+    def wait_for_pause(self, timeout_ms=1000):
+        """Alias for wait_for_image — LS1 contract compatibility."""
+        return self.wait_for_image(timeout_ms)
+
+    # ------------------------------------------------------------------
+    def relative_move(self, position_name, shift_x, shift_y, shift_z):
+        """Bug 2 prevention: mutate ``_cum_drift`` synchronously under a
+        lock and return.  The updated value is applied by
+        ``_enqueue_timepoint`` when the NEXT event for that scene is
+        built.  We do NOT touch the stage directly — the MDA engine
+        drives the stage via ``x_pos``/``y_pos``/``z_pos`` on each event.
+        """
+        # Soft clamp
+        def _clamp(v, limit, axis):
+            if abs(v) > limit:
+                self.logger.warning(
+                    f"[{position_name}] {axis} shift {v:.1f} µm "
+                    f"exceeds limit {limit:.0f} µm — clamped"
+                )
+                return math.copysign(limit, v)
+            return v
+
+        sx = _clamp(float(shift_x), self.max_xy_um, 'X')
+        sy = _clamp(float(shift_y), self.max_xy_um, 'Y')
+        sz = _clamp(float(shift_z), self.max_z_um,  'Z')
+
+        with self._drift_lock:
+            d = self._cum_drift.setdefault(position_name, [0.0, 0.0, 0.0])
+            d[0] += sx
+            d[1] += sy
+            d[2] += sz
+            snapshot = tuple(d)
+
+        self.logger.info(
+            f"[{position_name}] cum_drift updated: shift=({sx:+.2f},"
+            f"{sy:+.2f},{sz:+.2f}) µm  cumulative=({snapshot[0]:+.2f},"
+            f"{snapshot[1]:+.2f},{snapshot[2]:+.2f}) µm"
+        )
+
+    # ------------------------------------------------------------------
+    def refresh_filename(self, pos_name):
+        """Called by TrackingRunner after the ROI dashboard rewrote the
+        positions JSON.  Re-read the entry and update the channel /
+        baseline if they changed.  Logs a warning when ``xyz_um`` moved
+        mid-run (unusual but valid — e.g. the user manually re-centered)."""
+        cfg = self.positions_config.get(pos_name, {})
+        new_channel = cfg.get('channel_preset')
+        if new_channel and new_channel != self.channel_preset:
+            self.logger.info(
+                f"[{pos_name}] channel preset updated: "
+                f"{self.channel_preset!r} → {new_channel!r}"
+            )
+            with self._config_lock:
+                self.channel_preset = new_channel
+
+        new_xyz = cfg.get('xyz_um')
+        if new_xyz is not None:
+            new_tuple = (float(new_xyz[0]), float(new_xyz[1]), float(new_xyz[2]))
+            with self._config_lock:
+                old_tuple = self._baseline_um.get(pos_name)
+            if old_tuple is not None and new_tuple != old_tuple:
+                self.logger.warning(
+                    f"[{pos_name}] xyz_um baseline changed mid-run: "
+                    f"{old_tuple} → {new_tuple} (unusual but honored)"
+                )
+                with self._config_lock:
+                    self._baseline_um[pos_name] = new_tuple
+
+    # ------------------------------------------------------------------
+    # LS1-contract compatibility stubs — Micro-Manager doesn't expose a
+    # "pause between positions" concept the way Viventis does, so these
+    # are no-ops.  They exist so callers can treat any interface the
+    # same.
+    def pause_after_position(self):    pass
+    def no_pause_after_position(self): pass
+    def continue_from_pause(self):     pass
+
+    # ------------------------------------------------------------------
+    def disconnect(self):
+        self._stop_event.set()
+        # Poison the MDA queue so the event iterator returns and the
+        # engine exits cleanly.
+        try:
+            self._mda_queue.put_nowait(None)
+        except Exception:
+            pass
+
+        if self.mmc is not None:
+            try:
+                self.mmc.mda.events.frameReady.disconnect(self._on_frame_ready)
+            except Exception:
+                pass
+            try:
+                if self._mda_future is not None:
+                    # pymmcore-plus MDA futures expose .cancel() / .join()
+                    if hasattr(self._mda_future, 'cancel'):
+                        self._mda_future.cancel()
+                    if hasattr(self._mda_future, 'join'):
+                        self._mda_future.join(timeout=5)
+            except Exception as e:
+                self.logger.warning(f"Error stopping MDA: {e}")
+
+        # Final per-position drift summary — mirrors Files interface
+        with self._drift_lock:
+            drift_snapshot = dict(self._cum_drift)
+        if any(any(v != 0.0 for v in d) for d in drift_snapshot.values()):
+            self.logger.info("Final cumulative drift per position:")
+            for pos_name, d in drift_snapshot.items():
+                self.logger.info(
+                    f"  [{pos_name}] cumulative=({d[0]:+.2f}, "
+                    f"{d[1]:+.2f}, {d[2]:+.2f}) µm"
+                )
+
+    def stop(self):
+        self.stop_requested = True
+        self.disconnect()

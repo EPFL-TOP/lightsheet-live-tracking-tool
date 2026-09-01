@@ -1,5 +1,18 @@
 # lightsheet-live-tracking-tool
 
+## Quick demo (no hardware)
+
+See closed-loop tracking work on a synthetic drifting embryo in
+~5 minutes — no microscope required:
+
+```bash
+pip install -r requirements-mm.txt
+mmcore install
+python tools/mm_democam_smoke_test.py
+```
+
+See docs/micromanager_backend.md for details.
+
 ## Demo Videos
 | Using Tracker predictions only| Using Detection and Sensor Fusion|
 |:------------------------------:|:----------------------------------:|

@@ -1,6 +1,9 @@
 """
-Zeiss Tracking Panel App
-========================
+Tracking Panel App
+==================
+(Historical filename: zeiss_panel_app.py — kept for URL stability;
+this file now hosts MM / LS1 / ZEN backends behind a dropdown.)
+
 Standalone Panel / Bokeh application driving the live-tracking tool.
 
 Default workflow (file-watching, no microscope feedback)
@@ -262,6 +265,103 @@ btn_stop.disabled = True
 
 w_log = pn.widgets.TextAreaInput(
     name='Log output', value='', height=320, disabled=True, width=780
+)
+
+run_status_md = pn.pane.Markdown('_Ready._', width=560)
+
+
+def _set_run_status(msg):
+    """Update the run-status pane from any thread.
+
+    Panel widget mutations must happen on the Bokeh document thread, so we
+    schedule the update via ``pn.state.execute`` when available and fall
+    back to a direct assignment (e.g. during module import or when no
+    server session exists).
+    """
+    def _apply():
+        run_status_md.object = msg
+    try:
+        pn.state.execute(_apply)
+    except Exception:
+        run_status_md.object = msg
+
+
+# ─── Backend selector ───────────────────────────────────────────────────────
+
+w_backend = pn.widgets.Select(
+    name='Microscope backend',
+    options=['Micro-Manager',
+             'LS1 (Viventis)',
+             'ZEN (closed Zeiss: LSM / Lightsheet 7 / Elyra)'],
+    value='Micro-Manager',
+    width=560,
+)
+
+backend_notice_md = pn.pane.Markdown(
+    '_ZEN users: select the ZEN backend below to see ingest + experiment '
+    'controls._',
+    width=560,
+)
+
+
+# ─── Micro-Manager backend widgets ──────────────────────────────────────────
+
+w_mm_cfg_path = pn.widgets.TextInput(
+    name='MM configuration (.cfg) path',
+    placeholder='/path/to/MMConfig.cfg (leave blank to use pymmcore-plus demo config)',
+    value='docs/mm_demo_config.cfg',
+    width=560,
+)
+w_mm_channel_group = pn.widgets.TextInput(
+    name='MM channel group', value='Channel', width=200,
+)
+w_mm_channel_preset = pn.widgets.TextInput(
+    name='MM channel preset', value='Brightfield', width=200,
+)
+w_mm_exposure_ms = pn.widgets.FloatInput(
+    name='Exposure (ms)', value=100.0, step=10.0, width=160,
+)
+w_mm_zstack_enable = pn.widgets.Checkbox(
+    name='Acquire Z stacks (else single plane)', value=False,
+)
+w_mm_zstack_range_um = pn.widgets.FloatInput(
+    name='Z range (µm, ±range/2)', value=20.0, step=1.0, width=180,
+)
+w_mm_zstack_step_um = pn.widgets.FloatInput(
+    name='Z step (µm)', value=1.0, step=0.1, width=160,
+)
+w_mm_interval_s = pn.widgets.FloatInput(
+    name='Inter-cycle interval (s, 0 = as fast as possible)',
+    value=0.0, step=0.5, width=280,
+)
+w_mm_max_xy_um = pn.widgets.FloatInput(
+    name='Max XY shift (µm)', value=500.0, step=10.0, width=180,
+)
+w_mm_max_z_um = pn.widgets.FloatInput(
+    name='Max Z shift (µm)', value=100.0, step=5.0, width=180,
+)
+w_mm_stop_after_tp = pn.widgets.IntInput(
+    name='Stop after N timepoints (0 = run forever)',
+    value=0, start=0, width=260,
+)
+w_mm_synthetic = pn.widgets.Select(
+    name='Synthetic source (bypasses real MM hardware)',
+    options=['off', 'DriftingGaussianEmbryo', 'ReplayFromFolder'],
+    value='off',
+    width=360,
+)
+w_mm_synthetic_replay_dir = pn.widgets.TextInput(
+    name='ReplayFromFolder path (only used when synthetic == ReplayFromFolder)',
+    placeholder='/path/to/replay/frames',
+    width=560,
+)
+w_mm_initial_positions = pn.widgets.TextAreaInput(
+    name='Initial scene positions in µm (one per line: x, y, z) — REQUIRED for MM',
+    placeholder=('# Required for MM: one line per scene, in scene-index order.\n'
+                 '# MM cannot auto-discover from hardware; it uses these as\n'
+                 '# xyz_um baselines when constructing MDAEvents.\n'
+                 '0, 0, 0\n1000, 1000, 0'),
+    height=110, width=560,
 )
 
 
@@ -643,6 +743,14 @@ def _run_tracking():
 
         dirpath      = (w_dirpath.value or '').strip()
         log_dir_name = runner_config['log_dir_name']
+
+        backend = w_backend.value
+
+        if not dirpath:
+            logging.error("Experiment root is empty.")
+            _set_run_status("⚠️ **Experiment root is empty** — set it in the Acquisition section above.")
+            return
+
         position_config = get_pos_config(dirpath, log_dir_name)
 
         if not position_config:
@@ -652,82 +760,249 @@ def _run_tracking():
                 "embryo_tracking/tracking_RoIs.json.\n"
                 "Define ROIs from the ROI Selection tab first."
             )
+            _set_run_status(
+                f"⚠️ **No trackable positions found in `{dirpath}`** — "
+                "define ROIs from the ROI Selection tab first."
+            )
             return
 
-        if w_use_streaming.value:
-            # In streaming mode the tracking channel is read from each
-            # position's tracking_RoIs.json filename suffix (the same way
-            # the file-watcher derives it).  We pass channel=0 as a benign
-            # default for the stream subscription itself.
-            zeiss_params = {
-                'address':         w_zen_address.value.strip(),
-                'port':            w_zen_port.value,
-                'cert_path':       w_zen_cert.value.strip(),
-                'control_token':   w_zen_token.value,
-                'z_projection':    w_z_proj.value,
-                'tracking_channel': 0,
-                'max_xy_um':       w_max_xy.value,
-                'max_z_um':        w_max_z.value,
-                'feedback_enabled': w_use_feedback.value,
-            }
-            microscope = MicroscopeInterface_Zeiss(
-                positions_config=position_config,
-                dirpath=dirpath,
-                zeiss_params=zeiss_params,
-            )
-        else:
-            # File-watching for INPUT.  When feedback is on the file
-            # watcher also opens a gRPC channel to ZEN.  Mode is inferred:
-            #   - n_scenes == 1  → StageService.move_to per frame
-            #   - n_scenes > 1   → TilesService.clear + add_positions
-            #                      between cycles (requires experiment_id
-            #                      from an API-started experiment)
-            n_scenes = int(w_n_scenes.value or 1)
-            running_exp_id = _state.get('experiment_id') or ''
-            if (w_use_feedback.value and n_scenes > 1 and not running_exp_id):
+        # ── Backend routing ───────────────────────────────────────────
+        runner_entry = 'run_zeiss'
+        microscope = None
+
+        if backend == 'LS1 (Viventis)':
+            try:
+                from tracking_tools.microscope_interface.MicroscopeInterface import (
+                    MicroscopeInterface_LS1,
+                )
+            except ImportError as e:
                 logging.error(
-                    "Multi-scene feedback requires an API-started experiment. "
-                    "Click 'Start experiment via ZEN API' first, then Run Tracking. "
-                    "Continuing this run WITHOUT ZEN feedback."
+                    f"LS1 backend unavailable (pymcs missing?): {e}"
                 )
-                use_feedback = False
-            else:
-                use_feedback = w_use_feedback.value
+                return
+            try:
+                microscope = MicroscopeInterface_LS1(
+                    positions_config=position_config,
+                )
+            except ImportError as e:
+                logging.error(
+                    f"LS1 backend cannot be instantiated (pymcs missing?): {e}"
+                )
+                return
+            except Exception as e:
+                logging.error(
+                    f"LS1 backend init failed: {e}", exc_info=True,
+                )
+                return
+            runner_entry = 'run_LS1'
 
-            # Manual baseline positions (µm) override auto-discovery.  Empty
-            # text area → fall back to status-stream auto-capture for every
-            # scene.  Partial entry is allowed: only the scenes for which a
-            # line was given are pre-populated; the rest auto-discover.
-            initial_positions_um, _pos_errors = _parse_initial_positions(
-                w_initial_positions.value
-            )
-            for err in _pos_errors:
-                logging.warning(f"Initial positions: {err}")
-            if initial_positions_um and len(initial_positions_um) != n_scenes:
+        elif backend == 'Micro-Manager':
+            try:
+                from tracking_tools.microscope_interface.MicroscopeInterface import (
+                    MicroscopeInterface_Micromanager,
+                )
+            except ImportError as e:
+                logging.error(
+                    "Micro-Manager backend not installed. Install with:\n"
+                    "  pip install -r requirements-mm.txt\n"
+                    "  mmcore install\n"
+                    f"Details: {e}"
+                )
+                _set_run_status(
+                    "⚠️ **Micro-Manager backend not installed** — "
+                    "see docs/micromanager_backend.md"
+                )
+                return
+
+            # Synthetic source construction
+            src = None
+            synth_choice = w_mm_synthetic.value
+            if synth_choice != 'off':
+                try:
+                    from tracking_tools.microscope_interface.synthetic_source import (
+                        DriftingGaussianEmbryo, ReplayFromFolder,
+                    )
+                except ImportError as e:
+                    logging.error(f"Could not import synthetic sources: {e}")
+                    return
+                if synth_choice == 'DriftingGaussianEmbryo':
+                    src = DriftingGaussianEmbryo()
+                elif synth_choice == 'ReplayFromFolder':
+                    replay_dir = (w_mm_synthetic_replay_dir.value or '').strip()
+                    if not replay_dir:
+                        logging.error(
+                            "ReplayFromFolder synthetic source needs a folder path."
+                        )
+                        return
+                    src = ReplayFromFolder(replay_dir)
+
+            z_stack = None
+            if w_mm_zstack_enable.value:
+                z_stack = {
+                    'range_um': w_mm_zstack_range_um.value,
+                    'step_um':  w_mm_zstack_step_um.value,
+                }
+
+            cfg_path = (w_mm_cfg_path.value or '').strip()
+            if synth_choice == 'off' and not cfg_path:
                 logging.warning(
-                    f"Initial positions: {len(initial_positions_um)} entries "
-                    f"but n_scenes={n_scenes}.  Missing scenes will use "
-                    f"auto-discovery from ZEN status events."
+                    "MM cfg_path is blank and no synthetic source selected — "
+                    "pymmcore-plus demo config will be loaded. Fine for smoke "
+                    "tests; NOT for real acquisitions."
                 )
 
-            file_params = {
-                'poll_interval_s':       w_ingest_poll.value,
-                'zen_feedback':          use_feedback,
-                'zen_address':           w_zen_address.value.strip(),
-                'zen_port':              w_zen_port.value,
-                'zen_cert_path':         w_zen_cert.value.strip(),
-                'zen_control_token':     w_zen_token.value,
-                'zen_experiment_id':     running_exp_id,
-                'n_scenes':              n_scenes,
-                'max_xy_um':             w_max_xy.value,
-                'max_z_um':              w_max_z.value,
-                'initial_positions_um':  initial_positions_um,
+            # Pre-flight: if a cfg_path was provided (or defaulted from the
+            # widget), it must actually exist on disk before we hand it to
+            # MicroscopeInterface_Micromanager.  The bundled demo path is
+            # repo-relative, so a user who launched the panel from
+            # interactive_tools/ instead of the repo root will trip this
+            # check — which is the desired behavior.
+            if cfg_path and not os.path.exists(cfg_path):
+                logging.error(
+                    f"MM cfg path does not exist: {cfg_path!r}. "
+                    "See docs/micromanager_backend.md for setup."
+                )
+                _set_run_status(
+                    f"⚠️ **MM cfg path does not exist: {cfg_path}** — "
+                    "see docs/micromanager_backend.md"
+                )
+                return
+
+            mm_params = {
+                'cfg_path':         cfg_path,
+                'channel_group':    (w_mm_channel_group.value or '').strip() or 'Channel',
+                'channel_preset':   (w_mm_channel_preset.value or '').strip() or 'Brightfield',
+                'exposure_ms':      w_mm_exposure_ms.value,
+                'z_stack':          z_stack,
+                'interval_s':       w_mm_interval_s.value,
+                'max_xy_um':        w_mm_max_xy_um.value,
+                'max_z_um':         w_mm_max_z_um.value,
+                'synthetic_source': src,
+                'stop_after_tp':    (w_mm_stop_after_tp.value or None),
             }
-            microscope = MicroscopeInterface_Files(
-                positions_config=position_config,
-                dirpath=dirpath,
-                file_params=file_params,
+
+            # Bug-3-safe: inject xyz_um baselines into positions_config
+            initial_um, errs = _parse_initial_positions(
+                w_mm_initial_positions.value
             )
+            for e in errs:
+                logging.warning(f"MM initial positions: {e}")
+
+            pos_names_ordered = list(position_config.keys())
+            for i, pos_name in enumerate(pos_names_ordered):
+                if i < len(initial_um):
+                    position_config[pos_name]['xyz_um'] = initial_um[i]
+                elif 'xyz_um' not in position_config[pos_name]:
+                    logging.error(
+                        f"[{pos_name}] missing xyz_um baseline — MM refuses "
+                        "to start. Fill in the 'Initial scene positions' "
+                        "text area with one line per scene."
+                    )
+                    _set_run_status(
+                        f"⚠️ **MM missing xyz_um baseline for `{pos_name}`** — "
+                        "fill in the 'Initial scene positions' text area "
+                        "with one line per scene."
+                    )
+                    return
+
+            try:
+                microscope = MicroscopeInterface_Micromanager(
+                    positions_config=position_config,
+                    dirpath=dirpath,
+                    mm_params=mm_params,
+                )
+            except ImportError as e:
+                logging.error(
+                    "Micro-Manager backend not installed. Install with:\n"
+                    "  pip install -r requirements-mm.txt\n"
+                    "  mmcore install\n"
+                    f"Details: {e}"
+                )
+                return
+            except Exception as e:
+                logging.error(
+                    f"Micro-Manager backend init failed: {e}", exc_info=True,
+                )
+                return
+            runner_entry = 'run_zeiss'
+
+        else:
+            # ── ZEN backend (default file-watching or gRPC streaming) ──
+            if w_use_streaming.value:
+                # In streaming mode the tracking channel is read from each
+                # position's tracking_RoIs.json filename suffix (the same way
+                # the file-watcher derives it).  We pass channel=0 as a benign
+                # default for the stream subscription itself.
+                zeiss_params = {
+                    'address':         w_zen_address.value.strip(),
+                    'port':            w_zen_port.value,
+                    'cert_path':       w_zen_cert.value.strip(),
+                    'control_token':   w_zen_token.value,
+                    'z_projection':    w_z_proj.value,
+                    'tracking_channel': 0,
+                    'max_xy_um':       w_max_xy.value,
+                    'max_z_um':        w_max_z.value,
+                    'feedback_enabled': w_use_feedback.value,
+                }
+                microscope = MicroscopeInterface_Zeiss(
+                    positions_config=position_config,
+                    dirpath=dirpath,
+                    zeiss_params=zeiss_params,
+                )
+            else:
+                # File-watching for INPUT.  When feedback is on the file
+                # watcher also opens a gRPC channel to ZEN.  Mode is inferred:
+                #   - n_scenes == 1  → StageService.move_to per frame
+                #   - n_scenes > 1   → TilesService.clear + add_positions
+                #                      between cycles (requires experiment_id
+                #                      from an API-started experiment)
+                n_scenes = int(w_n_scenes.value or 1)
+                running_exp_id = _state.get('experiment_id') or ''
+                if (w_use_feedback.value and n_scenes > 1 and not running_exp_id):
+                    logging.error(
+                        "Multi-scene feedback requires an API-started experiment. "
+                        "Click 'Start experiment via ZEN API' first, then Run Tracking. "
+                        "Continuing this run WITHOUT ZEN feedback."
+                    )
+                    use_feedback = False
+                else:
+                    use_feedback = w_use_feedback.value
+
+                # Manual baseline positions (µm) override auto-discovery.  Empty
+                # text area → fall back to status-stream auto-capture for every
+                # scene.  Partial entry is allowed: only the scenes for which a
+                # line was given are pre-populated; the rest auto-discover.
+                initial_positions_um, _pos_errors = _parse_initial_positions(
+                    w_initial_positions.value
+                )
+                for err in _pos_errors:
+                    logging.warning(f"Initial positions: {err}")
+                if initial_positions_um and len(initial_positions_um) != n_scenes:
+                    logging.warning(
+                        f"Initial positions: {len(initial_positions_um)} entries "
+                        f"but n_scenes={n_scenes}.  Missing scenes will use "
+                        f"auto-discovery from ZEN status events."
+                    )
+
+                file_params = {
+                    'poll_interval_s':       w_ingest_poll.value,
+                    'zen_feedback':          use_feedback,
+                    'zen_address':           w_zen_address.value.strip(),
+                    'zen_port':              w_zen_port.value,
+                    'zen_cert_path':         w_zen_cert.value.strip(),
+                    'zen_control_token':     w_zen_token.value,
+                    'zen_experiment_id':     running_exp_id,
+                    'n_scenes':              n_scenes,
+                    'max_xy_um':             w_max_xy.value,
+                    'max_z_um':              w_max_z.value,
+                    'initial_positions_um':  initial_positions_um,
+                }
+                microscope = MicroscopeInterface_Files(
+                    positions_config=position_config,
+                    dirpath=dirpath,
+                    file_params=file_params,
+                )
+            runner_entry = 'run_zeiss'
 
         _state['microscope'] = microscope
 
@@ -740,10 +1015,14 @@ def _run_tracking():
             position_tracker_params=position_tracker_config,
         )
         _state['runner'] = runner
-        runner.run_zeiss()
+        _set_run_status(f"▶ **Tracking started (backend={backend})**")
+        getattr(runner, runner_entry)()
+        # Natural stop (runner returned without raising): show Ready again.
+        _set_run_status('_Ready._')
 
     except Exception as e:
         logging.error(f"Tracking error: {e}", exc_info=True)
+        _set_run_status(f"⚠️ **Tracking error:** {e}")
     finally:
         pn.state.execute(_reset_buttons)
 
@@ -856,17 +1135,88 @@ advanced_section = pn.Card(
     collapsed=True,
 )
 
-tracking_tab = pn.Column(
-    pn.pane.Markdown('## Live Tracking'),
-    pn.layout.Divider(),
-    acquisition_section,
-    pn.layout.Divider(),
+# ─── Per-backend sections (built once at module scope so widget state
+# persists across backend switches — the pn.bind callback below just
+# swaps which Column is displayed, it does not rebuild the widgets). ────
+
+mm_section = pn.Column(
+    pn.pane.Markdown('### Micro-Manager backend'),
+    w_mm_cfg_path,
+    pn.Row(w_mm_channel_group, w_mm_channel_preset, w_mm_exposure_ms),
+    pn.Row(w_mm_zstack_enable, w_mm_zstack_range_um, w_mm_zstack_step_um),
+    pn.Row(w_mm_interval_s, w_mm_max_xy_um, w_mm_max_z_um),
+    w_mm_stop_after_tp,
+    pn.Row(w_mm_synthetic, w_mm_synthetic_replay_dir),
+    w_mm_initial_positions,
+)
+
+ls1_help = pn.pane.Markdown(
+    '_LS1 (Viventis): pymcs drives the hardware directly. Configure the '
+    'acquisition in the Viventis GUI first — the panel only supplies the '
+    'experiment root (above) and consumes `tracking_RoIs.json` per position._',
+    width=600,
+)
+ls1_section = pn.Column(
+    pn.pane.Markdown('### LS1 (Viventis) backend'),
+    ls1_help,
+)
+
+zen_section = pn.Column(
+    pn.pane.Markdown('### ZEN backend'),
     experiment_section,
     pn.layout.Divider(),
     ingest_section,
     pn.layout.Divider(),
     advanced_section,
+)
+
+
+def _pick_backend_section(name):
+    if name == 'Micro-Manager':
+        return mm_section
+    if name == 'LS1 (Viventis)':
+        return ls1_section
+    return zen_section
+
+
+backend_block = pn.Column(pn.bind(_pick_backend_section, w_backend))
+
+
+def _on_backend_change(event):
+    """Warn (do not auto-stop) when the user switches away from ZEN with
+    a live API-started experiment.  Stopping it here could ruin an
+    acquisition the user meant to keep running.
+    """
+    new_backend = event.new
+    if new_backend != 'ZEN (closed Zeiss: LSM / Lightsheet 7 / Elyra)':
+        if _state.get('experiment_id'):
+            logging.warning(
+                "Backend switched to %r but a ZEN API-started experiment "
+                "is still running (id=%s). It will keep running; use the "
+                "ZEN backend's 'Stop experiment' button to end it.",
+                new_backend, _state.get('experiment_id'),
+            )
+            exp_status_md.object = (
+                f"⚠️ Backend switched to `{new_backend}` — experiment "
+                f"`{_state.get('experiment_name')}` (id "
+                f"`{_state.get('experiment_id')}`) still running."
+            )
+
+
+w_backend.param.watch(_on_backend_change, 'value')
+
+
+tracking_tab = pn.Column(
+    pn.pane.Markdown('## Tracking Panel'),
     pn.layout.Divider(),
+    acquisition_section,
+    pn.layout.Divider(),
+    backend_notice_md,
+    w_backend,
+    pn.layout.Divider(),
+    backend_block,
+    pn.layout.Divider(),
+    run_status_md,
     pn.Row(btn_run, btn_stop),
     w_log,
     sizing_mode='stretch_width',
