@@ -4,6 +4,6 @@ imaging-server-kit==0.0.12
 pyyaml
 numpy
 matplotlib
-pyyaml
 panel
 pandas
+pytest>=8

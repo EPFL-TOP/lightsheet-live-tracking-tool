@@ -5,7 +5,7 @@
 # Install with:  pip install -r requirements-mm.txt
 # After install, run once:  mmcore install  (grabs the MM device DLLs)
 
-pymmcore-plus>=0.18,<0.20
+pymmcore-plus[cli]>=0.18,<0.20   # [cli] gives us the `mmcore install` command
 useq-schema>=0.5
 scipy>=1.11        # for center-of-mass in the smoke test
 # numpy, tifffile already pinned in requirements.txt
