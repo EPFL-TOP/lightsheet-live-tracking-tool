@@ -230,18 +230,40 @@ def dump_api(asm, filter_str: str | None, show_members: bool) -> None:
             _log(f"  [{kind}] {t.Name}")
             if not show_members:
                 continue
+            # Properties first — MTB exposes positions as properties
+            # (e.g. IMTBContinual.Position), not getter methods.
             try:
+                props = sorted(t.GetProperties(), key=lambda x: x.Name)
+                for p in props:
+                    acc = []
+                    if p.CanRead:
+                        acc.append("get")
+                    if p.CanWrite:
+                        acc.append("set")
+                    _log(f"        [prop] {p.PropertyType.Name} "
+                         f"{p.Name} {{{'; '.join(acc)}}}")
+            except Exception as e:
+                _log(f"        <properties unavailable: {e}>")
+            try:
+                seen_accessors = set()
+                for p in t.GetProperties():
+                    for m in (p.GetGetMethod(), p.GetSetMethod()):
+                        if m is not None:
+                            seen_accessors.add(m.Name)
                 for m in sorted(t.GetMethods(), key=lambda x: x.Name):
                     if m.DeclaringType != t:
                         continue  # skip inherited Object members
+                    if m.Name in seen_accessors:
+                        continue  # already shown as a property
                     params = ", ".join(
+                        f"{'out ' if p.IsOut else ''}"
                         f"{p.ParameterType.Name} {p.Name}"
                         for p in m.GetParameters()
                     )
                     _log(f"        {m.ReturnType.Name} "
                          f"{m.Name}({params})")
             except Exception as e:
-                _log(f"        <members unavailable: {e}>")
+                _log(f"        <methods unavailable: {e}>")
 
 
 def try_connect(asm, locale: str) -> int:
@@ -271,20 +293,59 @@ def try_connect(asm, locale: str) -> int:
              "look for the entry-point class.")
         return 4
 
-    _log("Connection candidate types:")
-    for t in candidates:
-        _log(f"  {t.Namespace}.{t.Name}")
-    conn_type = candidates[0]
+    def _has_default_ctor(t) -> bool:
+        try:
+            from System import Type as _T
+            return t.GetConstructor(_T.EmptyTypes) is not None
+        except Exception:
+            return False
+
+    def _rank(t) -> tuple:
+        """Prefer the real entry point over event-handler delegates."""
+        name = t.Name
+        exact = 0 if name == "MTBConnection" else 1
+        # *Handler / *EventSink / *Events are callback plumbing, not
+        # things you instantiate to open a session.
+        plumbing = 1 if name.endswith(
+            ("Handler", "EventSink", "Events")
+        ) else 0
+        # A session object must be constructible with no arguments.
+        no_ctor = 0 if _has_default_ctor(t) else 1
+        return (exact, plumbing, no_ctor, len(name))
+
+    ranked = sorted(candidates, key=_rank)
+
+    _log("Connection candidate types (ranked):")
+    for t in ranked:
+        marks = []
+        if t.Name == "MTBConnection":
+            marks.append("exact-name")
+        if _has_default_ctor(t):
+            marks.append("has-default-ctor")
+        if t.Name.endswith(("Handler", "EventSink", "Events")):
+            marks.append("callback-plumbing")
+        suffix = f"  [{', '.join(marks)}]" if marks else ""
+        _log(f"  {t.Namespace}.{t.Name}{suffix}")
+
+    # Try each candidate in rank order rather than betting on one.
+    conn = None
+    conn_type = None
+    from System import Activator
+    for t in ranked:
+        try:
+            conn = Activator.CreateInstance(t)
+            conn_type = t
+            break
+        except Exception as e:
+            _log(f"  cannot instantiate {t.Name}: "
+                 f"{type(e).__name__}")
+    if conn is None:
+        _log()
+        _log("FAIL: no candidate could be instantiated.")
+        return 4
+
     _log()
     _log(f"Using: {conn_type.Namespace}.{conn_type.Name}")
-
-    # Instantiate.
-    try:
-        from System import Activator
-        conn = Activator.CreateInstance(conn_type)
-    except Exception as e:
-        _log(f"FAIL: could not instantiate: {type(e).__name__}: {e}")
-        return 4
     _log("Instantiated connection object.")
 
     # Login. Signature is typically Login(string locale, out string id).
