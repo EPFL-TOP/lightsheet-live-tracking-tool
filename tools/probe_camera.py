@@ -79,6 +79,63 @@ def make_core(buffer_mb: int):
     return mmc
 
 
+def _retry_with_internal_trigger(mmc, label, names, exposure) -> bool:
+    """Force an internal/software trigger, then re-snap.
+
+    A uniform frame almost always means the exposure never fired. PVCAM
+    exposes the trigger source as an enum property whose exact name and
+    values vary by adapter version, so search for it and try every
+    value that looks internal.
+    """
+    candidates = [
+        p for p in names
+        if "trigger" in p.lower() and "mode" in p.lower()
+    ] or [p for p in names if "trigger" in p.lower()]
+
+    if not candidates:
+        _log()
+        _log("  No trigger property to adjust.")
+        return False
+
+    internal_hints = ("internal", "software", "timed", "normal", "free")
+
+    for prop in candidates:
+        try:
+            opts = list(mmc.getAllowedPropertyValues(label, prop))
+        except Exception:
+            opts = []
+        if not opts:
+            continue
+        targets = [
+            o for o in opts
+            if any(h in o.lower() for h in internal_hints)
+        ]
+        if not targets:
+            continue
+
+        for target in targets:
+            _log()
+            _log(f"  Retrying with {prop} = {target!r} ...")
+            try:
+                mmc.setProperty(label, prop, target)
+                mmc.setExposure(exposure)
+                mmc.snapImage()
+                img = mmc.getImage()
+            except Exception as e:
+                _log(f"    failed: {type(e).__name__}: {e}")
+                continue
+            mn, mx = float(img.min()), float(img.max())
+            _log(f"    min={mn:.1f} max={mx:.1f} "
+                 f"mean={float(img.mean()):.1f} "
+                 f"std={float(img.std()):.1f}")
+            if mx != mn:
+                _log(f"    *** SUCCESS — real image with "
+                     f"{prop}={target!r} ***")
+                _log(f"    Put this in the .cfg / backend config.")
+                return True
+    return False
+
+
 def try_camera(mmc, library: str, device: str, exposure: float) -> bool:
     """Load one camera slot and look for proof it is real."""
     _hdr(f"{library} / {device}")
@@ -160,9 +217,21 @@ def try_camera(mmc, library: str, device: str, exposure: float) -> bool:
         _log(f"             min={mn:.1f} max={mx:.1f} "
              f"mean={mean:.1f} std={std:.1f}")
         if mx == mn:
-            _log("             ^ CONSTANT image — no real signal. "
-                 "Either the sensor is not being read, or the light "
-                 "path is fully dark.")
+            _log(f"             ^ CONSTANT image (every pixel "
+                 f"{mn:.0f}).")
+            full = (1 << (depth or 16)) - 1
+            if mn >= full:
+                _log("             Pegged at the 16-bit maximum with "
+                     "zero variance. Real saturation from light still "
+                     "shows hot pixels and edge falloff, so this is "
+                     "most likely an UNREAD BUFFER, not bright light.")
+                _log("             Prime suspect: the camera is in an "
+                     "EXTERNAL TRIGGER mode (this scope has trigger "
+                     "wiring per MTB's <Trigger>SVB1_Camera1Ports</>), "
+                     "so the exposure never fires.")
+            elif mn == 0:
+                _log("             All zero — sensor not read, or "
+                     "light path fully closed.")
         else:
             ok_snap = True
     except Exception as e:
@@ -171,6 +240,39 @@ def try_camera(mmc, library: str, device: str, exposure: float) -> bool:
         _log("If this is a buffer-read error, it is the known PVCAM +"
              " pymmcore race. Retry with a bigger --buffer-mb, and "
              "compare against MMStudio's own Snap.")
+
+    # --- Trigger / readout diagnosis ---
+    # A constant frame is usually a trigger-mode problem, so dump the
+    # properties that govern how an exposure is initiated and retry
+    # after forcing an internal/software trigger.
+    if not ok_snap:
+        _log()
+        _log("Trigger / readout properties:")
+        trig_props = [
+            p for p in names
+            if any(k in p.lower() for k in
+                   ("trigger", "exposure", "readout", "port", "speed",
+                    "gain", "clear", "mode", "shutter", "binning"))
+        ]
+        for prop in trig_props:
+            try:
+                val = mmc.getProperty(label, prop)
+            except Exception:
+                continue
+            allowed = ""
+            try:
+                opts = list(mmc.getAllowedPropertyValues(label, prop))
+                if opts:
+                    allowed = f"   allowed: {opts}"
+            except Exception:
+                pass
+            _log(f"  {prop} = {val!r}{allowed}")
+        if not trig_props:
+            _log("  <none found>")
+
+        ok_snap = _retry_with_internal_trigger(
+            mmc, label, names, exposure
+        )
 
     # --- Verdict ---
     _log()

@@ -317,7 +317,45 @@ def report_axis(raw, label: str) -> tuple[str | None, float | None, object]:
     return unit, pos, comp
 
 
-def test_move_axis(comp, label, unit, delta, mode, timeout, tol) -> None:
+def _attempt_set(comp, label, target, unit, mode, timeout, client_id):
+    """Try the SetPosition overloads until one is accepted.
+
+    MTB exposes both SetPosition(pos, unit, mode, timeout) and
+    SetPosition(clientID, pos, unit, mode, timeout). Some axes require
+    the clientID form to establish write ownership — XY accepted the
+    short form but the motorized focus returned False, which is a
+    refusal rather than an error, so ownership is the prime suspect.
+    """
+    attempts = [
+        ("no-clientID", lambda: comp.SetPosition(
+            target, unit, mode, timeout)),
+        ("no-clientID, no-timeout", lambda: comp.SetPosition(
+            target, unit, mode)),
+    ]
+    if client_id:
+        attempts += [
+            ("with-clientID", lambda: comp.SetPosition(
+                client_id, target, unit, mode, timeout)),
+            ("with-clientID, no-timeout", lambda: comp.SetPosition(
+                client_id, target, unit, mode)),
+        ]
+
+    for name, call in attempts:
+        try:
+            ok = call()
+        except Exception as e:
+            _log(f"    [{name}] raised {type(e).__name__}: {e}")
+            continue
+        if ok is False:
+            _log(f"    [{name}] returned False (refused)")
+            continue
+        _log(f"    [{name}] accepted")
+        return True, name
+    return False, None
+
+
+def test_move_axis(comp, label, unit, delta, mode, timeout, tol,
+                   client_id=None) -> None:
     """Relative move on a single IMTBContinual axis, then move back."""
     try:
         before = comp.GetPosition(unit)
@@ -327,13 +365,14 @@ def test_move_axis(comp, label, unit, delta, mode, timeout, tol) -> None:
 
     target = before + delta
     _log(f"  {label}: {before:.3f} -> {target:.3f} {unit}")
-    try:
-        ok = comp.SetPosition(target, unit, mode, timeout)
-    except Exception as e:
-        _fail(f"{label}: SetPosition raised: {type(e).__name__}: {e}")
-        return
-    if ok is False:
-        _fail(f"{label}: SetPosition returned False")
+    ok, how = _attempt_set(
+        comp, label, target, unit, mode, timeout, client_id
+    )
+    if not ok:
+        _fail(f"{label}: every SetPosition overload refused the move. "
+              f"If this is the motorized focus, Definite Focus 2 is "
+              f"probably engaged and holding the axis — check DF2 "
+              f"state, or drive the piezo instead.")
         return
 
     try:
@@ -350,7 +389,8 @@ def test_move_axis(comp, label, unit, delta, mode, timeout, tol) -> None:
 
     # Always try to restore the original position.
     try:
-        comp.SetPosition(before, unit, mode, timeout)
+        _attempt_set(comp, label, before, unit, mode, timeout,
+                     client_id)
         back = comp.GetPosition(unit)
         _log(f"    restored to {back:.3f} {unit}")
     except Exception as e:
@@ -410,11 +450,13 @@ def main() -> int:
                 ("axis_x", args.dxy),
                 ("axis_y", args.dxy),
                 ("focus", args.dz),
+                ("piezo", args.dz),
             ):
                 if role in casted and role in units:
                     test_move_axis(
                         casted[role], role, units[role], delta,
                         mode, args.timeout_ms, args.tol_um,
+                        client_id=client_id,
                     )
         else:
             _hdr("TEST MOVES")
