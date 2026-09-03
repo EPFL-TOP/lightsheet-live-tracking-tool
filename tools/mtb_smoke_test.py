@@ -149,6 +149,24 @@ def get_set_mode(asm):
     names = list(Enum.GetNames(mode_type))
     _log(f"  MTBCmdSetModes values: {', '.join(names)}")
 
+    # If it carries [Flags], modes can be OR-ed — e.g.
+    # Synchronous | Relative would give us a blocking relative move,
+    # which is exactly what relative_move() wants.
+    try:
+        from System import FlagsAttribute
+        is_flags = mode_type.IsDefined(FlagsAttribute, False)
+    except Exception:
+        is_flags = None
+    _log(f"  combinable ([Flags]): {is_flags}")
+    try:
+        pairs = [
+            (n, int(Enum.Parse(mode_type, n))) for n in names
+        ]
+        _log("  numeric values: "
+             + ", ".join(f"{n}={v}" for n, v in pairs))
+    except Exception:
+        pass
+
     # Synchronous means SetPosition blocks until the move completes,
     # which is what a closed tracking loop wants.
     for preferred in ("Synchronous", "Sync", "Default"):
@@ -189,6 +207,47 @@ def connect(asm, locale: str):
     return conn, client_id, root
 
 
+def as_continual(comp, label: str):
+    """Cast an MTB component to the interface exposing positions.
+
+    root.GetComponent() hands back concrete classes from the
+    ZEISS.MTB.MicControl assembly (e.g. MTBCtrlStageAxisAquila). Their
+    IMTBContinual members are explicit interface implementations, so
+    calling GetPosition() on the raw object raises AttributeError —
+    pythonnet only surfaces them after an interface cast.
+
+    Returns (casted_object, interface_name) or (None, None).
+    """
+    candidates = []
+    try:
+        from ZEISS.MTB.Api import IMTBContinual
+        candidates.append(IMTBContinual)
+    except ImportError:
+        pass
+    for name in ("IMTBStageAxis", "IMTBAxis", "IMTBFocus"):
+        try:
+            mod = __import__("ZEISS.MTB.Api", fromlist=[name])
+            candidates.append(getattr(mod, name))
+        except Exception:
+            pass
+
+    for iface in candidates:
+        try:
+            cast = iface(comp)
+            # Probe that the cast actually exposes what we need.
+            cast.GetPositionUnitCount()
+            return cast, iface.__name__
+        except Exception:
+            continue
+
+    # Last resort: maybe this build does surface members directly.
+    try:
+        comp.GetPositionUnitCount()
+        return comp, "<direct>"
+    except Exception:
+        return None, None
+
+
 def discover_units(comp, label: str) -> list[str]:
     """Ask a component which position units it accepts."""
     units: list[str] = []
@@ -218,15 +277,23 @@ def pick_um(units: list[str]) -> str | None:
     return units[0] if units else None
 
 
-def report_axis(comp, label: str) -> tuple[str | None, float | None]:
+def report_axis(raw, label: str) -> tuple[str | None, float | None, object]:
     """Print units, limits, step and current position for one axis."""
+    _log(f"  {label}")
+    comp, iface = as_continual(raw, label)
+    if comp is None:
+        _fail(f"{label}: could not cast to a position interface — "
+              f"no IMTBContinual/IMTBStageAxis/IMTBAxis/IMTBFocus "
+              f"cast exposed GetPositionUnitCount")
+        return None, None, None
+    _log(f"    cast via:        {iface}")
+
     units = discover_units(comp, label)
     unit = pick_um(units)
-    _log(f"  {label}")
     _log(f"    units available: {units or '<none>'}")
     if unit is None:
         _fail(f"{label}: no usable position unit")
-        return None, None
+        return None, None, comp
     _log(f"    using unit:      {unit!r}")
 
     pos = None
@@ -247,7 +314,7 @@ def report_axis(comp, label: str) -> tuple[str | None, float | None]:
         except Exception:
             pass
 
-    return unit, pos
+    return unit, pos, comp
 
 
 def test_move_axis(comp, label, unit, delta, mode, timeout, tol) -> None:
@@ -327,11 +394,14 @@ def main() -> int:
 
         _hdr("AXIS REPORT (read-only)")
         units = {}
+        casted = {}
         for role in ("axis_x", "axis_y", "focus", "piezo"):
             if role in comps:
-                unit, _ = report_axis(comps[role], role)
+                unit, _, cast = report_axis(comps[role], role)
                 if unit:
                     units[role] = unit
+                if cast is not None:
+                    casted[role] = cast
 
         if args.move:
             _hdr("TEST MOVES")
@@ -341,9 +411,9 @@ def main() -> int:
                 ("axis_y", args.dxy),
                 ("focus", args.dz),
             ):
-                if role in comps and role in units:
+                if role in casted and role in units:
                     test_move_axis(
-                        comps[role], role, units[role], delta,
+                        casted[role], role, units[role], delta,
                         mode, args.timeout_ms, args.tol_um,
                     )
         else:
