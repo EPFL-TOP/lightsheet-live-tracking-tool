@@ -110,7 +110,7 @@ synthetic drifting embryo in scene_0/1/2.
 
 ---
 
-## Phase 2 — Micro-Manager GUI hardware configuration (~30-60 min)
+## Phase 2 — Micro-Manager GUI hardware configuration (~30–60 min)
 
 ### Goal
 Get the MM Java GUI talking to every real device on the microscope,
@@ -118,73 +118,231 @@ saved as a `.cfg` file we'll later hand to `pymmcore-plus`.
 
 **Every device must be independently controllable from the MM GUI
 before we go anywhere near Python.** MM's GUI is easier to debug than
-pymmcore-plus for first-time bring-up.
+pymmcore-plus for first-time bring-up, AND it is the reference
+implementation that Zeiss + Photometrics QA their adapters against.
 
-### Prerequisite check
+### Phase 2A — Prerequisite check (5 min)
 
-- MM Java GUI 2.0 installed at `C:\Program Files\Micro-Manager-2.0`.
-- PVCAM SDK installed (verify `pvcam32.dll` or `pvcam64.dll` exists
-  under `C:\Program Files\Photometrics\PVCAM\`).
-- Close ZEN (it holds an exclusive lock on the Prime 95B).
+Do these five checks in order — do not launch the wizard until every
+one passes.
 
-### Steps
+**1. Establish the DIV (device interface version) target.**
 
-1. Launch **Micro-Manager 2.0 GUI**.
-2. **Tools → Hardware Configuration Wizard → Create new configuration**.
-3. Add devices one at a time:
+The single most common Windows failure is a DIV mismatch between the
+adapter tree `mmcore install` populated
+(`%LOCALAPPDATA%\pymmcore-plus\mm\`) and the MMStudio Java install
+(`C:\Program Files\Micro-Manager-2.0\`). Both trees must have the same
+DIV, otherwise a `.cfg` saved by MMStudio silently fails when
+pymmcore-plus loads it.
 
-   | Adapter library | Device name | Label (recommendation) |
-   |---|---|---|
-   | `ZeissCAN29` | `ZeissScope` | `Scope` |
-   | `ZeissCAN29` | `Objectives` | `Objective` |
-   | `ZeissCAN29` | `ReflectorTurret` | `Reflector` |
-   | `ZeissCAN29` | `Colibri` (or `Colibri7`) | `LED` |
-   | `ZeissCAN29` | `DefiniteFocus` | `DF2` |
-   | `ZeissCAN29` | `ZStage` (or the DF2-managed one) | `Z` |
-   | `PVCAM` | (Prime 95B will auto-detect) | `Camera` |
-   | `Marzhauser` (or `MarzhauserLStep` — try both) | XY | `XY` |
+```bat
+python -c "import pymmcore; print(pymmcore.__version__)"
+python -c "from pymmcore_plus import CMMCorePlus; c=CMMCorePlus(); print(c.getAPIVersionInfo())"
+```
 
-4. **Set default devices** (in the wizard):
-   - Core Camera = `Camera`
-   - Core XY stage = `XY`
-   - Core Focus = `Z`
-   - Core AutoFocus = `DF2` (if the DF2 adapter exposes one)
-   - Core Shutter = whichever the Colibri adapter provides, or add
-     `DemoCamera`/`DShutter` as a fallback
+Write down the **4th number** of the `pymmcore.__version__` output
+(e.g. `12.5.0.75.0` → DIV = **75**). Cross-check with the
+`getAPIVersionInfo()` line — it prints `Device API version N, Module
+API version M`; the N must match.
 
-5. **Configure a Channel group** with at least one preset (e.g.
-   `Channel` group → `Brightfield` preset that sets the LED
-   intensity + reflector position + exposure to reasonable values).
+**2. Confirm PVCAM runtime is installed and the camera enumerates.**
 
-6. **Save the config** to
+```bat
+where pvcam64.dll
+```
+
+Must return `C:\Windows\System32\pvcam64.dll`. If not, install **PVCAM
+for Windows** (currently 3.10.2.7) from
+<https://www.teledynevisionsolutions.com/support/software-and-drivers>
+— the "PVCAM for Windows" runtime installer, NOT the "SDK-only"
+package. Reboot. Then in Device Manager confirm the Prime 95B appears
+without a yellow bang.
+
+Note: on PVCAM 3.9+ the ini file lives at
+`C:\ProgramData\Photometrics\PVCAM\pvcam.ini`, not `C:\Windows\`.
+
+**3. Confirm Marzhäuser controller enumerates as a COM port.**
+
+Device Manager → Ports (COM & LPT). Power the Marzhäuser controller
+on with its cable connected. Expect a COM port labeled *Marzhauser*,
+*USB Serial Port*, or *FTDI*. Note the number (e.g. `COM4`).
+
+**4. Confirm the CAN29 path to the Axio Observer 7.**
+
+Don't trace cables — probe from software. ZeissCAN29 never
+auto-detects, but a successful `initializeDevice` on the right port
+*is* the detection (the adapter then reads real labels back off the
+stand). `tools/probe_serial_devices.py` brute-forces the (port, baud)
+grid for you:
+
+```bat
+:: 1. What ports and device libraries does MM actually see?
+python tools\probe_serial_devices.py --list
+
+:: 2. Probe every visible port for the Zeiss stand
+python tools\probe_serial_devices.py
+
+:: 3. Or target one port/baud directly
+python tools\probe_serial_devices.py --ports COM1 --bauds 57600 -v
+```
+
+A hit prints the winning port + baud and dumps every property the hub
+reports — objective labels, reflector positions, firmware strings.
+That readback is proof you're talking to the real stand.
+
+The same script probes other serial devices:
+
+```bat
+python tools\probe_serial_devices.py --library Marzhauser       --device XYStage
+python tools\probe_serial_devices.py --library MarzhauserLStep  --device XYStage
+```
+
+If `--list` shows **no** `ZeissCAN29` library, your `mmcore install`
+tree is minimal — install the MMStudio Java nightly (Phase 2B) and
+re-run with
+`--adapter-path "C:\Program Files\Micro-Manager-2.0"`.
+
+Physical fallback, only if the probe finds nothing: the Observer 7
+usually has a **DB9 RS-232** connector labeled `CAN` on the back
+panel. If your stand exposes CAN29 over USB instead, Zeiss's CAN29-USB
+driver (bundled with ZEN) provides the virtual COM port.
+
+**5. Close ZEN completely.** This is more than just closing the
+window:
+
+- Task Manager → End task on: `zen.exe`, `zenblue.exe`,
+  `ZenApiGateway.exe`, `MTB2.exe`, `ZeissLightManager.exe` if present.
+- `services.msc` → find any service starting with "Zeiss" or "Carl
+  Zeiss" (e.g. *Carl Zeiss MTB Service*, *ZEN API Gateway*). Set to
+  **Manual**, then **Stop**.
+- On the stand's touchscreen: turn **OFF** *Light Manager* and
+  *Dazzle Protect*. Both fight the CAN29 adapter (documented on the
+  ZeissCAN29 wiki).
+- Do NOT uninstall ZEN — its CAN29-USB driver may be your only bus if
+  your stand uses USB.
+
+### Phase 2B — Install matching MMStudio Java nightly (10 min)
+
+**1. Consult the DIV history table** at
+<https://micro-manager.org/Device_change_log>. Find the date range for
+your target DIV from Phase 2A step 1.
+
+**2. Download** from
+<https://download.micro-manager.org/nightly/2.0/Windows/>. Pick a
+`MMSetup_64bit_2.0.3_YYYYMMDD.exe` whose date falls inside that DIV
+window. Prefer the newest such date — PVCAM adapter fixes accumulate.
+
+**3. Install to the default** `C:\Program Files\Micro-Manager-2.0\`.
+Intentionally SEPARATE from the `%LOCALAPPDATA%\pymmcore-plus\mm\`
+tree that `mmcore install` already populated.
+
+**4. Confirm the two adapter trees agree on DIV.** Launch
+`C:\Program Files\Micro-Manager-2.0\ImageJ.exe` → Help → About
+Micro-Manager. The "Device Interface version" must equal your DIV
+from Phase 2A step 1. If not: uninstall this nightly, pick a
+different date within the correct DIV window, reinstall.
+
+Escape hatch if the DIVs are close but not equal (e.g. testing across
+a boundary): in your Phase 3 REPL, before `loadSystemConfiguration`,
+call
+`mmc.setDeviceAdapterSearchPaths([r"C:\Program Files\Micro-Manager-2.0"])`
+— this points pymmcore-plus at the Java tree instead of its own.
+Prefer matching DIVs when you have time.
+
+### Phase 2C — Ensure Colibri + DF2 are POWERED UP (30 s)
+
+The ZeissCAN29 adapter does NOT auto-detect. It queries the stand's
+controller for what is currently talking. If Colibri or DF2 is
+powered off, or was powered on AFTER MM opened the port, the wizard
+silently omits sub-devices — Colibri 7 shows 2 LEDs instead of 7, DF2
+does not appear at all.
+
+Power the stand + Colibri + DF2, wait 30 s for the touchscreen to
+finish boot, THEN start the wizard.
+
+### Phase 2D — Configuration Wizard (15 min)
+
+1. `ImageJ.exe` → **View → Micro-Manager Log Panel** (keep it open
+   throughout — watch for red errors).
+2. **Tools → Hardware Configuration Wizard → Create new
+   configuration**.
+3. Add devices **IN THIS ORDER** (order matters for CAN29 — the hub
+   must be initialized first):
+
+   | # | Library | Sub-device | Label | Notes |
+   |---|---|---|---|---|
+   | 1 | `ZeissCAN29` | `ZeissScope` | `Scope` | The hub. Port = your CAN29 COM. Baud 57600, timeout 500 ms, 8N1, no handshake, no auto-detect. Initialize BEFORE adding sub-devices. |
+   | 2 | `ZeissCAN29` | `ObjectiveTurret` | `Objective` | |
+   | 3 | `ZeissCAN29` | `ReflectorTurret` | `Reflector` | |
+   | 4 | `ZeissCAN29` | `ZDrive` | `Z` | Main Z focus. |
+   | 5 | `ZeissCAN29` | `DefiniteFocus` | `DF2` | Autofocus device. |
+   | 6 | `ZeissCAN29` | `ZeissDefiniteFocusOffset` | `DFOffset` | Stage device — enables per-position DF2 offsets in MDA. |
+   | 7 | `ZeissCAN29` | `Colibri` | `LED` | Same ZeissCAN29 library — there is NO separate Colibri adapter binary since v1.3.40. Colibri 5 and Colibri 7 both come out here; count of LED sub-channels matches your physical octagon. |
+   | 8 | `Marzhauser` **or** `MarzhauserLStep` | XY Stage | `XY` | Try `Marzhauser` (TANGO command set) first — most common ship on Axio Observer 7. If XY device appears but does NOT move in the smoke test, come back and switch to `MarzhauserLStep`. Port = the Marzhäuser COM from Phase 2A step 3. 57600/8/N/1. Also: press the joystick button so its LED goes OFF (joystick has priority; MM commands ignored while it's on). |
+   | 9 | `PVCAM` | `Camera-1` | `Camera` | Auto-detects. Just Initialize; no ROI/exposure setup here. |
+
+4. **Set default devices** in the wizard:
+   - Core **Camera** = `Camera` (PVCAM)
+   - Core **XYStage** = `XY` (Marzhäuser)
+   - Core **Focus** = `Z` (Zeiss ZDrive)
+   - Core **AutoFocus** = `DF2`
+   - Core **Shutter** = the Colibri-provided shutter device
+
+5. **Configure a Channel group.** Tools → Hardware Configuration
+   Wizard → *Group / Preset Editor*. Create group `Channel` with at
+   least one preset `Brightfield` that sets LED intensity + reflector
+   position + exposure.
+
+6. **Set Core-Timeout = 25000 ms.** Tools → Options → Core-Timeout.
+   Default 5000 ms is too short for DF2 *Measure*; ignoring this
+   causes `waitForDevice` to return before DF2 is finished, and the
+   next MDAEvent snaps out of focus.
+
+7. **Save the .cfg** to
    `C:\Users\helsens\software\lightsheet-live-tracking-tool\docs\axio_observer_7.cfg`.
 
-7. **Test each device from the MM GUI** in a single session:
+### Phase 2E — Test every device from MMStudio (10 min)
 
-   | Device | Test | Expected |
-   |---|---|---|
-   | Camera | *Snap* button | Image appears in the MM viewer |
-   | XY stage | Type `100` in X, hit *Move* | Stage moves ~100 µm (visible in stand readout) |
-   | Focus | *Move up 10 µm* | Z drive moves, sample refocuses |
-   | Colibri | Turn LED on at 20 % | Actual light on the sample |
-   | DF2 | *Full Focus* button | Definite Focus locks a surface |
-   | Channel `Brightfield` preset | *Apply* | Correct filter cube + LED intensity |
+Do all 9 in a single session with the Log Panel open. If any step
+throws a red error or the physical hardware doesn't respond, **STOP**
+— fix it here, not in Python.
+
+| # | Test | Menu | Expected |
+|---|---|---|---|
+| 1 | **Snap** camera | Main window Snap button | 16-bit image, histogram not flat/saturated |
+| 2 | **Live** mode | Main window Live | ≥5 fps, stops on second click |
+| 3 | Change **exposure** to 100 ms, Snap | Main window Exposure box | ~10× brighter frame |
+| 4 | **XY nudge** 10 µm | Tools → Stage Control | Physical motion + XY readout updates |
+| 5 | **Z nudge** 1 µm | Tools → Stage Control (Z) | Focus knob turns; use a dry 10× objective so you can't crash |
+| 6 | **Objective turret** to another position | Tools → Device Property Browser → `Objective-Label` | Turret rotates; label matches |
+| 7 | **Colibri LED on** at 20 % + open Shutter | Tools → Device Property Browser → `Colibri-Intensity1` | LED physically lights |
+| 8 | **DF2 train + apply** | Property Browser → `DefiniteFocus-FocusMethod` = *Measure*, press stand autofocus button, jog Z ±20 µm, then set *Apply* | DF2 restores focus to trained plane |
+| 9 | Apply the **`Brightfield`** channel preset | Main window Channel dropdown | Reflector rotates, correct LED on, exposure sets |
 
 ### Expected
 
-Every row above works from the MM GUI. The `.cfg` file exists at the
-target path.
+All 9 pass with zero red errors in the Log Panel.
 
 ### STOP if
-- Any device doesn't enumerate: the adapter/driver is missing.
-  ZeissCAN29 needs the ZEISS CAN29 serial cable connected; PVCAM
-  needs the SDK; Marzhauser needs the vendor's virtual COM port
-  driver.
-- Wizard fails on `ZeissCAN29`: the CAN29 serial port might be held by
-  ZEN. Close ZEN completely (check Task Manager for `Zen.exe`).
-- Camera snaps but returns a black image: the light path might not be
-  set to the right port. Try setting the reflector / sideport
-  manually.
+- **ZeissScope Initialize** hangs or fails: the CAN29 port is held by
+  ZEN/MTB2 or the cable/baud/driver is wrong. Re-run Phase 2A step 5.
+  Don't add sub-devices until the hub initializes.
+- **PVCAM library lists no camera** in Add Device: `pvcam64.dll` can't
+  see the camera. Re-check Phase 2A step 2 — PVCAM install + reboot.
+- **Marzhäuser XY appears but doesn't move** (and joystick LED is
+  OFF): controller is in LSTEP mode but you loaded the `Marzhauser`
+  adapter. Switch to `MarzhauserLStep`. See also: motors disabled
+  ("Emergency Off" latched), joystick LED still on, or wrong axis
+  mapping.
+- **Colibri shows fewer LEDs than physically installed**: Colibri
+  wasn't fully booted when the wizard opened the port. Close the
+  wizard, power-cycle Colibri, wait 30 s, retry — cited failure mode
+  on image.sc.
+- **DF2 not in ZeissCAN29 sub-device list**: same power-on ordering
+  issue. Reset and start over with everything already booted.
+- **Any red ERROR in the Log Panel** during Add Device or a smoke
+  test: fix it before continuing. pymmcore-plus will reproduce the
+  failure with worse diagnostics.
 
 Do not proceed to Phase 3 until every row above passes.
 

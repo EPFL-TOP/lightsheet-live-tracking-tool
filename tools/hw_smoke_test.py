@@ -72,6 +72,27 @@ def parse_args() -> argparse.Namespace:
         "--settle-s", type=float, default=0.2,
         help="Extra settle time after each waitForDevice in seconds.",
     )
+    p.add_argument(
+        "--buffer-mb", type=int, default=512,
+        help=(
+            "MMCore circular buffer size in MB (default: 512). "
+            "PVCAM (Prime 95B) has a documented race between its "
+            "notification queue and MMCore's sequence buffer — "
+            "starving the buffer causes 'Camera image buffer read "
+            "failed' from pymmcore-plus while the same .cfg is fine "
+            "in MMStudio. 512-1024 MB is the safe range for 16-bit "
+            "full-frame Prime 95B. See image.sc thread 107892."
+        ),
+    )
+    p.add_argument(
+        "--adapter-path", default=None,
+        help=(
+            "Escape hatch for the two-adapter-tree DIV mismatch. "
+            "Point pymmcore-plus at an alternate adapter tree — "
+            "typically 'C:\\Program Files\\Micro-Manager-2.0' so it "
+            "uses the same DLLs MMStudio saved the .cfg against."
+        ),
+    )
     return p.parse_args()
 
 
@@ -189,13 +210,29 @@ def main() -> int:
 
     _log(f"Loading MM cfg: {args.cfg}")
     mmc = CMMCorePlus()
+
+    if args.adapter_path:
+        if not os.path.isdir(args.adapter_path):
+            _fail(f"--adapter-path is not a directory: {args.adapter_path}")
+            return 5
+        _log(f"Overriding adapter search path: {args.adapter_path}")
+        mmc.setDeviceAdapterSearchPaths([args.adapter_path])
+
+    _log(f"Setting circular buffer to {args.buffer_mb} MB (PVCAM race fix)")
+    try:
+        mmc.setCircularBufferMemoryFootprint(args.buffer_mb)
+    except Exception as e:
+        _log(f"WARN: could not set circular buffer: {e}")
+
     try:
         mmc.loadSystemConfiguration(args.cfg)
     except Exception as e:
         _fail(
             f"loadSystemConfiguration failed: {e}\n"
             f"  Common cause: device-interface-version mismatch. Check "
-            f"`mmc.getAPIVersionInfo()` matches your installed MM nightly."
+            f"`mmc.getAPIVersionInfo()` matches your installed MM nightly.\n"
+            f"  Escape hatch: rerun with --adapter-path "
+            f"'C:\\Program Files\\Micro-Manager-2.0'."
         )
         return 4
 
