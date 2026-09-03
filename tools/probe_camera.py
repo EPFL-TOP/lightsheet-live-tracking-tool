@@ -33,6 +33,9 @@ IDENTITY_HINTS = (
     "name", "version", "product",
 )
 
+# Set from --sweep in main(); consulted by try_camera().
+SWEEP_REQUESTED = False
+
 
 def _log(msg: str = "") -> None:
     print(msg, flush=True)
@@ -61,7 +64,128 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--buffer-mb", type=int, default=512,
                    help="Circular buffer MB — PVCAM needs headroom "
                         "(default: 512).")
+    p.add_argument("--sweep", action="store_true",
+                   help="Systematically vary exposure, ShutterMode and "
+                        "ReadoutRate to separate real saturation from "
+                        "an unread buffer.")
     return p.parse_args()
+
+
+def _snap_stats(mmc, label):
+    """Snap once and return (min, max, mean, std) or None."""
+    try:
+        mmc.snapImage()
+        img = mmc.getImage()
+        return (float(img.min()), float(img.max()),
+                float(img.mean()), float(img.std()))
+    except Exception as e:
+        _log(f"      snap failed: {type(e).__name__}: {e}")
+        return None
+
+
+def sweep(mmc, label, names) -> bool:
+    """Vary the things that distinguish the plausible causes.
+
+    Reasoning:
+    - If a very SHORT exposure brings values down, the sensor is really
+      being read and the field was simply saturated by light.
+    - If the constant value tracks the READOUT BIT DEPTH (65535 at
+      16-bit, 4095 at 12-bit), it is a fill pattern / unread buffer,
+      because real optical saturation does not renormalise itself.
+    - ShutterMode drives a shutter line that may not exist on this
+      sideport; 'Never' removes it from the equation.
+    """
+    _hdr("SWEEP")
+    found = False
+
+    def has(prop):
+        return prop in names
+
+    _log("Exposure sweep (short exposures should darken a real image):")
+    for exp in (1.0, 5.0, 20.0, 100.0):
+        try:
+            mmc.setExposure(exp)
+        except Exception as e:
+            _log(f"  {exp:6.1f} ms  <could not set: {e}>")
+            continue
+        st = _snap_stats(mmc, label)
+        if st is None:
+            continue
+        mn, mx, mean, std = st
+        flag = "  <-- VARYING" if mx != mn else ""
+        _log(f"  {exp:6.1f} ms  min={mn:8.1f} max={mx:8.1f} "
+             f"mean={mean:9.1f} std={std:7.1f}{flag}")
+        if mx != mn:
+            found = True
+
+    if has("ShutterMode"):
+        _log()
+        _log("ShutterMode sweep:")
+        try:
+            original = mmc.getProperty(label, "ShutterMode")
+        except Exception:
+            original = None
+        for val in ("Never", "Pre-Exposure"):
+            try:
+                mmc.setProperty(label, "ShutterMode", val)
+            except Exception as e:
+                _log(f"  {val:16s} <could not set: {e}>")
+                continue
+            st = _snap_stats(mmc, label)
+            if st is None:
+                continue
+            mn, mx, mean, std = st
+            flag = "  <-- VARYING" if mx != mn else ""
+            _log(f"  {val:16s} min={mn:8.1f} max={mx:8.1f} "
+                 f"std={std:7.1f}{flag}")
+            if mx != mn:
+                found = True
+        if original is not None:
+            try:
+                mmc.setProperty(label, "ShutterMode", original)
+            except Exception:
+                pass
+
+    if has("ReadoutRate"):
+        _log()
+        _log("ReadoutRate sweep — THE decisive test:")
+        _log("  If the constant follows the bit depth (65535 at 16-bit,")
+        _log("  4095 at 12-bit) it is an unread buffer, not light.")
+        try:
+            original = mmc.getProperty(label, "ReadoutRate")
+            opts = list(
+                mmc.getAllowedPropertyValues(label, "ReadoutRate")
+            )
+        except Exception:
+            original, opts = None, []
+        for val in opts:
+            try:
+                mmc.setProperty(label, "ReadoutRate", val)
+            except Exception as e:
+                _log(f"  {val:16s} <could not set: {e}>")
+                continue
+            st = _snap_stats(mmc, label)
+            if st is None:
+                continue
+            mn, mx, mean, std = st
+            note = ""
+            if mx == mn:
+                if abs(mn - 4095) < 1:
+                    note = "  <-- 12-bit max: FILL PATTERN confirmed"
+                elif abs(mn - 65535) < 1:
+                    note = "  <-- 16-bit max"
+            else:
+                note = "  <-- VARYING"
+                found = True
+            _log(f"  {val:16s} min={mn:8.1f} max={mx:8.1f} "
+                 f"std={std:7.1f}{note}")
+        if original is not None:
+            try:
+                mmc.setProperty(label, "ReadoutRate", original)
+            except Exception:
+                pass
+
+    return found
 
 
 def make_core(buffer_mb: int):
@@ -273,6 +397,12 @@ def try_camera(mmc, library: str, device: str, exposure: float) -> bool:
         ok_snap = _retry_with_internal_trigger(
             mmc, label, names, exposure
         )
+        if not ok_snap and SWEEP_REQUESTED:
+            ok_snap = sweep(mmc, label, names)
+        elif not ok_snap:
+            _log()
+            _log("  Re-run with --sweep to vary exposure, ShutterMode "
+                 "and ReadoutRate systematically.")
 
     # --- Verdict ---
     _log()
@@ -294,7 +424,9 @@ def try_camera(mmc, library: str, device: str, exposure: float) -> bool:
 
 
 def main() -> int:
+    global SWEEP_REQUESTED
     args = parse_args()
+    SWEEP_REQUESTED = args.sweep
     mmc = make_core(args.buffer_mb)
 
     try:
