@@ -123,17 +123,19 @@ def load_assembly(dll_path: str):
         sys.exit(3)
 
     _log(f"Loading assembly: {dll_path}")
+    asm = None
     try:
-        # AddReference accepts a full path without the .dll suffix.
-        clr.AddReference(dll_path[:-4] if dll_path.endswith(".dll")
-                         else dll_path)
+        # AddReference accepts a full path without the .dll suffix and
+        # returns the loaded Assembly.
+        asm = clr.AddReference(dll_path[:-4] if dll_path.endswith(".dll")
+                               else dll_path)
     except Exception as e_path:
         # Fall back to loading the raw file, which is more permissive.
         try:
             from System.Reflection import Assembly
-            Assembly.LoadFrom(dll_path)
+            asm = Assembly.LoadFrom(dll_path)
         except Exception as e_file:
-            _log(f"FAIL: could not load assembly.")
+            _log("FAIL: could not load assembly.")
             _log(f"      AddReference: {type(e_path).__name__}: {e_path}")
             _log(f"      LoadFrom:     {type(e_file).__name__}: {e_file}")
             _log()
@@ -144,29 +146,44 @@ def load_assembly(dll_path: str):
                  "CZCanSrv.exe being 32-bit turns out to matter.")
             sys.exit(3)
     _log("Assembly loaded.")
-    return clr
+
+    if asm is None:
+        # Some pythonnet versions return None from AddReference; recover
+        # the Assembly by scanning the AppDomain. Note AppDomain is a
+        # CLASS in the System namespace, not a module.
+        asm = find_mtb_assembly()
+    return asm
 
 
 def find_mtb_assembly():
     """Return the loaded MTBApi Assembly object, or None."""
-    from System.AppDomain import CurrentDomain
-    for asm in CurrentDomain.GetAssemblies():
-        name = asm.GetName().Name or ""
+    try:
+        from System import AppDomain
+    except ImportError:
+        return None
+    for candidate in AppDomain.CurrentDomain.GetAssemblies():
+        try:
+            name = candidate.GetName().Name or ""
+        except Exception:
+            continue
         if "MTB" in name:
-            return asm
+            return candidate
     return None
 
 
-def dump_api(filter_str: str | None, show_members: bool) -> None:
+def dump_api(asm, filter_str: str | None, show_members: bool) -> None:
     _hdr("MTB API SURFACE (reflection)")
 
-    asm = find_mtb_assembly()
+    if asm is None:
+        asm = find_mtb_assembly()
     if asm is None:
         _log("Could not locate the loaded MTBApi assembly.")
         return
 
-    _log(f"Assembly: {asm.GetName().Name} "
-         f"v{asm.GetName().Version}")
+    try:
+        _log(f"Assembly: {asm.GetName().Name} v{asm.GetName().Version}")
+    except Exception:
+        _log(f"Assembly: {asm}")
     _log()
 
     try:
@@ -227,13 +244,14 @@ def dump_api(filter_str: str | None, show_members: bool) -> None:
                 _log(f"        <members unavailable: {e}>")
 
 
-def try_connect(locale: str) -> int:
+def try_connect(asm, locale: str) -> int:
     _hdr("MTB CONNECTION TEST")
 
     # The documented MTB SDK entry point is ZEISS.MTB.Api.MTBConnection,
     # but do not trust that blindly — locate it by reflection first.
     conn_type = None
-    asm = find_mtb_assembly()
+    if asm is None:
+        asm = find_mtb_assembly()
     if asm is None:
         _log("Could not locate the MTBApi assembly.")
         return 4
@@ -355,14 +373,14 @@ def main() -> int:
     do_dump = args.dump_api or not (args.dump_api or args.connect)
     do_conn = args.connect or not (args.dump_api or args.connect)
 
-    load_assembly(args.dll)
+    asm = load_assembly(args.dll)
 
     if do_dump:
-        dump_api(args.filter, args.members)
+        dump_api(asm, args.filter, args.members)
 
     rc = 0
     if do_conn:
-        rc = try_connect(args.locale)
+        rc = try_connect(asm, args.locale)
 
     _hdr("DONE")
     if rc == 0:

@@ -10,6 +10,36 @@ Read the whole file once before running the first command.
 
 ---
 
+> ## ⚠️ Status note — 2026-09-03
+>
+> **Phase 2's `ZeissCAN29` path does NOT apply to the EPFL Axio Observer 7.**
+> That stand carries its CAN29 bus **over USB** into Zeiss's `CZCanSrv`,
+> not over RS-232. Proof: every device in
+> `C:\ProgramData\Carl Zeiss\MTB2011\2.12.0.7\Active Configuration.xml`
+> carries `PortType="USB" PortNo="4100"`. Probing COM1 at every baud
+> returns ZeissCAN29 error 10015 ("microscope does not answer") because
+> the port opens onto nothing. No cable fixes this — older stands had a
+> hardware serial↔CAN gateway; on the Observer 7 that gateway moved into
+> `CZCanSrv` in software.
+>
+> **Current plan for that microscope:** camera via Micro-Manager's
+> `PVCAM` adapter (confirmed working) + stage/focus/Colibri/DF2/piezo via
+> **MTB 2011** through `pythonnet`, as a new `MicroscopeInterface_MTB`.
+> MTB is Zeiss's hardware abstraction *service* — architecturally the
+> same role MM's device adapters play — so using it does **not** mean
+> running ZEN. ZEN is merely another MTB client. Start with
+> `tools/probe_mtb.py`.
+>
+> Phases 0, 1, and 4–6 below still apply unchanged. Phase 2/3 remain
+> valid for any microscope that genuinely exposes serial CAN29.
+>
+> **Before any session on this machine:** the documented lab procedure is
+> to **restart the PC, the camera, and the microscope**. Skipping it is
+> why ZEN sometimes cannot select a camera — enumeration order matters,
+> and it matters for Micro-Manager too.
+
+---
+
 ## Prerequisites (verify before starting)
 
 - Windows 10/11 with Python 3.11+ installed (miniconda or system Python).
