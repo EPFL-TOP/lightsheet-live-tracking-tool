@@ -24,11 +24,14 @@ class FakeContinual:
 
     def __init__(self, position=0.0, units=("µm",),
                  lo=-350000.0, hi=350000.0, step=0.25,
-                 refuse=False, raise_on_set=False):
+                 refuse=False, raise_on_set=False,
+                 typ_dev=0.0, max_dev=0.0):
         self._pos = position
         self._units = list(units)
         self._lo, self._hi = lo, hi
         self._step = step
+        self._typ_dev = typ_dev
+        self._max_dev = max_dev
         self.refuse = refuse
         self.raise_on_set = raise_on_set
         self.set_calls = []
@@ -51,6 +54,12 @@ class FakeContinual:
 
     def StepWidth(self, unit):
         return self._step
+
+    def TypicalDeviation(self, unit):
+        return self._typ_dev
+
+    def MaxDeviation(self, unit):
+        return self._max_dev
 
     def SetPosition(self, pos, unit, mode, timeout):
         self.set_calls.append((pos, unit, mode, timeout))
@@ -504,3 +513,85 @@ def test_explicit_tolerance_overrides_step_width():
     ax = MTBAxis(fake, "axis_x")
     ax.move_to(102.0, tolerance=5.0)
     assert not fake.set_calls, "explicit tolerance should suppress it"
+
+
+# ====================================================================
+# Servoing axes and arrival tolerance
+#
+# A closed-loop piezo resolves 0.01 um but dithers well above that, so
+# using step width as the arrival tolerance made normal settling look
+# like a refusal. The real microscope failed with
+#   piezo: SetPosition(250.000 um) was refused and the axis is still
+#          at 250.190
+# while XY corrections in the same run succeeded exactly.
+# Observed 2026-09-04. MTB declares the real figures via
+# TypicalDeviation() / MaxDeviation().
+# ====================================================================
+
+def test_arrival_tolerance_uses_typical_deviation_when_larger():
+    fake = FakeContinual(step=0.01, typ_dev=0.15)
+    ax = MTBAxis(fake, "piezo")
+    assert ax.arrival_tolerance == pytest.approx(0.15)
+
+
+def test_arrival_tolerance_falls_back_to_step_width():
+    fake = FakeContinual(step=0.25, typ_dev=0.0)
+    ax = MTBAxis(fake, "axis_x")
+    assert ax.arrival_tolerance == pytest.approx(0.25)
+
+
+def test_arrival_tolerance_is_never_zero():
+    fake = FakeContinual(step=0.0, typ_dev=0.0)
+    ax = MTBAxis(fake, "odd")
+    assert ax.arrival_tolerance > 0
+
+
+def test_REGRESSION_servoing_piezo_within_deviation_is_not_a_failure():
+    """The exact failing case: commanded 250.000, sits at 250.190,
+    step is only 0.010 — but the axis declares a larger deviation."""
+
+    class Servoing(FakeContinual):
+        def SetPosition(self, pos, unit, mode, timeout):
+            self.set_calls.append((pos, unit, mode, timeout))
+            return False          # refuses, and does not move
+
+    fake = Servoing(position=250.190, step=0.01,
+                    typ_dev=0.10, max_dev=0.25)
+    ax = MTBAxis(fake, "piezo")
+    landed = ax.move_to(250.000)
+    assert landed == pytest.approx(250.190)
+
+
+def test_deviation_beyond_max_still_raises():
+    class WayOff(FakeContinual):
+        def SetPosition(self, pos, unit, mode, timeout):
+            self.set_calls.append((pos, unit, mode, timeout))
+            return False
+
+    fake = WayOff(position=280.0, step=0.01,
+                  typ_dev=0.10, max_dev=0.25)
+    ax = MTBAxis(fake, "piezo")
+    with pytest.raises(MTBError, match="still at"):
+        ax.move_to(250.0)
+
+
+def test_deviations_default_to_zero_when_unsupported():
+    """Axes whose adapter lacks the calls must not break."""
+
+    class NoDeviations(FakeContinual):
+        def TypicalDeviation(self, unit):
+            raise RuntimeError("unsupported")
+
+        def MaxDeviation(self, unit):
+            raise RuntimeError("unsupported")
+
+    ax = MTBAxis(NoDeviations(step=0.25), "axis_x")
+    assert ax.typical_deviation == 0.0
+    assert ax.max_deviation == 0.0
+    assert ax.arrival_tolerance == pytest.approx(0.25)
+
+
+def test_describe_reports_deviations_and_tolerance():
+    m, _ = _motion()
+    text = m.describe()
+    assert "dev typ" in text and "tol" in text

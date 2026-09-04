@@ -249,6 +249,38 @@ class MTBAxis:
         except Exception:
             return 0.0
 
+    @property
+    def typical_deviation(self) -> float:
+        """Positioning error the axis normally achieves.
+
+        Distinct from step width: a closed-loop piezo resolves 0.01 µm
+        but servos with a dither an order of magnitude larger, so its
+        readback wanders. Using step width as an arrival tolerance
+        made legitimate settles look like refusals.
+        """
+        try:
+            return abs(float(self._c.TypicalDeviation(self.unit)))
+        except Exception:
+            return 0.0
+
+    @property
+    def max_deviation(self) -> float:
+        """Worst-case positioning error the axis admits to."""
+        try:
+            return abs(float(self._c.MaxDeviation(self.unit)))
+        except Exception:
+            return 0.0
+
+    @property
+    def arrival_tolerance(self) -> float:
+        """How close counts as "there".
+
+        Takes the largest of step width and the axis's own declared
+        typical deviation — the hardware knows its precision better
+        than we do.
+        """
+        return max(self.step, self.typical_deviation, 1e-6)
+
     # --- writes ---
 
     def move_to(self, position: float,
@@ -282,10 +314,8 @@ class MTBAxis:
                     self.label, position, self.unit, target, lo, hi,
                 )
 
-        # One step width is the smallest move the axis can resolve, so
-        # anything closer than that is already "there".
-        tol = tolerance if tolerance is not None else max(self.step,
-                                                          1e-6)
+        tol = (tolerance if tolerance is not None
+               else self.arrival_tolerance)
         current = self.position
         if abs(current - target) <= tol:
             logger.debug(
@@ -315,6 +345,19 @@ class MTBAxis:
                         "%s: SetPosition returned False but the axis "
                         "is at %.3f %s — treating as done",
                         self.label, landed, self.unit,
+                    )
+                    return landed
+                # A servoing axis may sit outside the nominal tolerance
+                # yet still be as close as it can hold. Accept up to
+                # its declared worst case, but say so.
+                slack = max(tol, self.max_deviation)
+                if abs(landed - target) <= slack:
+                    logger.info(
+                        "%s: settled at %.3f %s against target %.3f "
+                        "(within its %.3f max deviation, outside the "
+                        "%.3f tolerance) — accepting",
+                        self.label, landed, self.unit, target,
+                        self.max_deviation, tol,
                     )
                     return landed
                 raise MTBError(
@@ -527,6 +570,8 @@ class MTBMotion:
             lo, hi = ax.limits
             lines.append(
                 f"  {ax.label:8s} {ax.position:12.3f} {ax.unit}  "
-                f"[{lo:.1f}, {hi:.1f}]  step {ax.step:g}"
+                f"[{lo:.1f}, {hi:.1f}]  step {ax.step:g}  "
+                f"dev typ {ax.typical_deviation:g} / max "
+                f"{ax.max_deviation:g}  tol {ax.arrival_tolerance:g}"
             )
         return "\n".join(lines)
