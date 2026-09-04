@@ -30,11 +30,20 @@ import io
 import json
 import logging
 import os
+import sys
 import threading
 import time
 
 import numpy as np
 import panel as pn
+
+# `panel serve` puts THIS file's directory on sys.path, not the repo
+# root, so `import tracking_tools` fails without this. Same pattern as
+# zeiss_panel_app.py and the other apps here.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.abspath(os.path.join(_HERE, '..'))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 pn.extension("tabulator", notifications=True)
 

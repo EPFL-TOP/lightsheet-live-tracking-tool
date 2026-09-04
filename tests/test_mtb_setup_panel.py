@@ -238,3 +238,53 @@ def test_stretch_survives_a_constant_frame():
     """A saturated or dark frame has hi == lo; must not divide by zero."""
     flat = np.full((16, 16), 65535, dtype=np.uint16)
     assert _stretch_to_png(flat)[:4] == b"\x89PNG"
+
+
+# ====================================================================
+# Import path
+#
+# `panel serve interactive_tools/mtb_setup.py` puts only that file's
+# DIRECTORY on sys.path, not the repo root, so `import tracking_tools`
+# failed at runtime with
+#   Cannot import the MTB layer: No module named 'tracking_tools'
+# even though the tests passed (pytest runs from the repo root).
+# Observed 2026-09-04.
+# ====================================================================
+
+def test_REGRESSION_module_puts_repo_root_on_sys_path():
+    """Importing the panel must make tracking_tools importable."""
+    import subprocess
+    import sys as _sys
+    from pathlib import Path
+
+    here = Path(__file__).resolve().parent
+    root = here.parent
+    code = (
+        "import sys\n"
+        "sys.path = [p for p in sys.path "
+        f"if {str(root)!r} not in p]\n"
+        f"sys.path.insert(0, {str(root / 'interactive_tools')!r})\n"
+        "import mtb_setup\n"
+        "import tracking_tools.microscope_interface.mtb as m\n"
+        "print('OK', bool(m.MTB_IDS))\n"
+    )
+    result = subprocess.run(
+        [_sys.executable, "-c", code],
+        capture_output=True, text=True, cwd=str(root.parent),
+    )
+    assert "OK True" in result.stdout, (
+        "panel app does not make tracking_tools importable; "
+        f"stdout={result.stdout!r} stderr={result.stderr[-500:]!r}"
+    )
+
+
+def test_connect_reports_a_missing_dependency_clearly(panel_obj):
+    """Without pythonnet the message must name the fix, and the panel
+    must stay usable rather than raising."""
+    panel_obj._on_connect()
+    msg = panel_obj.status.object
+    assert "❌" in msg
+    # Either the import failed or the connection did; both must be
+    # reported, never raised.
+    assert "MTB" in msg
+    assert not panel_obj.connected
