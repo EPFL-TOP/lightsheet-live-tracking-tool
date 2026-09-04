@@ -627,6 +627,40 @@ class MTBObjective:
             out.append(entry)
         return out
 
+    def set_position(self, index: int, timeout_ms: int = 30000) -> int:
+        """Rotate the nosepiece to `index`. Returns the position after.
+
+        IMTBChanger.SetPosition takes an Int16 and the same
+        MTBCmdSetModes enum the axes use, so it must be a real enum
+        member — pythonnet >= 3.0 rejects a bare int.
+
+        Actually turning the turret beats asking the operator which
+        objective they believe is fitted: afterwards the magnification
+        is read from the hardware rather than assumed.
+        """
+        mode = resolve_mode("Synchronous")
+        try:
+            ok = self._changer.SetPosition(int(index), mode, timeout_ms)
+        except Exception as e:
+            raise MTBError(
+                f"{self.label}: could not rotate to slot {index}"
+            ) from e
+        if ok is False:
+            # Same convention as the axes: False can mean "already
+            # there" rather than "refused".
+            if self.position == int(index):
+                logger.debug(
+                    "%s: already at slot %s", self.label, index
+                )
+            else:
+                raise MTBError(
+                    f"{self.label}: rotation to slot {index} was "
+                    f"refused; the turret is still at "
+                    f"{self.position}. It may be locked, or the stand "
+                    f"may be blocking the change."
+                )
+        return self.position
+
     @property
     def is_empty(self) -> bool:
         """True when the current slot holds no objective."""

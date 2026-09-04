@@ -838,3 +838,74 @@ def test_pixel_pitch_for_the_installed_objectives():
     )
     assert sample_pixel_size_um(11.0, 10.0) == pytest.approx(1.1)
     assert sample_pixel_size_um(11.0, 40.0) == pytest.approx(0.275)
+
+
+# ------------------------------------------- nosepiece rotation
+
+class RotatingNosepiece(FakeNosepiece):
+    """Records rotations; SetPosition mirrors the axis convention."""
+
+    def __init__(self, position=3, refuse=False):
+        super().__init__(position)
+        self.refuse = refuse
+        self.set_calls = []
+
+    def SetPosition(self, position, mode, timeout):
+        self.set_calls.append((position, mode, timeout))
+        if self.refuse:
+            return False
+        self.Position = int(position)
+        return True
+
+
+def _rotating(position=3, refuse=False):
+    from tracking_tools.microscope_interface.mtb import MTBObjective
+    obj = MTBObjective.__new__(MTBObjective)
+    obj.label = "objective"
+    changer = RotatingNosepiece(position, refuse)
+    obj._raw = changer
+    obj._changer = changer
+    return obj, changer
+
+
+def test_set_position_rotates_the_turret():
+    obj, changer = _rotating(position=3)
+    assert obj.set_position(4) == 4
+    assert changer.set_calls[-1][0] == 4
+
+
+def test_set_position_passes_a_real_enum_not_an_int(monkeypatch):
+    """IMTBChanger.SetPosition takes MTBCmdSetModes, and pythonnet >=3
+    refuses an implicit int -> Enum conversion."""
+    seen = []
+    monkeypatch.setattr(
+        mtb, "resolve_mode",
+        lambda name="Synchronous": seen.append(name) or f"<{name}>",
+    )
+    obj, changer = _rotating()
+    obj.set_position(2)
+    assert seen == ["Synchronous"]
+    assert changer.set_calls[-1][1] == "<Synchronous>"
+
+
+def test_rotation_to_the_current_slot_is_not_an_error():
+    """False can mean 'already there', as on the axes."""
+    obj, _ = _rotating(position=4, refuse=True)
+    assert obj.set_position(4) == 4
+
+
+def test_refused_rotation_elsewhere_raises():
+    obj, _ = _rotating(position=3, refuse=True)
+    with pytest.raises(MTBError, match="refused"):
+        obj.set_position(4)
+
+
+def test_magnification_follows_the_rotation():
+    """The whole point: read the hardware after moving, do not trust
+    what the operator selected."""
+    obj, _ = _rotating(position=3)
+    assert obj.magnification is None      # slot 3 is empty
+    obj.set_position(4)
+    assert obj.magnification == pytest.approx(40.0)
+    obj.set_position(2)
+    assert obj.magnification == pytest.approx(10.0)

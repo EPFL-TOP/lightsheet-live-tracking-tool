@@ -297,6 +297,14 @@ class MTBSetupPanel:
         self.tracking_2d = pn.widgets.Checkbox(
             name="2-D tracking (ignore Z shift)", value=True
         )
+        # Not present in tracking_config.yaml: the runner injects it,
+        # and MultiRoIBaseTracker.__init__ requires it positionally —
+        # omitting it fails with
+        #   MultiRoIBaseTracker.init() missing 1 required positional
+        #   argument: 'serverkit'
+        self.serverkit = pn.widgets.Checkbox(
+            name="Use serverkit (CoTracker server)", value=True
+        )
         # Pixel pitch is derived, not guessed: camera pixel / (objective
         # x adapter). MTB knows the objective, so read it rather than
         # making the operator remember.
@@ -319,10 +327,10 @@ class MTBSetupPanel:
         # element indexing may be off by one, so let the operator pick
         # the objective that is actually in the light path.
         self.objective_choice = pn.widgets.Select(
-            name="Use objective", options=[], width=380,
+            name="Objective", options=[], width=380,
         )
         self.btn_apply_objective = pn.widgets.Button(
-            name="Apply", width=90,
+            name="Rotate to it", button_type="primary", width=130,
         )
         self.outdir = pn.widgets.TextInput(
             name="Experiment root", value="", width=560,
@@ -810,13 +818,15 @@ class MTBSetupPanel:
                 f"| {s['index']}{marker} | `{s['name']}` | | | |"
             )
             if pitch:
-                options[f"{s['index']}: {s['name']} "
-                        f"({mag:g}×, {pitch:.4f} µm)"] = pitch
+                label = (f"Slot {s['index']}: {s['name']} "
+                         f"({mag:g}×, {pitch:.4f} µm)")
+                options[label] = (s["index"], pitch)
 
         lines = ["\n".join(rows)]
 
         self.objective_choice.options = list(options)
-        self._objective_pitches = options
+        self._objective_slots = {k: v[0] for k, v in options.items()}
+        self._objective_pitches = {k: v[1] for k, v in options.items()}
 
         current = next((s for s in slots if s["index"] == pos), None)
         if current and not current["empty"] and current["magnification"]:
@@ -829,12 +839,17 @@ class MTBSetupPanel:
                 f"`{current['name']}` → pixel pitch "
                 f"**{pitch:.4f} µm**. _Pixel size XY updated._"
             )
+            for label, idx in self._objective_slots.items():
+                if idx == pos:
+                    self.objective_choice.value = label
+                    break
         else:
             lines.append(
                 f"⚠️ **Slot {pos} is empty** — no objective in the "
                 f"light path, so the pixel pitch cannot be derived. "
-                f"Rotate the nosepiece to a populated slot and press "
-                f"this again, or pick one below and click *Apply*."
+                f"Pick an objective below and click **Rotate to it**; "
+                f"the turret will turn and the pitch is then read back "
+                f"from the hardware."
             )
             if options:
                 first = list(options)[0]
@@ -843,19 +858,32 @@ class MTBSetupPanel:
         self.objective_info.object = "\n\n".join(lines)
 
     def _on_apply_objective(self, _event=None) -> None:
-        """Adopt the pixel pitch of the operator-chosen objective."""
-        pitch = getattr(self, "_objective_pitches", {}).get(
-            self.objective_choice.value
-        )
-        if pitch is None:
+        """Rotate the nosepiece to the chosen slot, then re-read.
+
+        Rotating and re-reading is better than trusting a dropdown:
+        the pixel pitch ends up derived from the objective actually in
+        the light path.
+        """
+        if not self._require_connection():
+            return
+        choice = self.objective_choice.value
+        slot = getattr(self, "_objective_slots", {}).get(choice)
+        if slot is None:
             self._say("Read the objectives first, then pick one.",
                       "warn")
             return
-        self.pixel_xy.value = round(pitch, 4)
-        self._say(
-            f"Pixel size XY set to {pitch:.4f} µm from "
-            f"{self.objective_choice.value}.", "ok",
-        )
+
+        try:
+            obj = self.session.objective()
+            self._say(f"Rotating nosepiece to slot {slot} …")
+            obj.set_position(int(slot))
+        except Exception as e:
+            self._say(f"Could not rotate the nosepiece: {e}", "err")
+            logger.exception("nosepiece rotation failed")
+            return
+
+        # Re-read so the pitch comes from the hardware, not the choice.
+        self._on_read_objective()
 
     @property
     def tracking_requested(self) -> bool:
@@ -1013,7 +1041,8 @@ class MTBSetupPanel:
             config = yaml.safe_load(fh)
 
         runner_config = config["tracking_runner"]
-        roi_tracker_config = config["roi_tracker"]
+        roi_tracker_config = dict(config["roi_tracker"])
+        roi_tracker_config["serverkit"] = bool(self.serverkit.value)
         position_tracker_config = {
             "pixel_size_xy": float(self.pixel_xy.value),
             "pixel_size_z": float(self.pixel_z.value),
@@ -1295,8 +1324,16 @@ class MTBSetupPanel:
                    self.btn_read_objective),
             self.objective_info,
             pn.Row(self.objective_choice, self.btn_apply_objective),
+            pn.pane.Markdown(
+                "_**Rotate to it** physically turns the nosepiece, "
+                "then re-reads the magnification from the hardware — "
+                "so the pixel pitch reflects the objective actually in "
+                "the light path. Check clearance before rotating with "
+                "a sample loaded._",
+                width=560, styles={"font-size": "0.8em"},
+            ),
             pn.Row(self.pixel_xy, self.pixel_z),
-            pn.Row(self.tracking_2d),
+            pn.Row(self.tracking_2d, self.serverkit),
             pn.Row(self.max_xy, self.max_z),
             pn.layout.Divider(),
             self.run_status,
