@@ -235,10 +235,20 @@ def test_pause_stubs_exist_and_return_none(patched):
     assert iface.continue_from_pause() is None
 
 
-def test_wait_for_image_returns_none_on_timeout(patched):
+def test_REGRESSION_wait_for_image_returns_a_triple_on_timeout(patched):
+    """TrackingRunner.run_zeiss() unpacks the result BEFORE testing it:
+        image, tp, pos = microscope.wait_for_image(...)
+        if image is None: ...
+    so a bare None raised
+        cannot unpack non-iterable NoneType object
+    Every other backend returns (None, None, None). Observed
+    2026-09-04, ~50 s into a closed-loop run."""
     make, _, _ = patched
     iface = make()
-    assert iface.wait_for_image(timeout_ms=10) is None
+    result = iface.wait_for_image(timeout_ms=10)
+    assert isinstance(result, tuple) and len(result) == 3
+    image, tp, pos = result          # must not raise
+    assert image is None and tp is None and pos is None
 
 
 # ---------------------------------------------------------- full loop
@@ -251,10 +261,11 @@ def test_loop_visits_every_position_each_timepoint(patched):
         seen = []
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
-            item = iface.wait_for_image(timeout_ms=200)
-            if item is None:
-                break
-            _, tp, pos = item
+            image, tp, pos = iface.wait_for_image(timeout_ms=200)
+            if image is None:
+                if iface.stop_requested:
+                    break
+                continue
             seen.append((tp, pos))
     finally:
         iface.disconnect()
@@ -272,7 +283,8 @@ def test_frames_are_written_with_the_shared_naming_convention(patched):
     try:
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
-            if iface.wait_for_image(timeout_ms=200) is None:
+            image, _, _ = iface.wait_for_image(timeout_ms=200)
+            if image is None and iface.stop_requested:
                 break
     finally:
         iface.disconnect()
@@ -292,7 +304,8 @@ def test_loop_applies_accumulated_drift_on_the_next_visit(patched):
     try:
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
-            if iface.wait_for_image(timeout_ms=200) is None:
+            image, _, _ = iface.wait_for_image(timeout_ms=200)
+            if image is None and iface.stop_requested:
                 break
     finally:
         iface.disconnect()
@@ -361,10 +374,12 @@ def test_REGRESSION_zero_drift_does_not_deadlock(patched):
         tps = set()
         deadline = time.monotonic() + 10.0   # generous wall budget
         while time.monotonic() < deadline:
-            item = iface.wait_for_image(timeout_ms=200)
-            if item is None:
-                break
-            tps.add(item[1])
+            image, tp, _ = iface.wait_for_image(timeout_ms=200)
+            if image is None:
+                if iface.stop_requested:
+                    break
+                continue
+            tps.add(tp)
     finally:
         iface.disconnect()
 
@@ -426,10 +441,12 @@ def test_REGRESSION_a_failing_position_does_not_kill_the_run(patched):
         seen = []
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
-            item = iface.wait_for_image(timeout_ms=200)
-            if item is None:
-                break
-            seen.append((item[1], item[2]))
+            image, tp, pos = iface.wait_for_image(timeout_ms=200)
+            if image is None:
+                if iface.stop_requested:
+                    break
+                continue
+            seen.append((tp, pos))
     finally:
         iface.disconnect()
 
@@ -528,5 +545,75 @@ def test_connect_is_idempotent(patched):
         assert iface._thread is first, (
             "connect() started a second acquisition thread"
         )
+    finally:
+        iface.disconnect()
+
+
+# ====================================================================
+# wait_for_image contract
+#
+# run_zeiss() unpacks before testing and uses stop_requested to tell a
+# timeout from end-of-run:
+#     image, tp, pos = microscope.wait_for_image(timeout_ms=...)
+#     if image is None:
+#         if getattr(microscope, 'stop_requested', False): break
+#         continue
+# ====================================================================
+
+def test_stop_requested_false_while_running(patched):
+    make, _, _ = patched
+    iface = make(stop_after_tp=50, interval_s=0.05)
+    iface.connect()
+    try:
+        assert not iface.stop_requested
+    finally:
+        iface.disconnect()
+
+
+def test_stop_requested_true_after_stop(patched):
+    make, _, _ = patched
+    iface = make()
+    iface.connect()
+    iface.stop()
+    assert iface.stop_requested
+
+
+def test_REGRESSION_stop_requested_true_once_frames_are_exhausted(
+        patched):
+    """Without this the tracker would spin forever after the final
+    timepoint, since a timeout is indistinguishable from end-of-run."""
+    make, _, _ = patched
+    iface = make(stop_after_tp=1, interval_s=0.01)
+    iface.connect()
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            image, _, _ = iface.wait_for_image(timeout_ms=200)
+            if image is None and iface.stop_requested:
+                break
+        assert iface.stop_requested, (
+            "backend never signalled end-of-run"
+        )
+    finally:
+        iface.disconnect()
+
+
+def test_frames_still_unpack_as_a_triple(patched):
+    make, _, _ = patched
+    iface = make(stop_after_tp=1, interval_s=0.01)
+    iface.connect()
+    try:
+        got = None
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            image, tp, pos = iface.wait_for_image(timeout_ms=200)
+            if image is not None:
+                got = (image, tp, pos)
+                break
+        assert got is not None, "no frame arrived"
+        image, tp, pos = got
+        assert image.shape == (8, 8)
+        assert tp == 0
+        assert pos in ("scene_000", "scene_001")
     finally:
         iface.disconnect()

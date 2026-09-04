@@ -1166,13 +1166,14 @@ class MTBSetupPanel:
                             f"({len(ready)}/{len(state)} ready)"
                         )
 
-                item = iface.wait_for_image(timeout_ms=500)
-                if item is None:
-                    thread = getattr(iface, "_thread", None)
-                    if thread is None or not thread.is_alive():
+                # (None, None, None) on timeout — the contract every
+                # backend shares; stop_requested says whether more
+                # frames are coming.
+                img, tp, pos_name = iface.wait_for_image(timeout_ms=500)
+                if img is None:
+                    if iface.stop_requested:
                         return
                     continue
-                img, tp, pos_name = item
                 self._push_log(
                     f"t={tp} {pos_name} "
                     f"mean={float(np.mean(img)):.0f} (open loop)"
@@ -1193,10 +1194,9 @@ class MTBSetupPanel:
                 self._push_log(f"ERROR building tracker: {e}")
                 self._push_log("continuing open loop")
                 while not self._stop_flag.is_set():
-                    if iface.wait_for_image(timeout_ms=500) is None:
-                        thread = getattr(iface, "_thread", None)
-                        if thread is None or not thread.is_alive():
-                            break
+                    img, _, _ = iface.wait_for_image(timeout_ms=500)
+                    if img is None and iface.stop_requested:
+                        break
                 return
 
             self._push_status("▶ Closed-loop tracking active")

@@ -141,6 +141,9 @@ class MicroscopeInterface_MTB:
         self._image_queue: queue.Queue = queue.Queue()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        # Set when the acquisition loop exits, so stop_requested can
+        # distinguish "timed out" from "no more frames are coming".
+        self._finished = False
 
         self.session: MTBSession | None = None
         self.motion: MTBMotion | None = None
@@ -185,6 +188,7 @@ class MicroscopeInterface_MTB:
             logger.info("synthetic_source supplied — camera not opened")
 
         self._stop_event.clear()
+        self._finished = False
         self._thread = threading.Thread(
             target=self._acquisition_loop,
             name="mtb-acquisition",
@@ -339,6 +343,7 @@ class MicroscopeInterface_MTB:
                         tp - 1, elapsed, self.interval_s,
                     )
         finally:
+            self._finished = True
             self._image_queue.put(None)
             logger.info("acquisition loop exited after %d timepoints",
                         tp)
@@ -405,13 +410,39 @@ class MicroscopeInterface_MTB:
 
     # ---------------------------------------------- tracker contract
 
+    @property
+    def stop_requested(self) -> bool:
+        """True once the acquisition loop has stopped or been asked to.
+
+        TrackingRunner.run_zeiss() uses this to tell a plain timeout
+        apart from end-of-run: on (None, None, None) it continues if
+        this is False and breaks if True. Without it the tracker would
+        spin forever after the last timepoint.
+        """
+        if self._stop_event.is_set():
+            return True
+        if self._finished:
+            return True
+        return False
+
     def wait_for_image(self, timeout_ms: int = 1000):
-        """Pop the next acquired frame, or None on timeout/shutdown."""
+        """Pop the next frame as (image, timepoint, position_name).
+
+        Returns (None, None, None) on timeout or shutdown — NOT a bare
+        None. Every other backend uses that convention and
+        TrackingRunner relies on it: run_zeiss() unpacks the result
+        BEFORE testing it, so returning None raised
+          cannot unpack non-iterable NoneType object
+        Pair it with stop_requested to tell timeout from end-of-run.
+        """
         try:
             item = self._image_queue.get(timeout=timeout_ms / 1000.0)
         except queue.Empty:
-            return None
-        return item  # None is the shutdown sentinel
+            return None, None, None
+        if item is None:                 # shutdown sentinel
+            self._finished = True
+            return None, None, None
+        return item
 
     def wait_for_pause(self, timeout_ms: int = 1000):
         return self.wait_for_image(timeout_ms)

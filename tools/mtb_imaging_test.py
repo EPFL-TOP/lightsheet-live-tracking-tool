@@ -262,12 +262,11 @@ def main() -> int:
             + 60.0
         )
         while time.monotonic() < deadline:
-            item = iface.wait_for_image(timeout_ms=500)
-            if item is None:
-                if iface._thread is None or not iface._thread.is_alive():
+            img, tp, pos_name = iface.wait_for_image(timeout_ms=500)
+            if img is None:
+                if iface.stop_requested:
                     break
                 continue
-            img, tp, pos_name = item
             mn, mx = float(img.min()), float(img.max())
             mean, std = float(img.mean()), float(img.std())
             frames.append((tp, pos_name, mn, mx, mean, std))
