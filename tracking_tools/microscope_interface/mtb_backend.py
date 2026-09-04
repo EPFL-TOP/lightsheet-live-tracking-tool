@@ -73,6 +73,12 @@ class MicroscopeInterface_MTB:
       buffer_mb       MMCore circular buffer (default 512)
       synthetic_source  callable(x, y, z, pos_name) -> ndarray, used
                       instead of the camera for offline testing
+      session         an existing MTBSession to reuse. Omit and the
+                      process-wide MTBSession.shared() is used, which
+                      is what you almost always want — MTB permits
+                      only ONE Login per process, so a backend that
+                      created its own session would break any GUI
+                      holding one.
     """
 
     def __init__(self, positions_config: dict, dirpath: str,
@@ -95,6 +101,10 @@ class MicroscopeInterface_MTB:
         self.stop_after_tp = p.get("stop_after_tp")
         self.buffer_mb = int(p.get("buffer_mb", 512))
         self.synthetic_source = p.get("synthetic_source")
+        # An injected session belongs to the caller: we must not log it
+        # out, because MTB cannot Login again in this process.
+        self._injected_session = p.get("session")
+        self._owns_session = False
 
         self.pos_names = list(positions_config.keys())
         if not self.pos_names:
@@ -136,8 +146,14 @@ class MicroscopeInterface_MTB:
         """Open MTB and the camera, then start the acquisition loop."""
         logger.info("MTB backend connecting")
 
-        kwargs = {"dll_path": self.dll_path} if self.dll_path else {}
-        self.session = MTBSession(**kwargs).connect()
+        if self._injected_session is not None:
+            self.session = self._injected_session
+            logger.info("reusing the caller's MTB session")
+        else:
+            kwargs = {"dll_path": self.dll_path} if self.dll_path else {}
+            # shared() rather than MTBSession(...): a second Login in
+            # this process would fail with E_NOINTERFACE.
+            self.session = MTBSession.shared(**kwargs)
         self.motion = MTBMotion(self.session, z_axis=self.z_axis)
         logger.info("MTB motion ready:\n%s", self.motion.describe())
 
@@ -193,9 +209,11 @@ class MicroscopeInterface_MTB:
             except Exception as e:
                 logger.warning("camera unload failed: %s", e)
             self.mmc = None
-        if self.session is not None:
-            self.session.disconnect()
-            self.session = None
+        # Leave the MTB session alone. Logging out would make every
+        # later Login in this process fail, stranding the GUI and any
+        # subsequent run. The owner closes it at process exit via
+        # MTBSession.close_shared().
+        self.session = None
         self.motion = None
         with self._drift_lock:
             final = {k: list(v) for k, v in self._cum_drift.items()}

@@ -73,6 +73,18 @@ class MTBError(RuntimeError):
     """Raised when MTB refuses or cannot complete an operation."""
 
 
+# MTB tears down its realtime subsystem on Logout and CANNOT bring it
+# back up in the same process — a second Login fails with
+#   MTBException: MTB could not be initialized
+#   ConnectToRtSystem(): OpenRtNet("localhost", 1966, ...)
+#   'No such interface supported' (0x80000004 = E_NOINTERFACE)
+# Observed 2026-09-04. So a process gets exactly ONE session, and every
+# consumer (tracker, GUI, tools) must share it.
+_shared_session: "MTBSession | None" = None
+_shared_lock = threading.Lock()
+_logout_happened = False
+
+
 def load_mtb_api(dll_path: str = DEFAULT_DLL):
     """Load MTBApi.dll. Returns the loaded Assembly.
 
@@ -268,7 +280,40 @@ class MTBSession:
 
     # --- lifecycle ---
 
+    @classmethod
+    def shared(cls, **kwargs) -> "MTBSession":
+        """The process-wide session. Create it here, never elsewhere.
+
+        MTB allows exactly one Login per process (see the note at the
+        top of this module), so the tracker, the GUI and the CLI tools
+        must all go through this. Do NOT call disconnect() on the
+        result — use close_shared() once, at process exit.
+        """
+        global _shared_session
+        with _shared_lock:
+            if _shared_session is None:
+                _shared_session = cls(**kwargs).connect()
+            return _shared_session
+
+    @classmethod
+    def close_shared(cls) -> None:
+        """Log out the shared session. Irreversible for this process."""
+        global _shared_session
+        with _shared_lock:
+            if _shared_session is not None:
+                _shared_session.disconnect()
+                _shared_session = None
+
     def connect(self) -> "MTBSession":
+        if _logout_happened:
+            raise MTBError(
+                "MTB was already logged out in this process and cannot "
+                "be re-initialized — its realtime subsystem does not "
+                "come back (OpenRtNet -> E_NOINTERFACE). Use "
+                "MTBSession.shared() so one session serves the whole "
+                "process, or restart the process."
+            )
+
         load_mtb_api(self.dll_path)
         from ZEISS.MTB.Api import MTBConnection
 
@@ -294,22 +339,31 @@ class MTBSession:
         return self
 
     def disconnect(self) -> None:
+        global _logout_happened
         if self._conn is not None and self.client_id:
             try:
                 self._conn.Logout(self.client_id)
                 logger.info("MTB logged out")
             except Exception as e:
                 logger.warning("MTB logout failed: %s", e)
+            # Mark the process as burnt: no further Login can succeed.
+            _logout_happened = True
         self._conn = None
         self._root = None
         self.client_id = None
         self._axes.clear()
 
+    @property
+    def is_connected(self) -> bool:
+        return self._root is not None
+
     def __enter__(self):
         return self.connect()
 
     def __exit__(self, *exc):
-        self.disconnect()
+        # Deliberately does NOT disconnect: logging out would prevent
+        # any later Login in this process. Call close_shared()
+        # explicitly at process exit if you really want to log out.
         return False
 
     # --- components ---

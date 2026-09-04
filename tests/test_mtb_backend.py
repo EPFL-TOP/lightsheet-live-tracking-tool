@@ -72,6 +72,14 @@ class FakeMotion:
 
 
 class FakeSession:
+    """Stands in for MTBSession, including the shared() singleton.
+
+    MTB permits one Login per process, so the backend must go through
+    shared() rather than constructing its own session.
+    """
+
+    _shared = None
+
     def __init__(self, *a, **kw):
         self.disconnected = False
 
@@ -81,11 +89,22 @@ class FakeSession:
     def disconnect(self):
         self.disconnected = True
 
+    @classmethod
+    def shared(cls, **kwargs):
+        if cls._shared is None:
+            cls._shared = cls().connect()
+        return cls._shared
+
+    @classmethod
+    def reset(cls):
+        cls._shared = None
+
 
 @pytest.fixture
 def patched(monkeypatch, tmp_path):
     """Patch the MTB layer and hand back a ready-to-connect backend."""
     motion = FakeMotion()
+    FakeSession.reset()
     monkeypatch.setattr(mtb_backend, "MTBSession", FakeSession)
     monkeypatch.setattr(
         mtb_backend, "MTBMotion", lambda session, z_axis="piezo": motion
@@ -282,14 +301,49 @@ def test_loop_applies_accumulated_drift_on_the_next_visit(patched):
     assert (107.0, 197.0, 251.0) in motion.move_to_calls
 
 
-def test_disconnect_releases_the_mtb_session(patched):
+def test_REGRESSION_disconnect_must_NOT_log_out_the_mtb_session(patched):
+    """Backend teardown must leave the MTB session alive.
+
+    MTB cannot Login twice in one process, so logging out here would
+    strand the GUI and every subsequent run. The backend drops its
+    reference; only MTBSession.close_shared() logs out, at process
+    exit.
+    """
     make, _, _ = patched
     iface = make()
     iface.connect()
     session = iface.session
     iface.disconnect()
-    assert session.disconnected
-    assert iface.session is None
+    assert not session.disconnected, (
+        "backend logged out the shared MTB session — no further Login "
+        "can succeed in this process"
+    )
+    assert iface.session is None, "backend should drop its reference"
+
+
+def test_backend_uses_the_shared_session_not_a_new_one(patched):
+    """Two backends in one process must share a single Login."""
+    make, _, _ = patched
+    a, b = make(), make()
+    a.connect()
+    b.connect()
+    try:
+        assert a.session is b.session
+    finally:
+        a.disconnect()
+        b.disconnect()
+
+
+def test_injected_session_is_used_and_left_open(patched):
+    make, _, _ = patched
+    caller_session = FakeSession()
+    iface = make(session=caller_session)
+    iface.connect()
+    assert iface.session is caller_session
+    iface.disconnect()
+    assert not caller_session.disconnected, (
+        "an injected session belongs to the caller"
+    )
 
 
 # ====================================================================

@@ -97,14 +97,21 @@ def parse_args() -> argparse.Namespace:
 
 
 def read_current_position(z_axis: str):
-    """Read where the stage is now, to use as a safe baseline."""
+    """Read where the stage is now, to use as a safe baseline.
+
+    Uses MTBSession.shared() and does NOT log out: MTB permits one
+    Login per process, so the backend must reuse this very session.
+    An earlier version opened its own session here, logged out, and
+    then the backend's Login failed with
+      ConnectToRtSystem(): OpenRtNet(...) 'No such interface supported'
+    """
     from tracking_tools.microscope_interface.mtb import (
         MTBMotion, MTBSession,
     )
-    with MTBSession() as s:
-        motion = MTBMotion(s, z_axis=z_axis)
-        _log(motion.describe())
-        return motion.get_xyz()
+    session = MTBSession.shared()
+    motion = MTBMotion(session, z_axis=z_axis)
+    _log(motion.describe())
+    return session, motion.get_xyz()
 
 
 def exposure_scan(exposures=(1.0, 2.0, 5.0, 10.0, 20.0, 50.0)):
@@ -197,7 +204,7 @@ def main() -> int:
     # --- Establish baselines from where the stage actually is ---
     _hdr("CURRENT POSITION")
     try:
-        x0, y0, z0 = read_current_position(args.z_axis)
+        session, (x0, y0, z0) = read_current_position(args.z_axis)
     except Exception as e:
         _log(f"FAIL: could not read the stage: {type(e).__name__}: {e}")
         return 1
@@ -239,6 +246,9 @@ def main() -> int:
             "interval_s": args.interval,
             "settle_s": args.settle,
             "stop_after_tp": args.n_timepoints,
+            # Hand over the session we already hold — a second Login
+            # would fail in this process.
+            "session": session,
         },
     )
 

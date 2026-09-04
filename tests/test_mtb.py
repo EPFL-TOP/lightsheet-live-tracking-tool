@@ -254,3 +254,101 @@ def test_describe_mentions_the_active_z_axis():
     text = m.describe()
     assert "piezo" in text
     assert "axis_x" in text
+
+
+# ====================================================================
+# Single-session-per-process constraint
+#
+# MTB tears down its realtime subsystem on Logout and cannot rebuild
+# it: a second Login fails with
+#   MTBException: MTB could not be initialized
+#   ConnectToRtSystem(): OpenRtNet("localhost", 1966, ...)
+#   'No such interface supported' (0x80000004)
+# Observed on the real microscope 2026-09-04, when a tool read the
+# stage through its own session, logged out, and the backend's Login
+# then failed. These tests pin the mitigation.
+# ====================================================================
+
+@pytest.fixture
+def reset_shared(monkeypatch):
+    """Isolate the module-level session singleton per test."""
+    monkeypatch.setattr(mtb, "_shared_session", None)
+    monkeypatch.setattr(mtb, "_logout_happened", False)
+
+
+class FakeConn:
+    """Minimal stand-in for ZEISS.MTB.Api.MTBConnection."""
+
+    def __init__(self):
+        self.logouts = []
+
+    def Logout(self, client_id):
+        self.logouts.append(client_id)
+
+
+def _fake_connect(monkeypatch, calls):
+    """Make MTBSession.connect() succeed without any .NET.
+
+    Note this bypasses the real connect(), so the _logout_happened
+    guard inside it is not exercised here — the refusal test calls the
+    real connect() for that.
+    """
+    def connect(self):
+        calls.append(self)
+        self._conn = FakeConn()
+        self._root = FakeRoot({})
+        self.client_id = f"client-{len(calls)}"
+        return self
+    monkeypatch.setattr(MTBSession, "connect", connect)
+
+
+def test_REGRESSION_shared_returns_one_session(reset_shared,
+                                               monkeypatch):
+    calls = []
+    _fake_connect(monkeypatch, calls)
+    a = MTBSession.shared()
+    b = MTBSession.shared()
+    assert a is b
+    assert len(calls) == 1, "shared() must Login exactly once"
+
+
+def test_REGRESSION_second_connect_after_logout_is_refused(
+        reset_shared, monkeypatch):
+    """The real failure mode: connect, logout, connect again.
+
+    Deliberately calls the REAL connect() for the second attempt so
+    the guard is what refuses it, rather than the fake.
+    """
+    calls = []
+    _fake_connect(monkeypatch, calls)
+
+    s = MTBSession()
+    s.connect()
+    s.disconnect()
+    assert s._conn is None
+    assert mtb._logout_happened, "disconnect must mark the process"
+
+    # Restore the real connect() — the guard lives inside it.
+    monkeypatch.undo()
+    monkeypatch.setattr(mtb, "_logout_happened", True)
+    with pytest.raises(MTBError, match="cannot be re-initialized"):
+        MTBSession().connect()
+
+
+def test_context_manager_does_not_log_out(reset_shared, monkeypatch):
+    """__exit__ must not burn the process's one session."""
+    calls = []
+    _fake_connect(monkeypatch, calls)
+    with MTBSession() as s:
+        assert s.is_connected
+    # Still usable, and a later connect is still permitted.
+    assert not mtb._logout_happened
+
+
+def test_is_connected_reflects_state(reset_shared, monkeypatch):
+    calls = []
+    _fake_connect(monkeypatch, calls)
+    s = MTBSession()
+    assert not s.is_connected
+    s.connect()
+    assert s.is_connected
