@@ -542,6 +542,120 @@ def _dump_objective(root, comp) -> None:
                 except Exception:
                     pass
 
+    # IMTBChangerElement exposes only ElementType, so the objective's
+    # own data must sit behind a further cast. Apply the same
+    # reflection scan to the ELEMENT.
+    _log()
+    _log("  ELEMENT interface scan (this is where magnification "
+         "should live):")
+    try:
+        import ZEISS.MTB.Api as api
+        from System import AppDomain
+
+        asm = None
+        for a in AppDomain.CurrentDomain.GetAssemblies():
+            try:
+                if (a.GetName().Name or "") == "MTBApi":
+                    asm = a
+                    break
+            except Exception:
+                continue
+        try:
+            types = [t for t in asm.GetTypes() if t is not None]
+        except Exception as e:
+            types = [t for t in (getattr(e, "Types", None) or []) if t]
+        iface_types = [
+            t for t in types
+            if t.IsInterface and t.IsPublic
+            and (t.Name or "").startswith("IMTB")
+        ]
+
+        changer = None
+        for iname in ("IMTBObjectiveChanger", "IMTBChanger"):
+            try:
+                changer = getattr(api, iname)(comp)
+                if changer is not None:
+                    _log(f"    changer cast: {iname}")
+                    break
+            except Exception:
+                continue
+
+        if changer is None:
+            _log("    could not cast to a changer")
+        else:
+            try:
+                n = changer.GetElementCount()
+                pos = changer.Position
+                _log(f"    GetElementCount()={n}  Position={pos}")
+            except Exception as e:
+                n, pos = 0, None
+                _log(f"    count/position failed: {e}")
+
+            for idx in range(1, int(n or 0) + 1):
+                try:
+                    el = changer.GetElement(idx)
+                except Exception as e:
+                    _log(f"    [{idx}] GetElement failed: {e}")
+                    continue
+                if el is None:
+                    _log(f"    [{idx}] None")
+                    continue
+                etype = ""
+                try:
+                    etype = f" ElementType={el.ElementType!r}"
+                except Exception:
+                    pass
+                marker = "  <-- CURRENT" if idx == pos else ""
+                _log(f"    [{idx}]{etype}{marker}")
+
+                for t in sorted(iface_types, key=lambda x: x.Name):
+                    try:
+                        iface = getattr(api, t.Name)
+                        cast = iface(el)
+                    except Exception:
+                        continue
+                    if cast is None:
+                        continue
+                    members = sorted(
+                        a for a in dir(cast)
+                        if not a.startswith(("_", "get_", "set_",
+                                             "add_", "remove_"))
+                        and a not in ("Equals", "GetHashCode",
+                                      "GetType", "ToString")
+                    )
+                    _log(f"        {t.Name}: {members}")
+                    for a in members:
+                        if any(k in a.lower() for k in
+                               ("magnif", "aperture", "name", "type",
+                                "contrast", "immers", "workdist")):
+                            try:
+                                v = getattr(cast, a)
+                                if not callable(v):
+                                    _log(f"            {a} = {v!r}")
+                            except Exception:
+                                pass
+    except Exception as e:
+        _log(f"    element scan failed: {type(e).__name__}: {e}")
+
+    # GetConfiguration() is another plausible home for objective data.
+    _log()
+    _log("  GetConfiguration():")
+    try:
+        cfg = comp.GetConfiguration()
+        _log(f"    -> {type(cfg).__name__}")
+        members = sorted(a for a in dir(cfg)
+                         if not a.startswith(("_", "get_", "set_")))
+        _log(f"    members: {members}")
+        for a in members:
+            try:
+                v = getattr(cfg, a)
+                if not callable(v):
+                    _log(f"      {a} = {v!r}")
+            except Exception:
+                pass
+    except Exception as e:
+        _log(f"    unavailable: {type(e).__name__}: {e}")
+
     # And what our own wrapper makes of it.
     try:
         from tracking_tools.microscope_interface.mtb import MTBObjective
@@ -549,6 +663,8 @@ def _dump_objective(root, comp) -> None:
         _log("  MTBObjective.probe():")
         info = MTBObjective(comp).probe()
         for k, v in info.items():
+            if k.endswith("_attrs"):
+                continue
             _log(f"    {k} = {v!r}")
     except Exception as e:
         _log(f"  wrapper probe failed: {type(e).__name__}: {e}")

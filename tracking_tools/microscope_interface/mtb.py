@@ -442,18 +442,41 @@ class MTBObjective:
         self._raw = comp
         self._changer = self._cast_changer(comp)
 
+    # Confirmed on the microscope 2026-09-04: GetComponent returns a
+    # bare IMTBComponent; the nosepiece casts to IMTBObjectiveChanger,
+    # IMTBChanger, IMTBBase, IMTBIdent, IMTBEventSink, IMTBComponent.
+    # IMTBChanger provides Position (Int16), GetElement(n),
+    # GetElementCount(); IMTBObjectiveChanger adds OilStop members.
+    _CHANGER_IFACES = ("IMTBObjectiveChanger", "IMTBChanger")
+
+    # IMTBChangerElement exposes ONLY ElementType, so the objective's
+    # own data needs a further cast. Ordered most- to least-specific.
+    _ELEMENT_IFACES = (
+        "IMTBObjective", "IMTBObjectiveElement", "IMTBLens",
+        "IMTBChangerElement",
+    )
+
     @staticmethod
-    def _cast_changer(comp):
-        for name in ("IMTBChanger", "IMTBObjectiveChanger"):
+    def _cast(comp, names):
+        """Cast through the first interface that yields a usable object."""
+        for name in names:
             try:
                 mod = __import__("ZEISS.MTB.Api", fromlist=[name])
-                iface = getattr(mod, name)
-                cast = iface(comp)
-                cast.Position          # prove the cast is usable
-                return cast
+                cast = getattr(mod, name)(comp)
             except Exception:
                 continue
-        return comp
+            if cast is not None:
+                return cast, name
+        return comp, None
+
+    @classmethod
+    def _cast_changer(cls, comp):
+        # Prefer the specific interface, but do NOT probe for .Position
+        # here: an earlier version did, and when the probe raised it
+        # silently fell back to the raw IMTBComponent, which has no
+        # changer members at all.
+        cast, _ = cls._cast(comp, cls._CHANGER_IFACES)
+        return cast
 
     @staticmethod
     def _first_attr(obj, names):
@@ -475,22 +498,35 @@ class MTBObjective:
             return None
 
     def _element(self):
-        """The changer element for the current position, if reachable."""
+        """The changer element for the current position, cast onward.
+
+        GetElement() hands back an IMTBChangerElement, which carries
+        only ElementType — so cast it to whatever objective-specific
+        interface exists before reading magnification off it.
+        """
         pos = self.position
         if pos is None:
             return None
-        for getter in ("GetElement", "Element", "GetElementAt"):
+        for getter in ("GetElement", "GetElementAt", "Element"):
             try:
                 fn = getattr(self._changer, getter)
             except Exception:
                 continue
             try:
                 el = fn(pos) if callable(fn) else fn[pos]
-                if el is not None:
-                    return el
             except Exception:
                 continue
+            if el is not None:
+                cast, _ = self._cast(el, self._ELEMENT_IFACES)
+                return cast
         return None
+
+    @property
+    def element_count(self) -> int | None:
+        try:
+            return int(self._changer.GetElementCount())
+        except Exception:
+            return None
 
     @property
     def name(self) -> str | None:
