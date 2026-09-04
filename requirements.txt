@@ -18,7 +18,10 @@ pytest>=8
 #   enabled. The default wheel bundles CUDA and is several GB; for a
 #   CPU-only install (plenty for drift correction on ROIs) use
 #     pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   torchvision is imported alongside torch by tracker/detector.py, so
+#   install both from the same index or the versions will not match.
 torch
+torchvision
 scipy
 tifffile
 
