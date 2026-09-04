@@ -450,11 +450,12 @@ class MTBObjective:
     _CHANGER_IFACES = ("IMTBObjectiveChanger", "IMTBChanger")
 
     # IMTBChangerElement exposes ONLY ElementType, so the objective's
-    # own data needs a further cast. Ordered most- to least-specific.
-    _ELEMENT_IFACES = (
-        "IMTBObjective", "IMTBObjectiveElement", "IMTBLens",
-        "IMTBChangerElement",
-    )
+    # own data needs a further cast. IMTBObjective is confirmed
+    # (2026-09-04) to carry Magnification, Aperture, Name,
+    # ImmersionType, WorkingDistance, ContrastMethod. An EMPTY slot is
+    # not castable to it and falls through to IMTBChangerElement, whose
+    # ElementType reads 'None' — that is how empty slots present.
+    _ELEMENT_IFACES = ("IMTBObjective", "IMTBChangerElement")
 
     @staticmethod
     def _cast(comp, names):
@@ -570,6 +571,74 @@ class MTBObjective:
                     pass
         # Fall back to the name, which conventionally contains it.
         return parse_magnification(self.name or "")
+
+    def slots(self) -> list[dict]:
+        """Every nosepiece slot: index, name, magnification, aperture.
+
+        Reported in full rather than just the current one, because the
+        indexing convention is not fully settled: GetElementCount()
+        returns 6 on this scope while GetElement(6) raises "Index was
+        outside the bounds of the array", which hints the underlying
+        array may be 0-based. Showing all slots lets the operator
+        confirm against what is physically in the light path instead of
+        trusting a possibly off-by-one lookup.
+        """
+        out = []
+        count = self.element_count or 0
+        for idx in range(1, count + 1):
+            entry = {"index": idx, "name": None, "magnification": None,
+                     "aperture": None, "empty": True, "error": None}
+            try:
+                raw = self._changer.GetElement(idx)
+            except Exception as e:
+                entry["error"] = f"{type(e).__name__}"
+                out.append(entry)
+                continue
+            if raw is None:
+                out.append(entry)
+                continue
+            el, _ = self._cast(raw, self._ELEMENT_IFACES)
+            name, _ = self._first_attr(el, self._NAME_ATTRS)
+            entry["name"] = str(name) if name else None
+            # 'None' is how MTB labels an unpopulated slot.
+            etype = None
+            try:
+                etype = str(el.ElementType)
+            except Exception:
+                pass
+            entry["empty"] = (etype == "None"
+                              or (entry["name"] or "").lower() == "none")
+            mag, _ = self._first_attr(el, self._MAG_ATTRS)
+            if mag is not None:
+                try:
+                    entry["magnification"] = float(mag)
+                except Exception:
+                    pass
+            if entry["magnification"] is None and entry["name"]:
+                entry["magnification"] = parse_magnification(
+                    entry["name"]
+                )
+            ap, _ = self._first_attr(el, self._APERTURE_ATTRS)
+            if ap is not None:
+                try:
+                    entry["aperture"] = float(ap)
+                except Exception:
+                    pass
+            out.append(entry)
+        return out
+
+    @property
+    def is_empty(self) -> bool:
+        """True when the current slot holds no objective."""
+        el = self._element()
+        if el is None:
+            return True
+        try:
+            if str(el.ElementType) == "None":
+                return True
+        except Exception:
+            pass
+        return (self.name or "").lower() in ("", "none")
 
     def probe(self) -> dict:
         """Report what is readable and how — for diagnosing the API."""

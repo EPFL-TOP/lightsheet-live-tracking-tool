@@ -529,3 +529,77 @@ def test_check_rois_explains_how_to_draw_them(panel_obj, tmp_path):
     panel_obj._refresh_roi_state()
     assert "Selection" in panel_obj.roi_state.object
     assert "tracking_RoIs.json" in panel_obj.roi_state.object
+
+
+# ====================================================================
+# Partial ROI coverage
+#
+# get_pos_config() globs <root>/*/<log_dir_name> and opens
+# tracking_RoIs.json UNCONDITIONALLY. The panel creates those folders
+# up front so the ROI watcher can watch them, so a position with no
+# ROIs yet has an EMPTY folder that the glob still finds:
+#   ERROR building tracker: [Errno 2] No such file or directory:
+#   '...\\scene_001\\embryo_tracking\\tracking_RoIs.json'
+# Observed 2026-09-04 with ROIs drawn for scene_000 only.
+# ====================================================================
+
+def _two_positions(panel_obj, tmp_path):
+    panel_obj.motion = FakeMotion()
+    panel_obj.mmc = object()
+    panel_obj._on_capture()
+    panel_obj._on_capture()
+    panel_obj.outdir.value = str(tmp_path)
+    for name in ("scene_000", "scene_001"):
+        (tmp_path / name / "embryo_tracking").mkdir(parents=True)
+    return tmp_path
+
+
+def _write_rois(tmp_path, name):
+    (tmp_path / name / "embryo_tracking"
+     / "tracking_RoIs.json").write_text("{}")
+
+
+def test_REGRESSION_empty_roi_folder_is_not_mistaken_for_ready(
+        panel_obj, tmp_path):
+    """The folder existing is not the same as ROIs existing — that
+    conflation is what crashed the tracker build."""
+    _two_positions(panel_obj, tmp_path)
+    state = panel_obj.roi_status()
+    assert state == {"scene_000": False, "scene_001": False}
+
+    _write_rois(tmp_path, "scene_000")
+    state = panel_obj.roi_status()
+    assert state == {"scene_000": True, "scene_001": False}
+
+
+def test_require_all_rois_defaults_on(panel_obj):
+    """Attaching with a partial set leaves the rest untracked for the
+    whole run, since the ROI watcher only watches folders known at
+    attach time."""
+    assert panel_obj.require_all_rois.value is True
+
+
+def test_check_rois_names_the_positions_still_missing(panel_obj,
+                                                      tmp_path):
+    _two_positions(panel_obj, tmp_path)
+    _write_rois(tmp_path, "scene_000")
+    panel_obj._refresh_roi_state()
+    text = panel_obj.roi_state.object
+    assert "1/2" in text
+    assert "scene_001" in text
+
+
+def test_check_rois_reports_full_coverage(panel_obj, tmp_path):
+    _two_positions(panel_obj, tmp_path)
+    _write_rois(tmp_path, "scene_000")
+    _write_rois(tmp_path, "scene_001")
+    panel_obj._refresh_roi_state()
+    assert "2/2" in panel_obj.roi_state.object
+
+
+def test_start_still_allowed_with_partial_rois(panel_obj, tmp_path):
+    """Partial coverage must not block starting — acquisition runs and
+    tracking waits."""
+    _two_positions(panel_obj, tmp_path)
+    _write_rois(tmp_path, "scene_000")
+    assert panel_obj._validate_run() is None

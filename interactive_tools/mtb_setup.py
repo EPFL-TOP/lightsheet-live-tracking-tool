@@ -315,6 +315,15 @@ class MTBSetupPanel:
         self.objective_info = pn.pane.Markdown(
             "", width=560, styles={"font-size": "0.85em"},
         )
+        # Manual override: the current slot may be empty, or the
+        # element indexing may be off by one, so let the operator pick
+        # the objective that is actually in the light path.
+        self.objective_choice = pn.widgets.Select(
+            name="Use objective", options=[], width=380,
+        )
+        self.btn_apply_objective = pn.widgets.Button(
+            name="Apply", width=90,
+        )
         self.outdir = pn.widgets.TextInput(
             name="Experiment root", value="", width=560,
             placeholder=r"D:\Users\zeiss\data\my_experiment",
@@ -331,6 +340,14 @@ class MTBSetupPanel:
         self.roi_poll_s = pn.widgets.FloatInput(
             name="ROI check interval (s)", value=5.0, start=1.0,
             end=120.0, width=170,
+        )
+        # Attaching as soon as ANY position has ROIs means the rest
+        # stay untracked for the whole run, since the ROI watcher only
+        # watches folders known at attach time. Waiting for all is the
+        # safer default.
+        self.require_all_rois = pn.widgets.Checkbox(
+            name="Wait until every position has ROIs before tracking",
+            value=True,
         )
         self.roi_state = pn.pane.Markdown(
             "", width=560, styles={"font-size": "0.85em"},
@@ -368,6 +385,7 @@ class MTBSetupPanel:
         self.btn_stop.on_click(self._on_stop)
         self.btn_check_rois.on_click(lambda e: self._refresh_roi_state())
         self.btn_read_objective.on_click(self._on_read_objective)
+        self.btn_apply_objective.on_click(self._on_apply_objective)
         self.btn_live.param.watch(self._on_live_toggle, "value")
         self.z_axis.param.watch(self._on_z_axis_change, "value")
 
@@ -753,7 +771,8 @@ class MTBSetupPanel:
             return
         try:
             obj = self.session.objective()
-            info = obj.probe()
+            pos = obj.position
+            slots = obj.slots()
         except Exception as e:
             self.objective_info.object = (
                 f"❌ Could not read the nosepiece: {e}"
@@ -761,51 +780,82 @@ class MTBSetupPanel:
             logger.exception("objective read failed")
             return
 
-        name = info.get("name")
-        mag = info.get("magnification")
-        pos = info.get("position")
+        cam = float(self.camera_pixel_um.value)
+        adapter = float(self.adapter_mag.value)
 
-        lines = [
-            f"Nosepiece position **{pos}** — "
-            f"{'`' + str(name) + '`' if name else '_name unavailable_'}"
-        ]
-        if info.get("aperture"):
-            lines.append(f"NA {info['aperture']}")
+        # Show every slot: the indexing convention is not fully settled
+        # (GetElementCount()=6 but GetElement(6) is out of bounds), so
+        # the operator confirms against the light path rather than
+        # trusting one possibly off-by-one lookup.
+        rows = ["| Slot | Objective | Mag | NA | Pixel µm |",
+                "|---|---|---|---|---|"]
+        options = {}
+        for s in slots:
+            marker = " ◀ current" if s["index"] == pos else ""
+            if s["error"]:
+                rows.append(
+                    f"| {s['index']}{marker} | _{s['error']}_ | | | |"
+                )
+                continue
+            if s["empty"]:
+                rows.append(f"| {s['index']}{marker} | _empty_ | | | |")
+                continue
+            mag = s["magnification"]
+            pitch = (sample_pixel_size_um(cam, mag, adapter)
+                     if mag else None)
+            rows.append(
+                f"| {s['index']}{marker} | `{s['name']}` | "
+                f"{mag:g}× | {s['aperture'] or ''} | "
+                f"{pitch:.4f} |" if pitch else
+                f"| {s['index']}{marker} | `{s['name']}` | | | |"
+            )
+            if pitch:
+                options[f"{s['index']}: {s['name']} "
+                        f"({mag:g}×, {pitch:.4f} µm)"] = pitch
 
-        if mag:
+        lines = ["\n".join(rows)]
+
+        self.objective_choice.options = list(options)
+        self._objective_pitches = options
+
+        current = next((s for s in slots if s["index"] == pos), None)
+        if current and not current["empty"] and current["magnification"]:
             pitch = sample_pixel_size_um(
-                float(self.camera_pixel_um.value), float(mag),
-                float(self.adapter_mag.value),
+                cam, current["magnification"], adapter
             )
             self.pixel_xy.value = round(pitch, 4)
             lines.append(
-                f"Magnification **{mag:g}×** → pixel pitch "
-                f"**{pitch:.4f} µm** "
-                f"({self.camera_pixel_um.value:g} / "
-                f"({mag:g} × {self.adapter_mag.value:g}))"
+                f"Current slot **{pos}**: "
+                f"`{current['name']}` → pixel pitch "
+                f"**{pitch:.4f} µm**. _Pixel size XY updated._"
             )
-            lines.append("_Pixel size XY updated._")
         else:
             lines.append(
-                "⚠️ Magnification not readable — neither a typed "
-                "property nor a parseable name. Set **Pixel size XY** "
-                "by hand, and send me this diagnostic so I can wire "
-                "the right interface:"
+                f"⚠️ **Slot {pos} is empty** — no objective in the "
+                f"light path, so the pixel pitch cannot be derived. "
+                f"Rotate the nosepiece to a populated slot and press "
+                f"this again, or pick one below and click *Apply*."
             )
-            lines.append(
-                "```\n"
-                + json.dumps(
-                    {k: v for k, v in info.items()
-                     if k != "changer_attrs"},
-                    indent=2, default=str,
-                )
-                + "\n```"
-            )
-            attrs = info.get("element_attrs") or info.get("changer_attrs")
-            if attrs:
-                lines.append(f"Available members: `{attrs}`")
+            if options:
+                first = list(options)[0]
+                self.objective_choice.value = first
 
         self.objective_info.object = "\n\n".join(lines)
+
+    def _on_apply_objective(self, _event=None) -> None:
+        """Adopt the pixel pitch of the operator-chosen objective."""
+        pitch = getattr(self, "_objective_pitches", {}).get(
+            self.objective_choice.value
+        )
+        if pitch is None:
+            self._say("Read the objectives first, then pick one.",
+                      "warn")
+            return
+        self.pixel_xy.value = round(pitch, 4)
+        self._say(
+            f"Pixel size XY set to {pitch:.4f} µm from "
+            f"{self.objective_choice.value}.", "ok",
+        )
 
     @property
     def tracking_requested(self) -> bool:
@@ -971,12 +1021,30 @@ class MTBSetupPanel:
         }
         log_dir_name = runner_config["log_dir_name"]
 
-        discovered = get_pos_config(root, log_dir_name)
-        if not discovered:
+        # get_pos_config() globs <root>/*/<log_dir_name> and opens
+        # tracking_RoIs.json UNCONDITIONALLY, so it raises
+        # FileNotFoundError for any position whose ROI folder exists but
+        # is still empty. We create those folders up front (the ROI
+        # watcher needs them to exist), so ask per-position and only for
+        # the ones that actually have a JSON.
+        ready = [n for n, ok in self.roi_status(root).items() if ok]
+        if not ready:
             raise RuntimeError(
                 f"No positions with ROIs under {root}. Each position "
                 f"folder needs {log_dir_name}/tracking_RoIs.json."
             )
+
+        discovered = {}
+        for name in ready:
+            try:
+                discovered.update(
+                    get_pos_config(root, log_dir_name,
+                                   position_name=name)
+                )
+            except Exception as e:
+                logger.warning(
+                    "could not load ROI config for %s: %s", name, e
+                )
 
         captured = self.positions_config(root, log_dir_name)
         merged = {}
@@ -994,6 +1062,24 @@ class MTBSetupPanel:
             raise RuntimeError(
                 "No position has BOTH a captured baseline and ROIs. "
                 "Capture positions here, acquire, then draw ROIs."
+            )
+
+        untracked = [n for n in self.positions_config()
+                     if n not in merged]
+        if untracked:
+            # run_zeiss() logs "No tracker for [pos] — skipping" and
+            # keeps acquiring, so these still get imaged; they just are
+            # not drift-corrected. The ROI watcher only watches folders
+            # in positions_config, so ROIs drawn for them AFTER this
+            # point need a restart to take effect.
+            logger.warning(
+                "acquiring but NOT tracking (no ROIs): %s",
+                ", ".join(untracked),
+            )
+            self._push_log(
+                f"NOT tracked (no ROIs): {', '.join(untracked)} — "
+                f"they keep acquiring; restart to pick up ROIs added "
+                f"for them later"
             )
 
         # Keep the backend's view consistent with what we will track.
@@ -1033,14 +1119,23 @@ class MTBSetupPanel:
             while not self._stop_flag.is_set():
                 if self.tracking_requested and time.monotonic() >= next_check:
                     next_check = time.monotonic() + poll
-                    ready = [n for n, ok in
-                             self.roi_status(root).items() if ok]
-                    if ready:
+                    state = self.roi_status(root)
+                    ready = [n for n, ok in state.items() if ok]
+                    pending = [n for n, ok in state.items() if not ok]
+                    if ready and not (self.require_all_rois.value
+                                      and pending):
                         self._push_log(
-                            f"ROIs found for {len(ready)} position(s): "
-                            f"{', '.join(ready)} — attaching tracker"
+                            f"ROIs found for {len(ready)}/{len(state)} "
+                            f"position(s): {', '.join(ready)} — "
+                            f"attaching tracker"
                         )
                         break
+                    if ready and pending:
+                        self._push_log(
+                            f"waiting for ROIs on "
+                            f"{', '.join(pending)} "
+                            f"({len(ready)}/{len(state)} ready)"
+                        )
 
                 item = iface.wait_for_image(timeout_ms=500)
                 if item is None:
@@ -1192,12 +1287,14 @@ class MTBSetupPanel:
                 width=560, styles={"font-size": "0.85em"},
             ),
             pn.Row(self.auto_track),
+            pn.Row(self.require_all_rois),
             pn.Row(self.roi_poll_s, self.btn_check_rois),
             self.roi_state,
             "#### Drift correction",
             pn.Row(self.camera_pixel_um, self.adapter_mag,
                    self.btn_read_objective),
             self.objective_info,
+            pn.Row(self.objective_choice, self.btn_apply_objective),
             pn.Row(self.pixel_xy, self.pixel_z),
             pn.Row(self.tracking_2d),
             pn.Row(self.max_xy, self.max_z),

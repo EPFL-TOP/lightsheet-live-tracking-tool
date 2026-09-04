@@ -715,3 +715,126 @@ def test_objective_survives_a_changer_without_elements():
     obj = _objective(Bare())
     assert obj.magnification is None
     assert obj.probe()["element_found"] is False
+
+
+# ====================================================================
+# Nosepiece slots
+#
+# Confirmed on the microscope 2026-09-04: GetComponent returns a bare
+# IMTBComponent that casts to IMTBObjectiveChanger/IMTBChanger;
+# GetElement(n) returns IMTBChangerElement (ElementType only), which
+# casts to IMTBObjective for populated slots carrying Magnification,
+# Aperture, Name. An EMPTY slot reports ElementType 'None' and is not
+# castable to IMTBObjective. The scope had a 10x in slot 2, a 40x in
+# slot 4, and was parked on EMPTY slot 3 — so "read the current slot"
+# alone is not enough.
+# ====================================================================
+
+class FakeObjectiveEl:
+    """A populated slot (castable to IMTBObjective in reality)."""
+
+    def __init__(self, name, mag, na=None):
+        self.ElementType = "MTBObjective"
+        self.Name = name
+        self.Magnification = mag
+        if na is not None:
+            self.Aperture = na
+
+
+class FakeEmptyEl:
+    """How MTB presents an unpopulated slot."""
+
+    def __init__(self):
+        self.ElementType = "None"
+        self.Name = "none"
+
+
+class FakeNosepiece:
+    """Mirrors the real 6-slot changer, including the bad index 6."""
+
+    def __init__(self, position=3):
+        self.Position = position
+        self._slots = {
+            1: FakeEmptyEl(),
+            2: FakeObjectiveEl("Fluar 10x/0.50 M27", 10.0, 0.5),
+            3: FakeEmptyEl(),
+            4: FakeObjectiveEl("Plan-Apochromat 40x/0.95 Korr M27",
+                               40.0, 0.95),
+            5: FakeEmptyEl(),
+        }
+
+    def GetElementCount(self):
+        return 6            # yes, 6 — but index 6 raises
+
+    def GetElement(self, n):
+        if n not in self._slots:
+            raise RuntimeError("Index was outside the bounds of the array.")
+        return self._slots[n]
+
+
+def _nosepiece(position=3):
+    from tracking_tools.microscope_interface.mtb import MTBObjective
+    obj = MTBObjective.__new__(MTBObjective)
+    obj.label = "objective"
+    changer = FakeNosepiece(position)
+    obj._raw = changer
+    obj._changer = changer
+    return obj
+
+
+def test_slots_lists_every_position():
+    slots = _nosepiece().slots()
+    assert len(slots) == 6
+    assert [s["index"] for s in slots] == [1, 2, 3, 4, 5, 6]
+
+
+def test_slots_identifies_the_installed_objectives():
+    by_idx = {s["index"]: s for s in _nosepiece().slots()}
+    assert by_idx[2]["magnification"] == pytest.approx(10.0)
+    assert by_idx[2]["name"] == "Fluar 10x/0.50 M27"
+    assert by_idx[2]["aperture"] == pytest.approx(0.5)
+    assert by_idx[4]["magnification"] == pytest.approx(40.0)
+    assert not by_idx[2]["empty"]
+    assert not by_idx[4]["empty"]
+
+
+def test_slots_marks_empty_positions():
+    by_idx = {s["index"]: s for s in _nosepiece().slots()}
+    for idx in (1, 3, 5):
+        assert by_idx[idx]["empty"], f"slot {idx} should read empty"
+        assert by_idx[idx]["magnification"] is None
+
+
+def test_slots_tolerates_the_out_of_bounds_index():
+    """GetElementCount() says 6 but GetElement(6) raises; that must be
+    reported, not crash the listing."""
+    by_idx = {s["index"]: s for s in _nosepiece().slots()}
+    assert by_idx[6]["error"] is not None
+    assert by_idx[6]["empty"]
+
+
+def test_is_empty_true_when_parked_on_an_empty_slot():
+    """The real failure: position 3 held no objective, so no pixel
+    pitch could be derived even though two objectives were fitted."""
+    assert _nosepiece(position=3).is_empty
+
+
+def test_is_empty_false_on_a_populated_slot():
+    assert not _nosepiece(position=4).is_empty
+
+
+def test_magnification_reads_the_populated_current_slot():
+    assert _nosepiece(position=4).magnification == pytest.approx(40.0)
+    assert _nosepiece(position=2).magnification == pytest.approx(10.0)
+
+
+def test_magnification_is_none_on_an_empty_slot():
+    assert _nosepiece(position=3).magnification is None
+
+
+def test_pixel_pitch_for_the_installed_objectives():
+    from tracking_tools.microscope_interface.mtb import (
+        sample_pixel_size_um,
+    )
+    assert sample_pixel_size_um(11.0, 10.0) == pytest.approx(1.1)
+    assert sample_pixel_size_um(11.0, 40.0) == pytest.approx(0.275)
