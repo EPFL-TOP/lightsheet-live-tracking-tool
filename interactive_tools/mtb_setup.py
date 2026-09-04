@@ -888,8 +888,11 @@ class MTBSetupPanel:
             "max_z_um": float(self.max_z.value),
             "stop_after_tp": (int(self.n_timepoints.value)
                               if self.n_timepoints.value else None),
-            # Hand over our session: one Login per process.
+            # Hand over our session AND our camera: MTB allows one
+            # Login per process, and PVCAM one open handle per camera.
             "session": self.session,
+            "mmc": self.mmc,
+            "camera_label": self._cam_label,
         }
         if self.zstack_on.value:
             params["z_stack"] = {

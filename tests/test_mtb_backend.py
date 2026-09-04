@@ -435,3 +435,98 @@ def test_REGRESSION_a_failing_position_does_not_kill_the_run(patched):
 
     # The first visit blew up; everything afterwards must still run.
     assert len(seen) >= 3, f"run did not recover, only got {seen}"
+
+
+# ====================================================================
+# Shared exclusive resources
+#
+# PVCAM allows ONE open handle per camera. The setup GUI opens it when
+# the operator presses Connect, so a backend that opened its own failed
+# with
+#   [PVCAM] ERR: pl_cam_open failed, pvErr:12,
+#   'This user has already opened this camera (C0_CAM_ALREADY_OPEN)'
+# Observed 2026-09-04. Same shape as the MTB single-Login rule.
+# ====================================================================
+
+class FakeCore:
+    def __init__(self):
+        self.camera_device = None
+        self.exposure = None
+        self.unloaded = False
+
+    def setCameraDevice(self, label):
+        self.camera_device = label
+
+    def setExposure(self, ms):
+        self.exposure = ms
+
+    def unloadAllDevices(self):
+        self.unloaded = True
+
+    def snapImage(self):
+        pass
+
+    def getImage(self):
+        return np.zeros((4, 4), dtype=np.uint16)
+
+    def getImageWidth(self):
+        return 4
+
+    def getImageHeight(self):
+        return 4
+
+    def getImageBitDepth(self):
+        return 16
+
+    def setCircularBufferMemoryFootprint(self, mb):
+        pass
+
+
+def test_REGRESSION_injected_camera_is_reused_not_reopened(patched):
+    make, _, _ = patched
+    core = FakeCore()
+    iface = make(synthetic_source=None, mmc=core,
+                 camera_label="SetupCam", stop_after_tp=1)
+    iface._open_camera()
+    assert iface.mmc is core
+    assert iface._camera_label == "SetupCam"
+    assert core.camera_device == "SetupCam"
+    assert not iface._owns_camera
+
+
+def test_REGRESSION_borrowed_camera_is_not_unloaded(patched):
+    """Unloading the GUI's camera would leave it holding a dead handle
+    and block every later PVCAM open until a process restart."""
+    make, _, _ = patched
+    core = FakeCore()
+    iface = make(synthetic_source=None, mmc=core,
+                 camera_label="SetupCam", stop_after_tp=1)
+    iface._open_camera()
+    iface.disconnect()
+    assert not core.unloaded, "backend unloaded a camera it borrowed"
+
+
+def test_injected_camera_gets_our_exposure(patched):
+    make, _, _ = patched
+    core = FakeCore()
+    iface = make(synthetic_source=None, mmc=core,
+                 camera_label="SetupCam", exposure_ms=7.5)
+    iface._open_camera()
+    assert core.exposure == pytest.approx(7.5)
+
+
+def test_connect_is_idempotent(patched):
+    """TrackingRunner.run_zeiss() calls connect() too, and the GUI has
+    already started acquisition — a second thread would mean two
+    consumers driving the same stage."""
+    make, _, _ = patched
+    iface = make(stop_after_tp=50, interval_s=0.05)
+    iface.connect()
+    first = iface._thread
+    try:
+        iface.connect()
+        assert iface._thread is first, (
+            "connect() started a second acquisition thread"
+        )
+    finally:
+        iface.disconnect()

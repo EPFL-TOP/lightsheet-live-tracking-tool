@@ -105,6 +105,14 @@ class MicroscopeInterface_MTB:
         # out, because MTB cannot Login again in this process.
         self._injected_session = p.get("session")
         self._owns_session = False
+        # PVCAM allows ONE open handle per camera, so a GUI that has
+        # already opened it must hand the core over rather than let us
+        # open a second one:
+        #   pl_cam_open failed, pvErr:12,
+        #   'This user has already opened this camera'
+        self._injected_mmc = p.get("mmc")
+        self._injected_cam_label = p.get("camera_label")
+        self._owns_camera = False
 
         self.pos_names = list(positions_config.keys())
         if not self.pos_names:
@@ -186,6 +194,27 @@ class MicroscopeInterface_MTB:
         logger.info("acquisition loop started")
 
     def _open_camera(self) -> None:
+        if self._injected_mmc is not None:
+            # Reuse the caller's already-open camera. Opening a second
+            # PVCAM handle fails with C0_CAM_ALREADY_OPEN.
+            self.mmc = self._injected_mmc
+            if self._injected_cam_label:
+                self._camera_label = self._injected_cam_label
+            self._owns_camera = False
+            with self._config_lock:
+                try:
+                    self.mmc.setCameraDevice(self._camera_label)
+                    self.mmc.setExposure(self.exposure_ms)
+                except Exception as e:
+                    logger.warning(
+                        "could not configure the shared camera: %s", e
+                    )
+            logger.info(
+                "reusing the caller's camera %r, exposure %.1f ms",
+                self._camera_label, self.exposure_ms,
+            )
+            return
+
         try:
             from pymmcore_plus import CMMCorePlus
         except ImportError as e:
@@ -194,6 +223,7 @@ class MicroscopeInterface_MTB:
                 "pip install -r requirements-mm.txt"
             ) from e
 
+        self._owns_camera = True
         self.mmc = CMMCorePlus()
         try:
             # PVCAM races MMCore's sequence buffer when it is tight.
@@ -218,10 +248,16 @@ class MicroscopeInterface_MTB:
     def disconnect(self) -> None:
         self.stop()
         if self.mmc is not None:
-            try:
-                self.mmc.unloadAllDevices()
-            except Exception as e:
-                logger.warning("camera unload failed: %s", e)
+            # Only tear down a camera we opened. Unloading a borrowed
+            # one would leave the GUI holding a dead handle, and the
+            # next PVCAM open would fail until the process restarted.
+            if self._owns_camera:
+                try:
+                    self.mmc.unloadAllDevices()
+                except Exception as e:
+                    logger.warning("camera unload failed: %s", e)
+            else:
+                logger.info("leaving the borrowed camera open")
             self.mmc = None
         # Leave the MTB session alone. Logging out would make every
         # later Login in this process fail, stranding the GUI and any

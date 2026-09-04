@@ -40,6 +40,12 @@ import argparse
 import os
 import sys
 
+# Running from tools/ leaves the repo root off sys.path, so importing
+# tracking_tools for the wrapper probe fails.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
 DEFAULT_DLL = (
     r"C:\Program Files\Carl Zeiss\MTB 2011 - 2.12.0.7\MTBApi\MTBApi.dll"
 )
@@ -421,19 +427,56 @@ def _dump_objective(root, comp) -> None:
         _log(f"  Name unreadable: {type(e).__name__}")
 
     # Which ZEISS.MTB.Api interfaces does this object accept a cast to?
+    # Enumerate via ASSEMBLY REFLECTION: dir() on a pythonnet namespace
+    # module resolves lazily and lists almost nothing, which is why an
+    # earlier version of this scan reported zero castable interfaces
+    # even for IMTBComponent, which the object certainly is.
     castable = []
     try:
+        from System import AppDomain
+        asm = None
+        for a in AppDomain.CurrentDomain.GetAssemblies():
+            try:
+                if (a.GetName().Name or "") == "MTBApi":
+                    asm = a
+                    break
+            except Exception:
+                continue
+        if asm is None:
+            raise RuntimeError("MTBApi assembly not found in AppDomain")
+
+        try:
+            types = [t for t in asm.GetTypes() if t is not None]
+        except Exception as e:
+            types = [t for t in (getattr(e, "Types", None) or []) if t]
+
+        iface_types = [
+            t for t in types
+            if t.IsInterface and t.IsPublic
+            and (t.Name or "").startswith("IMTB")
+        ]
+        _log(f"  scanning {len(iface_types)} IMTB* interfaces")
+
         import ZEISS.MTB.Api as api
-        for iface_name in sorted(dir(api)):
-            if not iface_name.startswith("IMTB"):
+        for t in sorted(iface_types, key=lambda x: x.Name):
+            try:
+                iface = getattr(api, t.Name)
+            except Exception:
                 continue
             try:
-                iface = getattr(api, iface_name)
                 cast = iface(comp)
             except Exception:
                 continue
-            if cast is not None:
-                castable.append(iface_name)
+            if cast is None:
+                continue
+            extra = sorted(
+                a for a in dir(cast)
+                if not a.startswith(("_", "get_", "set_", "add_",
+                                     "remove_"))
+            )
+            castable.append(t.Name)
+            _log(f"    {t.Name}")
+            _log(f"        {extra}")
     except Exception as e:
         _log(f"  interface scan failed: {type(e).__name__}: {e}")
     _log(f"  castable to ({len(castable)}): {castable}")
