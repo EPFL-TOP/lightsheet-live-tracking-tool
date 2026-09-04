@@ -105,6 +105,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--objective", action="store_true",
                    help="Dump everything readable about the nosepiece, "
                         "so the magnification API can be identified.")
+    p.add_argument("--lightpath", action="store_true",
+                   help="Report shutters, reflector, sideport and lamps "
+                        "— i.e. why no light may be reaching the "
+                        "camera.")
     return p.parse_args()
 
 
@@ -404,6 +408,111 @@ def test_move_axis(comp, label, unit, delta, mode, timeout, tol,
         _log(f"    restored to {back:.3f} {unit}")
     except Exception as e:
         _fail(f"{label}: could not restore original position: {e}")
+
+
+# Candidate MTBIds for anything that can gate light to the camera.
+# Probed by name because the set varies per stand; absent ones are
+# simply reported as absent.
+_LIGHTPATH_IDS = [
+    "MTBTLShutter", "MTBRLShutter", "MTBLampShutter",
+    "MTBTLLamp", "MTBTLHalogenLamp", "MTBRLLamp",
+    "MTBTLLampControl", "MTBFLLEDController", "MTBFLLEDShutter",
+    "MTBSideportChanger", "MTBBaseportChanger",
+    "MTBReflectorChanger", "MTBFilterChanger",
+    "MTBCondenser", "MTBCondenserContrastChanger",
+    "MTBApertureChanger", "MTBTubeLensChanger",
+    "MTBOptovar", "MTBTLAperture", "MTBTLFieldStop",
+    "MTBObservationChanger", "MTBCamera",
+]
+
+
+def _dump_lightpath(root) -> None:
+    """Report every component that can stop light reaching the camera.
+
+    An exposure-independent frame (mean and std identical from 1 ms to
+    50 ms) means ZERO photons, not few: that is the sensor's dark
+    offset plus read noise. So the question is not exposure but what is
+    closed, misdirected, or switched off.
+    """
+    import ZEISS.MTB.Api as api
+
+    def _read(obj, names):
+        for n in names:
+            try:
+                v = getattr(obj, n)
+            except Exception:
+                continue
+            if callable(v):
+                continue
+            return n, v
+        return None, None
+
+    found = 0
+    for mtb_id in _LIGHTPATH_IDS:
+        try:
+            comp = root.GetComponent(mtb_id)
+        except Exception as e:
+            _log(f"  {mtb_id:32s} ERROR {type(e).__name__}")
+            continue
+        if comp is None:
+            continue
+        found += 1
+
+        name = ""
+        try:
+            name = f"  ({comp.Name})"
+        except Exception:
+            pass
+        _log(f"  {mtb_id:32s} PRESENT{name}")
+
+        # Shutter open/closed, changer position, lamp on/off.
+        for iface_name, fields in (
+            ("IMTBShutterState", ("Open",)),
+            ("IMTBChanger", ("Position", "MinPosition",
+                             "MaxPosition")),
+            ("IMTBContinual", ()),
+            ("IMTBLamp", ("IsActive", "Intensity", "OnOff")),
+            ("IMTBLampControl", ("IsActive", "Intensity")),
+        ):
+            try:
+                cast = getattr(api, iface_name)(comp)
+            except Exception:
+                continue
+            if cast is None:
+                continue
+            bits = []
+            for f in fields:
+                try:
+                    v = getattr(cast, f)
+                    if not callable(v):
+                        bits.append(f"{f}={v!r}")
+                except Exception:
+                    pass
+            if iface_name == "IMTBContinual":
+                try:
+                    u = cast.GetPositionUnit(0)
+                    bits.append(f"pos={cast.GetPosition(u):.3f} {u}")
+                except Exception:
+                    pass
+            if iface_name == "IMTBChanger":
+                # Name the current element — e.g. which filter cube.
+                try:
+                    el = cast.GetElement(cast.Position)
+                    bits.append(f"element={el.Name!r}")
+                except Exception:
+                    pass
+            if bits:
+                _log(f"      {iface_name}: {'  '.join(bits)}")
+
+    if not found:
+        _log("  no light-path components matched the candidate list")
+    _log()
+    _log("  Interpretation:")
+    _log("    - a shutter with Open=False blocks the path")
+    _log("    - a sideport/observation changer on the EYEPIECE port")
+    _log("      sends no light to the camera")
+    _log("    - transmitted-light brightfield needs the TL lamp, not")
+    _log("      the Colibri (which is fluorescence excitation)")
 
 
 def _dump_objective(root, comp) -> None:
@@ -719,6 +828,10 @@ def main() -> int:
         if args.objective:
             _hdr("OBJECTIVE / NOSEPIECE")
             _dump_objective(root, comps.get("objective"))
+
+        if args.lightpath:
+            _hdr("LIGHT PATH")
+            _dump_lightpath(root)
 
         if args.move:
             _hdr("TEST MOVES")
