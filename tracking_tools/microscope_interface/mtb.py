@@ -253,13 +253,23 @@ class MTBAxis:
 
     def move_to(self, position: float,
                 mode_name: str = "Synchronous",
-                clamp: bool = True) -> float:
+                clamp: bool = True,
+                tolerance: float | None = None) -> float:
         """Move to an absolute position (µm). Returns where it landed.
 
         Absolute rather than MODE_RELATIVE by design: a tracking loop
         computes targets as baseline + cumulative_drift, so an absolute
         target is self-correcting — a dropped move does not permanently
         offset the series the way a dropped relative delta would.
+
+        A target the axis has already reached is a NO-OP, not a move.
+        MTB returns False for a zero-distance SetPosition, which means
+        "nothing to do" rather than "refused"; commanding one happens
+        constantly in practice, because a tracking run with zero drift
+        targets exactly the current position. So we skip the call when
+        already within `tolerance` (default: one step width), and if
+        MTB still returns False we check whether we in fact arrived
+        before treating it as an error.
         """
         lo, hi = self.limits
         target = position
@@ -271,6 +281,19 @@ class MTBAxis:
                     "%.1f..%.1f)",
                     self.label, position, self.unit, target, lo, hi,
                 )
+
+        # One step width is the smallest move the axis can resolve, so
+        # anything closer than that is already "there".
+        tol = tolerance if tolerance is not None else max(self.step,
+                                                          1e-6)
+        current = self.position
+        if abs(current - target) <= tol:
+            logger.debug(
+                "%s: already at %.3f %s (target %.3f, tol %.3f) — "
+                "no move commanded",
+                self.label, current, self.unit, target, tol,
+            )
+            return current
 
         # Must be a real enum member — see resolve_mode().
         mode = resolve_mode(mode_name)
@@ -286,11 +309,21 @@ class MTBAxis:
                     f"{self.unit}) raised"
                 ) from e
             if ok is False:
+                landed = self.position
+                if abs(landed - target) <= tol:
+                    logger.debug(
+                        "%s: SetPosition returned False but the axis "
+                        "is at %.3f %s — treating as done",
+                        self.label, landed, self.unit,
+                    )
+                    return landed
                 raise MTBError(
                     f"{self.label}: SetPosition({target:.3f} "
-                    f"{self.unit}) was refused. If this is the "
-                    f"motorized focus, Definite Focus 2 may be holding "
-                    f"the axis."
+                    f"{self.unit}) was refused and the axis is still "
+                    f"at {landed:.3f}. Possible causes: an axis lock, "
+                    f"a latched emergency stop, an active joystick, "
+                    f"or — for the motorized focus — Definite Focus 2 "
+                    f"holding the axis."
                 )
         return self.position
 

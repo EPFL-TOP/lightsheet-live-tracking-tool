@@ -427,3 +427,80 @@ def test_move_to_accepts_an_alternative_mode_name(monkeypatch):
     ax = MTBAxis(FakeContinual(), "axis_x")
     ax.move_to(1.0, mode_name="Fast")
     assert seen == ["Fast"]
+
+
+# ====================================================================
+# No-op moves
+#
+# MTB returns False from SetPosition when asked to move somewhere the
+# axis already is. That is "nothing to do", not a refusal — and it
+# happens constantly, because a tracking run with zero accumulated
+# drift targets exactly the current position. The real microscope
+# failed with
+#   axis_x: SetPosition(3.508 µm) was refused
+# where 3.508 was the live position. Observed 2026-09-04.
+# ====================================================================
+
+def test_REGRESSION_target_equal_to_current_position_is_a_noop():
+    fake = FakeContinual(position=3.508, step=0.25)
+    ax = MTBAxis(fake, "axis_x")
+    landed = ax.move_to(3.508)
+    assert landed == pytest.approx(3.508)
+    assert not fake.set_calls, (
+        "commanded a zero-distance move; MTB returns False for those"
+    )
+
+
+def test_REGRESSION_target_within_one_step_is_a_noop():
+    # XY resolves 0.25 µm, so 0.1 µm away is unreachable anyway.
+    fake = FakeContinual(position=100.0, step=0.25)
+    ax = MTBAxis(fake, "axis_x")
+    ax.move_to(100.1)
+    assert not fake.set_calls
+
+
+def test_move_beyond_one_step_is_commanded():
+    fake = FakeContinual(position=100.0, step=0.25)
+    ax = MTBAxis(fake, "axis_x")
+    ax.move_to(100.5)
+    assert fake.set_calls, "a resolvable move must still be commanded"
+    assert fake.set_calls[-1][0] == pytest.approx(100.5)
+
+
+def test_false_return_is_accepted_when_the_axis_did_arrive():
+    """Some axes report False yet land correctly; trust the readback."""
+
+    class ArrivesButReportsFalse(FakeContinual):
+        def SetPosition(self, pos, unit, mode, timeout):
+            self.set_calls.append((pos, unit, mode, timeout))
+            self._pos = pos      # it really moved
+            return False         # ...but says otherwise
+
+    fake = ArrivesButReportsFalse(position=0.0, step=0.01)
+    ax = MTBAxis(fake, "piezo")
+    assert ax.move_to(5.0) == pytest.approx(5.0)
+
+
+def test_false_return_still_raises_when_the_axis_did_not_move():
+    fake = FakeContinual(position=0.0, step=0.01, refuse=True)
+    ax = MTBAxis(fake, "focus")
+    with pytest.raises(MTBError, match="still at"):
+        ax.move_to(5.0)
+
+
+def test_refusal_message_lists_plausible_causes():
+    fake = FakeContinual(position=0.0, step=0.01, refuse=True)
+    ax = MTBAxis(fake, "axis_x")
+    with pytest.raises(MTBError) as err:
+        ax.move_to(5.0)
+    msg = str(err.value)
+    # Must not blame DF2 unconditionally — this fired on axis_x.
+    assert "emergency stop" in msg or "joystick" in msg
+    assert "Definite Focus 2" in msg
+
+
+def test_explicit_tolerance_overrides_step_width():
+    fake = FakeContinual(position=100.0, step=0.25)
+    ax = MTBAxis(fake, "axis_x")
+    ax.move_to(102.0, tolerance=5.0)
+    assert not fake.set_calls, "explicit tolerance should suppress it"
