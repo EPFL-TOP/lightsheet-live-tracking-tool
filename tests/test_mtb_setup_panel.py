@@ -8,6 +8,7 @@ bookkeeping, and the config handed to the backend.
 from __future__ import annotations
 
 import json
+import os
 
 import numpy as np
 import pandas as pd
@@ -288,3 +289,97 @@ def test_connect_reports_a_missing_dependency_clearly(panel_obj):
     # reported, never raised.
     assert "MTB" in msg
     assert not panel_obj.connected
+
+
+# ====================================================================
+# Bokeh restores sys.path after running the app script
+#
+# `panel serve` uses Bokeh's CodeHandler, which snapshots sys.path
+# before executing the served script and RESTORES it afterwards. A
+# module-level `sys.path.insert(repo_root)` therefore does NOT survive
+# into button callbacks, so any repo-local import deferred into a
+# callback fails at click time with
+#   Cannot import the MTB layer: No module named 'tracking_tools'
+#   ... on sys.path: False
+# even though the same import succeeds at module scope.
+# zeiss_panel_app.py imports at the top and works; deferring broke it.
+# Observed 2026-09-04.
+# ====================================================================
+
+def test_REGRESSION_repo_imports_resolved_at_module_scope():
+    """The MTB names must already be bound on the module, so callbacks
+    never need sys.path to still contain the repo root."""
+    import interactive_tools.mtb_setup as m
+
+    assert hasattr(m, "MTBSession")
+    assert hasattr(m, "MTBMotion")
+    assert hasattr(m, "MicroscopeInterface_MTB")
+    assert m.MTBSession is not None, (
+        "MTBSession failed to import at module scope: "
+        f"{m._MTB_IMPORT_ERROR}"
+    )
+    assert m.MicroscopeInterface_MTB is not None, (
+        "backend failed to import at module scope: "
+        f"{m._BACKEND_IMPORT_ERROR}"
+    )
+
+
+def test_REGRESSION_callbacks_work_after_sys_path_is_restored(
+        monkeypatch):
+    """Simulate Bokeh: import the module with the root on sys.path,
+    then strip it, then exercise a callback."""
+    import sys as _sys
+    import interactive_tools.mtb_setup as m
+
+    root = m._ROOT
+    stripped = [p for p in _sys.path if os.path.abspath(p) != root]
+    monkeypatch.setattr(_sys, "path", stripped)
+    assert root not in _sys.path, "precondition: root must be gone"
+
+    panel_obj = m.MTBSetupPanel()
+
+    # Connect must get past the import stage and fail (if at all) on
+    # the hardware, never on module resolution.
+    panel_obj._on_connect()
+    assert "No module named" not in (panel_obj.status.object or ""), (
+        "a callback still performs a repo-local import at call time"
+    )
+
+    # And the validation path must not blame a missing backend.
+    panel_obj.motion = FakeMotion()
+    panel_obj.mmc = object()
+    panel_obj.pos_table.value = pd.DataFrame(
+        [{"name": "scene_000", "x_um": 1.0, "y_um": 2.0, "z_um": 3.0}]
+    )
+    panel_obj.outdir.value = "/tmp/does-not-exist-yet-xyz"
+    assert panel_obj._validate_run() is None
+
+
+def test_no_repo_local_imports_inside_methods():
+    """Static guard: no `tracking_tools` import may sit inside a
+    function body, because Bokeh restores sys.path before callbacks
+    run. Module-level imports inside try/except are fine, so this
+    walks the AST rather than matching indentation."""
+    import ast
+    import inspect
+    import interactive_tools.mtb_setup as m
+
+    tree = ast.parse(inspect.getsource(m))
+    offenders = []
+
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(func):
+            mod = None
+            if isinstance(node, ast.ImportFrom):
+                mod = node.module or ""
+            elif isinstance(node, ast.Import):
+                mod = ", ".join(a.name for a in node.names)
+            if mod and "tracking_tools" in mod:
+                offenders.append(f"{func.name}() imports {mod}")
+
+    assert not offenders, (
+        "repo-local imports inside a function body fail under "
+        f"panel serve: {offenders}"
+    )

@@ -52,6 +52,32 @@ if _ROOT not in sys.path:
 import importlib  # noqa: E402
 importlib.invalidate_caches()
 
+# Import the repo's own modules HERE, at module scope, and never inside
+# a callback. Bokeh's CodeHandler (which `panel serve` uses) snapshots
+# sys.path before running this script and RESTORES it afterwards, so
+# by the time a button callback fires the repo root is off sys.path
+# again and `import tracking_tools` raises ModuleNotFoundError. That
+# is why zeiss_panel_app.py imports at the top and works; deferring
+# the import is what broke.
+try:
+    from tracking_tools.microscope_interface.mtb import (  # noqa: E402
+        MTBMotion,
+        MTBSession,
+    )
+    _MTB_IMPORT_ERROR = None
+except Exception as _e:            # pragma: no cover - env dependent
+    MTBMotion = MTBSession = None
+    _MTB_IMPORT_ERROR = _e
+
+try:
+    from tracking_tools.microscope_interface.mtb_backend import (  # noqa: E402,E501
+        MicroscopeInterface_MTB,
+    )
+    _BACKEND_IMPORT_ERROR = None
+except Exception as _e:            # pragma: no cover - env dependent
+    MicroscopeInterface_MTB = None
+    _BACKEND_IMPORT_ERROR = _e
+
 pn.extension("tabulator", notifications=True)
 
 logger = logging.getLogger(__name__)
@@ -298,29 +324,22 @@ class MTBSetupPanel:
     # ----------------------------------------------------- connection
 
     def _on_connect(self, _event=None) -> None:
-        try:
-            from tracking_tools.microscope_interface.mtb import (
-                MTBMotion, MTBSession,
-            )
-        except ImportError as e:
-            # Report enough to diagnose without another round trip:
-            # which root we computed, whether it is on sys.path, and
-            # whether the package is actually there on disk.
+        if MTBSession is None:
+            # Resolved at import time, not here — see the note at the
+            # top about Bokeh restoring sys.path.
             expected = os.path.join(_ROOT, "tracking_tools",
                                     "microscope_interface", "mtb.py")
             self._say(
-                f"Cannot import the MTB layer: {e}\n\n"
-                f"- repo root computed as `{_ROOT}`\n"
-                f"- on sys.path: `{_ROOT in sys.path}`\n"
+                f"MTB layer unavailable: {_MTB_IMPORT_ERROR}\n\n"
+                f"- repo root: `{_ROOT}`\n"
                 f"- `{expected}` exists: "
                 f"`{os.path.exists(expected)}`\n\n"
-                f"If the file exists but the import fails, the "
-                f"`panel serve` process is running older code — "
-                f"restart it (Ctrl+C then serve again); it reads the "
-                f"script once at startup.",
+                f"This is decided when the app module loads. If the "
+                f"file exists, check the `panel serve` console for the "
+                f"import traceback — a missing dependency of "
+                f"`mtb.py` shows up here too.",
                 "err",
             )
-            logger.exception("MTB layer import failed")
             return
 
         try:
@@ -379,10 +398,9 @@ class MTBSetupPanel:
         self.hw_info.object = "\n\n".join(parts)
 
     def _on_z_axis_change(self, event) -> None:
-        if not self.connected:
+        if not self.connected or MTBMotion is None:
             return
         try:
-            from tracking_tools.microscope_interface.mtb import MTBMotion
             self.motion = MTBMotion(self.session, z_axis=event.new)
             self._say(f"Z actuator switched to {event.new}.", "ok")
             self._show_hw_info()
@@ -572,6 +590,9 @@ class MTBSetupPanel:
         if self.mmc is None:
             return ("Camera is unavailable — tracking needs images. "
                     "Reconnect, and check ZEN is closed.")
+        if MicroscopeInterface_MTB is None:
+            return (f"Tracking backend unavailable: "
+                    f"{_BACKEND_IMPORT_ERROR}")
         if not self.pos_table.value.shape[0]:
             return ("No positions defined. Jog to each embryo and use "
                     "*Capture current position*.")
@@ -588,10 +609,6 @@ class MTBSetupPanel:
         if problem:
             self.run_status.object = f"⚠️ {problem}"
             return
-
-        from tracking_tools.microscope_interface.mtb_backend import (
-            MicroscopeInterface_MTB,
-        )
 
         root = self.outdir.value.strip()
         os.makedirs(root, exist_ok=True)
