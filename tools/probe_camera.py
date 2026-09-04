@@ -148,9 +148,16 @@ def sweep(mmc, label, names) -> bool:
 
     if has("ReadoutRate"):
         _log()
-        _log("ReadoutRate sweep — THE decisive test:")
-        _log("  If the constant follows the bit depth (65535 at 16-bit,")
-        _log("  4095 at 12-bit) it is an unread buffer, not light.")
+        _log("ReadoutRate sweep:")
+        # Must run at a SHORT exposure. Saturating at the bit-depth
+        # maximum is what real light does, so a constant here tells us
+        # nothing unless we have first ruled out over-exposure.
+        try:
+            mmc.setExposure(1.0)
+            _log("  (exposure forced to 1 ms so saturation cannot "
+                 "masquerade as a readout fault)")
+        except Exception:
+            pass
         try:
             original = mmc.getProperty(label, "ReadoutRate")
             opts = list(
@@ -168,14 +175,10 @@ def sweep(mmc, label, names) -> bool:
             if st is None:
                 continue
             mn, mx, mean, std = st
-            note = ""
-            if mx == mn:
-                if abs(mn - 4095) < 1:
-                    note = "  <-- 12-bit max: FILL PATTERN confirmed"
-                elif abs(mn - 65535) < 1:
-                    note = "  <-- 16-bit max"
-            else:
-                note = "  <-- VARYING"
+            note = "  <-- VARYING" if mx != mn else (
+                "  <-- still constant at 1 ms: suspect readout"
+            )
+            if mx != mn:
                 found = True
             _log(f"  {val:16s} min={mn:8.1f} max={mx:8.1f} "
                  f"std={std:7.1f}{note}")
@@ -184,6 +187,12 @@ def sweep(mmc, label, names) -> bool:
                 mmc.setProperty(label, "ReadoutRate", original)
             except Exception:
                 pass
+
+    if found:
+        _log()
+        _log("CONCLUSION: the sensor is being read correctly. A "
+             "constant frame at long exposure is simply SATURATION — "
+             "reduce the exposure.")
 
     return found
 
