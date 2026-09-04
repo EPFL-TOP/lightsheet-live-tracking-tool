@@ -7,3 +7,23 @@ matplotlib
 panel
 pandas
 pytest>=8
+
+# --- tracker dependencies -------------------------------------------
+# These were previously undeclared, so a fresh install could set up
+# positions and acquire happily and then fail only at the moment the
+# tracker was constructed:
+#   ERROR No module named 'torch'
+#
+# torch: required by MultiRoIBaseTracker whether or not `serverkit` is
+#   enabled. The default wheel bundles CUDA and is several GB; for a
+#   CPU-only install (plenty for drift correction on ROIs) use
+#     pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch
+scipy
+tifffile
+
+# watchdog: powers TrackingRunner's ROI file watcher, which is what
+# lets ROIs be drawn or redrawn WHILE a run is in progress. Without it
+# the feature degrades silently to a warning in the log, and ROIs saved
+# mid-run are never picked up.
+watchdog

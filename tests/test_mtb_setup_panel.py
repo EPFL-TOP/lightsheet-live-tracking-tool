@@ -603,3 +603,125 @@ def test_start_still_allowed_with_partial_rois(panel_obj, tmp_path):
     _two_positions(panel_obj, tmp_path)
     _write_rois(tmp_path, "scene_000")
     assert panel_obj._validate_run() is None
+
+
+# ====================================================================
+# Tracker parameters
+#
+# tracking_config.yaml does NOT contain `serverkit`; zeiss_panel_app.py
+# injects it from a checkbox and MultiRoIBaseTracker requires it
+# positionally. Omitting it failed only at tracker construction, after
+# a full acquisition had already run:
+#   ERROR MultiRoIBaseTracker.init() missing 1 required positional
+#   argument: 'serverkit'
+# Observed 2026-09-04.
+# ====================================================================
+
+def test_serverkit_widget_exists_and_defaults_on(panel_obj):
+    assert hasattr(panel_obj, "serverkit")
+    assert panel_obj.serverkit.value is True
+
+
+def test_REGRESSION_serverkit_is_injected_into_roi_tracker_params(
+        panel_obj, monkeypatch, tmp_path):
+    """The YAML lacks serverkit, so the panel must add it."""
+    import interactive_tools.mtb_setup as m
+
+    if m.TrackingRunner is None or m.get_pos_config is None:
+        pytest.skip("tracker dependencies unavailable")
+
+    captured = {}
+
+    def fake_runner(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(m, "TrackingRunner", fake_runner)
+    monkeypatch.setattr(
+        m, "get_pos_config",
+        lambda root, log_dir_name, position_name=None: {
+            position_name or "scene_000": {
+                "log_dir": str(tmp_path / "scene_000"
+                               / "embryo_tracking"),
+                "RoIs": [], "detection": False,
+                "tracking_mode": "x", "scaling_factor": 1,
+                "blur_factor": 0, "grid_size": 1,
+                "mask_kernel_size": 1,
+            }
+        },
+    )
+
+    panel_obj.motion = FakeMotion()
+    panel_obj.mmc = object()
+    panel_obj._on_capture()
+    panel_obj.outdir.value = str(tmp_path)
+    roi_dir = tmp_path / "scene_000" / "embryo_tracking"
+    roi_dir.mkdir(parents=True)
+    (roi_dir / "tracking_RoIs.json").write_text("{}")
+
+    class FakeRunnerBackend:
+        positions_config = {}
+        pos_names = []
+
+        def refresh_filename(self, name):
+            pass
+
+    panel_obj._runner = FakeRunnerBackend()
+    panel_obj.serverkit.value = True
+    panel_obj._build_tracker(str(tmp_path))
+
+    roi_params = captured.get("roi_tracker_params", {})
+    assert "serverkit" in roi_params, (
+        "serverkit missing — tracker construction will fail"
+    )
+    assert roi_params["serverkit"] is True
+
+
+def test_serverkit_checkbox_value_is_respected(panel_obj, monkeypatch,
+                                               tmp_path):
+    import interactive_tools.mtb_setup as m
+
+    if m.TrackingRunner is None:
+        pytest.skip("tracker dependencies unavailable")
+
+    captured = {}
+    monkeypatch.setattr(
+        m, "TrackingRunner",
+        lambda **kw: captured.update(kw) or object(),
+    )
+    monkeypatch.setattr(
+        m, "get_pos_config",
+        lambda root, log_dir_name, position_name=None: {
+            position_name or "scene_000": {"log_dir": "x"}
+        },
+    )
+
+    panel_obj.motion = FakeMotion()
+    panel_obj._on_capture()
+    panel_obj.outdir.value = str(tmp_path)
+    roi_dir = tmp_path / "scene_000" / "embryo_tracking"
+    roi_dir.mkdir(parents=True)
+    (roi_dir / "tracking_RoIs.json").write_text("{}")
+
+    class FakeRunnerBackend:
+        positions_config = {}
+        pos_names = []
+
+        def refresh_filename(self, name):
+            pass
+
+    panel_obj._runner = FakeRunnerBackend()
+    panel_obj.serverkit.value = False
+    panel_obj._build_tracker(str(tmp_path))
+    assert captured["roi_tracker_params"]["serverkit"] is False
+
+
+def test_requirements_declare_the_tracker_dependencies():
+    """A fresh install must not get all the way to tracker
+    construction before discovering torch is missing."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    text = (root / "requirements.txt").read_text().lower()
+    for pkg in ("torch", "scipy", "tifffile", "watchdog"):
+        assert pkg in text, f"{pkg} missing from requirements.txt"
