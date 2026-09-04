@@ -495,10 +495,28 @@ def _dump_lightpath(root) -> None:
                 except Exception:
                     pass
             if iface_name == "IMTBChanger":
-                # Name the current element — e.g. which filter cube.
+                # Name the current element AND every alternative, so
+                # the right setting is visible rather than guessed.
                 try:
                     el = cast.GetElement(cast.Position)
                     bits.append(f"element={el.Name!r}")
+                except Exception:
+                    pass
+                try:
+                    lo = int(cast.MinPosition)
+                    hi = int(cast.MaxPosition)
+                    cur = int(cast.Position)
+                    names = []
+                    for i in range(lo, hi + 1):
+                        try:
+                            nm = cast.GetElement(i).Name
+                        except Exception:
+                            nm = "?"
+                        mark = " <=" if i == cur else ""
+                        names.append(f"{i}={nm!r}{mark}")
+                    if names:
+                        bits.append("\n        options: "
+                                    + ", ".join(names))
                 except Exception:
                     pass
             if bits:
@@ -513,6 +531,12 @@ def _dump_lightpath(root) -> None:
     _log("      sends no light to the camera")
     _log("    - transmitted-light brightfield needs the TL lamp, not")
     _log("      the Colibri (which is fluorescence excitation)")
+    _log("    - the SIDEPORT turret decides whether light reaches the")
+    _log("      camera at all; this scope's camera is on the LEFT")
+    _log("      sideport per MTB's MTBCameraAdapter_MTBSideportChanger"
+         "_Left")
+    _log("    - a CONDENSER on a phase ring (PH1/PH2/PH3) instead of")
+    _log("      brightfield throws away most of the light")
 
 
 def _dump_objective(root, comp) -> None:

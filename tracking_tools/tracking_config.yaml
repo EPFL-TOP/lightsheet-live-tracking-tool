@@ -1,6 +1,13 @@
 roi_tracker:
   window_length: 10
-  server_addresses: ['http://upoates-tethys.epfl.ch:8000/', 'http://paperino.epfl.ch:8000'] # List of server addresses for remote GPU execution.
+  # Server addresses for remote GPU execution.
+  # NO TRAILING SLASH: the client appends '/services', so a trailing
+  # slash produces '//services' and the server answers 404 —
+  #   GET //services HTTP/1.1" 404
+  #   Failed to connect: Algorithm server returned an unexpected
+  #   status_code: 404
+  # which looks like the server is down when it is actually running.
+  server_addresses: ['http://upoates-tethys.epfl.ch:8000', 'http://paperino.epfl.ch:8000']
   kernel_size_z: 5
   containment_threshold: 0.4
   k: 5.0
