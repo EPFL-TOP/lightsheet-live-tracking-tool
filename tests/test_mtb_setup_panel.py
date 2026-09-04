@@ -383,3 +383,139 @@ def test_no_repo_local_imports_inside_methods():
         "repo-local imports inside a function body fail under "
         f"panel serve: {offenders}"
     )
+
+
+# ---------------------------------------------------- live mode
+
+def test_live_starts_off(panel_obj):
+    assert panel_obj.btn_live.value is False
+    assert panel_obj._live_cb is None
+
+
+def test_live_refused_without_a_camera(panel_obj):
+    panel_obj.btn_live.value = True
+    assert panel_obj.btn_live.value is False
+    assert "Camera not available" in panel_obj.status.object
+
+
+def test_live_refused_while_a_run_is_active(panel_obj):
+    """The camera is exclusive; live snapping would interleave with the
+    run's own acquisitions."""
+    import threading
+
+    panel_obj.mmc = object()
+    started = threading.Event()
+    stop = threading.Event()
+
+    def busy():
+        started.set()
+        stop.wait(5.0)
+
+    panel_obj._run_thread = threading.Thread(target=busy, daemon=True)
+    panel_obj._run_thread.start()
+    started.wait(1.0)
+    try:
+        panel_obj.btn_live.value = True
+        assert panel_obj.btn_live.value is False
+        assert "camera is exclusive" in panel_obj.status.object
+    finally:
+        stop.set()
+
+
+def test_stop_live_is_idempotent(panel_obj):
+    panel_obj._stop_live()
+    panel_obj._stop_live()
+    assert panel_obj._live_cb is None
+
+
+# ------------------------------------------- two-phase workflow
+
+def test_positions_config_includes_log_dir_when_root_given(panel_obj):
+    panel_obj.motion = FakeMotion(xyz=(1.0, 2.0, 3.0))
+    panel_obj._on_capture()
+    cfg = panel_obj.positions_config(root="/exp")
+    entry = cfg["scene_000"]
+    assert entry["xyz_um"] == (1.0, 2.0, 3.0)
+    assert entry["log_dir"] == os.path.join(
+        "/exp", "scene_000", "embryo_tracking"
+    )
+
+
+def test_positions_config_omits_log_dir_without_root(panel_obj):
+    panel_obj.motion = FakeMotion()
+    panel_obj._on_capture()
+    assert "log_dir" not in panel_obj.positions_config()["scene_000"]
+
+
+def test_roi_status_detects_missing_and_present_rois(panel_obj,
+                                                     tmp_path):
+    panel_obj.motion = FakeMotion()
+    panel_obj._on_capture()
+    panel_obj._on_capture()
+    panel_obj.outdir.value = str(tmp_path)
+
+    roi_dir = tmp_path / "scene_000" / "embryo_tracking"
+    roi_dir.mkdir(parents=True)
+    (roi_dir / "tracking_RoIs.json").write_text("{}")
+
+    state = panel_obj.roi_status()
+    assert state == {"scene_000": True, "scene_001": False}
+
+
+def test_closed_loop_refused_when_rois_are_missing(panel_obj,
+                                                   tmp_path):
+    """ROIs can only be drawn on frames that already exist, so the
+    first run must be acquire-only."""
+    panel_obj.motion = FakeMotion()
+    panel_obj.mmc = object()
+    panel_obj._on_capture()
+    panel_obj.outdir.value = str(tmp_path / "fresh")
+    panel_obj.mode.value = "Acquire + track (closed loop)"
+
+    problem = panel_obj._validate_run()
+    assert problem is not None
+    assert "ROIs" in problem
+    assert "Acquire only" in problem
+
+
+def test_acquire_only_allows_a_fresh_folder(panel_obj, tmp_path):
+    panel_obj.motion = FakeMotion()
+    panel_obj.mmc = object()
+    panel_obj._on_capture()
+    panel_obj.outdir.value = str(tmp_path / "fresh")
+    panel_obj.mode.value = "Acquire only (open loop)"
+    assert panel_obj._validate_run() is None
+
+
+def test_closed_loop_allows_a_populated_folder_when_rois_exist(
+        panel_obj, tmp_path):
+    """Tracking resumes into the folder the acquisition already filled,
+    so the non-empty guard must not apply in that mode."""
+    panel_obj.motion = FakeMotion()
+    panel_obj.mmc = object()
+    panel_obj._on_capture()
+    panel_obj.outdir.value = str(tmp_path)
+    panel_obj.mode.value = "Acquire + track (closed loop)"
+
+    roi_dir = tmp_path / "scene_000" / "embryo_tracking"
+    roi_dir.mkdir(parents=True)
+    (roi_dir / "tracking_RoIs.json").write_text("{}")
+    (tmp_path / "scene_000" / "t0000_BF.tif").write_text("x")
+
+    assert panel_obj._validate_run() is None
+
+
+def test_tracking_requested_reflects_the_mode(panel_obj):
+    panel_obj.mode.value = "Acquire only (open loop)"
+    assert not panel_obj.tracking_requested
+    panel_obj.mode.value = "Acquire + track (closed loop)"
+    assert panel_obj.tracking_requested
+
+
+def test_check_rois_explains_how_to_draw_them(panel_obj, tmp_path):
+    panel_obj.motion = FakeMotion()
+    panel_obj._on_capture()
+    panel_obj.outdir.value = str(tmp_path)
+    panel_obj._refresh_roi_state()
+    assert "Selection" in panel_obj.roi_state.object
+    assert "tracking_RoIs.json" in panel_obj.roi_state.object

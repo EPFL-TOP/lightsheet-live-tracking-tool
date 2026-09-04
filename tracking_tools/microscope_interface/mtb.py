@@ -40,6 +40,7 @@ Ranges as reported by the hardware:
 from __future__ import annotations
 
 import logging
+import re
 import threading
 
 DEFAULT_DLL = (
@@ -378,6 +379,186 @@ class MTBAxis:
         return f"<MTBAxis {self.label} @ {self.position:.3f} {self.unit}>"
 
 
+_MAG_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*[xX×]")
+
+
+def parse_magnification(text: str) -> float | None:
+    """Pull the magnification out of an objective name.
+
+    Zeiss objective names carry it, e.g.
+      'Plan-Apochromat 20x/0.8 M27'      -> 20.0
+      'LD C-Apochromat 40x/1.1 W Korr'   -> 40.0
+      'EC Plan-Neofluar 10x/0.3 Ph1'     -> 10.0
+    This is the fallback when the typed API is unavailable, and it is
+    surprisingly reliable because the convention is universal.
+    """
+    if not text:
+        return None
+    m = _MAG_RE.search(str(text))
+    if not m:
+        return None
+    try:
+        return float(m.group(1).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def sample_pixel_size_um(camera_pixel_um: float,
+                         objective_mag: float,
+                         adapter_mag: float = 1.0) -> float:
+    """Pixel pitch projected onto the sample, in micrometres.
+
+    The tracker measures shifts in pixels and must convert them to
+    stage micrometres; get this wrong and every correction is
+    systematically mis-scaled.
+
+    Prime 95B pixels are 11 um. With a 20x objective and the 1x CSU
+    camera adapter this microscope reports, that is 11/20 = 0.55 um.
+    """
+    total = float(objective_mag) * float(adapter_mag)
+    if total <= 0:
+        raise ValueError(
+            f"total magnification must be positive, got {total}"
+        )
+    return float(camera_pixel_um) / total
+
+
+class MTBObjective:
+    """The nosepiece: which objective is in, and its magnification.
+
+    MTB's typed objective interface is not something we have confirmed
+    on this installation, so every read is attempted through several
+    plausible routes and falls back to parsing the objective's name.
+    `probe()` reports which route worked, so the guesswork can be
+    removed once we know.
+    """
+
+    _MAG_ATTRS = ("Magnification", "magnification", "Mag")
+    _NAME_ATTRS = ("Name", "name", "DisplayName", "Text")
+    _APERTURE_ATTRS = ("Aperture", "NumericalAperture", "NA")
+
+    def __init__(self, comp, label: str = "objective"):
+        self.label = label
+        self._raw = comp
+        self._changer = self._cast_changer(comp)
+
+    @staticmethod
+    def _cast_changer(comp):
+        for name in ("IMTBChanger", "IMTBObjectiveChanger"):
+            try:
+                mod = __import__("ZEISS.MTB.Api", fromlist=[name])
+                iface = getattr(mod, name)
+                cast = iface(comp)
+                cast.Position          # prove the cast is usable
+                return cast
+            except Exception:
+                continue
+        return comp
+
+    @staticmethod
+    def _first_attr(obj, names):
+        for n in names:
+            try:
+                val = getattr(obj, n)
+            except Exception:
+                continue
+            if val not in (None, ""):
+                return val, n
+        return None, None
+
+    @property
+    def position(self) -> int | None:
+        val, _ = self._first_attr(self._changer, ("Position",))
+        try:
+            return int(val) if val is not None else None
+        except Exception:
+            return None
+
+    def _element(self):
+        """The changer element for the current position, if reachable."""
+        pos = self.position
+        if pos is None:
+            return None
+        for getter in ("GetElement", "Element", "GetElementAt"):
+            try:
+                fn = getattr(self._changer, getter)
+            except Exception:
+                continue
+            try:
+                el = fn(pos) if callable(fn) else fn[pos]
+                if el is not None:
+                    return el
+            except Exception:
+                continue
+        return None
+
+    @property
+    def name(self) -> str | None:
+        el = self._element()
+        for target in (el, self._changer, self._raw):
+            if target is None:
+                continue
+            val, _ = self._first_attr(target, self._NAME_ATTRS)
+            if val:
+                return str(val)
+        return None
+
+    @property
+    def aperture(self) -> float | None:
+        el = self._element()
+        for target in (el, self._changer):
+            if target is None:
+                continue
+            val, _ = self._first_attr(target, self._APERTURE_ATTRS)
+            if val is not None:
+                try:
+                    return float(val)
+                except Exception:
+                    pass
+        return None
+
+    @property
+    def magnification(self) -> float | None:
+        """Magnification, from the typed API or parsed from the name."""
+        el = self._element()
+        for target in (el, self._changer):
+            if target is None:
+                continue
+            val, _ = self._first_attr(target, self._MAG_ATTRS)
+            if val is not None:
+                try:
+                    mag = float(val)
+                    if mag > 0:
+                        return mag
+                except Exception:
+                    pass
+        # Fall back to the name, which conventionally contains it.
+        return parse_magnification(self.name or "")
+
+    def probe(self) -> dict:
+        """Report what is readable and how — for diagnosing the API."""
+        el = self._element()
+        info = {
+            "changer_type": type(self._changer).__name__,
+            "position": self.position,
+            "element_found": el is not None,
+            "element_type": type(el).__name__ if el is not None else None,
+            "name": self.name,
+            "magnification": self.magnification,
+            "aperture": self.aperture,
+        }
+        for target, tag in ((el, "element"), (self._changer, "changer")):
+            if target is None:
+                continue
+            try:
+                info[f"{tag}_attrs"] = sorted(
+                    a for a in dir(target) if not a.startswith("_")
+                )[:60]
+            except Exception:
+                pass
+        return info
+
+
 class MTBSession:
     """An MTB login session with component lookup.
 
@@ -505,6 +686,14 @@ class MTBSession:
                 self.component(role), role, self.timeout_ms
             )
         return self._axes[role]
+
+    def objective(self) -> "MTBObjective":
+        """The nosepiece wrapper, for reading magnification."""
+        if "_objective" not in self._axes:
+            self._axes["_objective"] = MTBObjective(
+                self.component("objective")
+            )
+        return self._axes["_objective"]
 
     def available(self) -> dict[str, str]:
         """Map role -> reported hardware name, for present components."""

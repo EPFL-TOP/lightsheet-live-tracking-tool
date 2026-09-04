@@ -63,10 +63,11 @@ try:
     from tracking_tools.microscope_interface.mtb import (  # noqa: E402
         MTBMotion,
         MTBSession,
+        sample_pixel_size_um,
     )
     _MTB_IMPORT_ERROR = None
 except Exception as _e:            # pragma: no cover - env dependent
-    MTBMotion = MTBSession = None
+    MTBMotion = MTBSession = sample_pixel_size_um = None
     _MTB_IMPORT_ERROR = _e
 
 try:
@@ -77,6 +78,24 @@ try:
 except Exception as _e:            # pragma: no cover - env dependent
     MicroscopeInterface_MTB = None
     _BACKEND_IMPORT_ERROR = _e
+
+# The tracker pulls in heavier dependencies (torch, imaging-server-kit)
+# than motion does, so keep its failure separate: you can still set up
+# and acquire without it.
+try:
+    import yaml  # noqa: E402
+    from tracking_tools.tracking_runner.TrackingRunner import (  # noqa: E402,E501
+        TrackingRunner,
+    )
+    from tracking_tools.utils.tracking_utils import (  # noqa: E402
+        get_pos_config,
+    )
+    _TRACKER_IMPORT_ERROR = None
+except Exception as _e:            # pragma: no cover - env dependent
+    TrackingRunner = None
+    get_pos_config = None
+    yaml = None
+    _TRACKER_IMPORT_ERROR = _e
 
 pn.extension("tabulator", notifications=True)
 
@@ -123,8 +142,10 @@ class MTBSetupPanel:
         self.mmc = None
         self._cam_label = "SetupCam"
         self._runner = None          # active MicroscopeInterface_MTB
+        self._tracker = None         # active TrackingRunner
         self._run_thread = None
         self._stop_flag = threading.Event()
+        self._live_cb = None         # Panel periodic callback handle
 
         self._build_widgets()
         self._wire()
@@ -175,6 +196,13 @@ class MTBSetupPanel:
         )
         self.btn_snap = pn.widgets.Button(
             name="Snap", button_type="success", width=100
+        )
+        self.btn_live = pn.widgets.Toggle(
+            name="● Live", button_type="warning", width=100, value=False
+        )
+        self.live_fps = pn.widgets.FloatInput(
+            name="Live rate (fps)", value=2.0, start=0.2, end=20.0,
+            step=0.5, width=120,
         )
         self.preview = pn.pane.PNG(None, width=600)
         self.img_stats = pn.pane.Markdown(
@@ -255,13 +283,58 @@ class MTBSetupPanel:
             name="Max Z correction (µm)", value=20.0, start=0.1,
             end=500.0, width=180,
         )
+        # The tracker measures shifts in PIXELS; these convert to µm so
+        # relative_move() gets stage units. Prime 95B pixels are 11 µm
+        # on a 1200x1200 sensor, so the value depends on the objective.
+        self.pixel_xy = pn.widgets.FloatInput(
+            name="Pixel size XY (µm)", value=0.347, start=0.001,
+            end=100.0, step=0.001, width=160,
+        )
+        self.pixel_z = pn.widgets.FloatInput(
+            name="Pixel size Z (µm)", value=1.0, start=0.001,
+            end=100.0, step=0.01, width=160,
+        )
+        self.tracking_2d = pn.widgets.Checkbox(
+            name="2-D tracking (ignore Z shift)", value=True
+        )
+        # Pixel pitch is derived, not guessed: camera pixel / (objective
+        # x adapter). MTB knows the objective, so read it rather than
+        # making the operator remember.
+        self.camera_pixel_um = pn.widgets.FloatInput(
+            name="Camera pixel (µm)", value=11.0, start=0.1, end=100.0,
+            step=0.1, width=150,
+        )
+        self.adapter_mag = pn.widgets.FloatInput(
+            name="Adapter mag (×)", value=1.0, start=0.1, end=10.0,
+            step=0.1, width=140,
+        )
+        self.btn_read_objective = pn.widgets.Button(
+            name="Read objective from MTB", button_type="primary",
+            width=210,
+        )
+        self.objective_info = pn.pane.Markdown(
+            "", width=560, styles={"font-size": "0.85em"},
+        )
         self.outdir = pn.widgets.TextInput(
             name="Experiment root", value="", width=560,
             placeholder=r"D:\Users\zeiss\data\my_experiment",
         )
 
+        self.mode = pn.widgets.RadioBoxGroup(
+            name="Mode",
+            options=["Acquire only (open loop)",
+                     "Acquire + track (closed loop)"],
+            value="Acquire only (open loop)",
+            width=300,
+        )
+        self.roi_state = pn.pane.Markdown(
+            "", width=560, styles={"font-size": "0.85em"},
+        )
+        self.btn_check_rois = pn.widgets.Button(
+            name="Check ROIs", width=120
+        )
         self.btn_run = pn.widgets.Button(
-            name="▶ Run tracking", button_type="success", width=170
+            name="▶ Start", button_type="success", width=140
         )
         self.btn_stop = pn.widgets.Button(
             name="■ Stop", button_type="danger", width=110,
@@ -288,6 +361,9 @@ class MTBSetupPanel:
         self.btn_load_pos.on_click(self._on_load_positions)
         self.btn_run.on_click(self._on_run)
         self.btn_stop.on_click(self._on_stop)
+        self.btn_check_rois.on_click(lambda e: self._refresh_roi_state())
+        self.btn_read_objective.on_click(self._on_read_objective)
+        self.btn_live.param.watch(self._on_live_toggle, "value")
         self.z_axis.param.watch(self._on_z_axis_change, "value")
 
         self.btn_xm.on_click(lambda e: self._jog(dx=-self.xy_step.value))
@@ -435,6 +511,58 @@ class MTBSetupPanel:
 
     # --------------------------------------------------------- camera
 
+    def _on_live_toggle(self, event) -> None:
+        """Start/stop repeated snapping.
+
+        The camera is a single exclusive resource: while a tracking run
+        owns it, live snapping would interleave with the run's own
+        acquisitions and both would get corrupted frames. So Live is
+        refused during a run, and starting a run stops Live.
+        """
+        if event.new:
+            if self._run_thread is not None and self._run_thread.is_alive():
+                self.btn_live.value = False
+                self._say("Cannot go live while a run is active — the "
+                          "camera is exclusive.", "warn")
+                return
+            if self.mmc is None:
+                self.btn_live.value = False
+                self._say("Camera not available.", "warn")
+                return
+            period_ms = int(1000.0 / max(0.2, float(self.live_fps.value)))
+            try:
+                self._live_cb = pn.state.add_periodic_callback(
+                    self._live_tick, period=period_ms
+                )
+                self._say(f"Live at ~{self.live_fps.value:g} fps.", "ok")
+            except Exception as e:
+                # No server context (e.g. under pytest) — degrade to a
+                # single snap rather than breaking.
+                self.btn_live.value = False
+                self._say(f"Could not start live mode: {e}", "warn")
+        else:
+            self._stop_live()
+            self._say("Live stopped.")
+
+    def _stop_live(self) -> None:
+        if self._live_cb is not None:
+            try:
+                self._live_cb.stop()
+            except Exception:
+                pass
+            self._live_cb = None
+        if self.btn_live.value:
+            self.btn_live.value = False
+
+    def _live_tick(self) -> None:
+        """One live frame. Stops itself on repeated failure."""
+        try:
+            self._on_snap()
+        except Exception as e:
+            logger.warning("live tick failed: %s", e)
+            self._stop_live()
+            self._say(f"Live stopped after an error: {e}", "err")
+
     def _on_snap(self, _event=None) -> None:
         if self.mmc is None:
             self._say("Camera not available.", "warn")
@@ -537,15 +665,40 @@ class MTBSetupPanel:
         self.pos_table.selection = []
         self._say(f"Removed {len(rows)} position(s).", "ok")
 
-    def positions_config(self) -> dict:
-        """The position list in the shape the backend expects."""
+    def positions_config(self, root: str | None = None,
+                         log_dir_name: str = "embryo_tracking") -> dict:
+        """The position list in the shape the backend expects.
+
+        `xyz_um` is the tracking baseline — the backend requires it and
+        must never read it off the stage, or existing drift would
+        become the reference.
+
+        Pass `root` to also fill in `log_dir`, the folder where the ROI
+        selection dashboard writes tracking_RoIs.json and where
+        TrackingRunner looks for it.
+        """
         cfg = {}
         for _, r in self.pos_table.value.iterrows():
-            cfg[str(r["name"])] = {
+            name = str(r["name"])
+            entry = {
                 "xyz_um": (float(r["x_um"]), float(r["y_um"]),
                            float(r["z_um"]))
             }
+            if root:
+                entry["log_dir"] = os.path.join(root, name,
+                                                log_dir_name)
+            cfg[name] = entry
         return cfg
+
+    def roi_status(self, root: str | None = None) -> dict[str, bool]:
+        """Which captured positions already have ROIs drawn."""
+        root = (root or self.outdir.value or "").strip()
+        out = {}
+        for name in self.positions_config():
+            path = os.path.join(root, name, "embryo_tracking",
+                                "tracking_RoIs.json")
+            out[name] = bool(root) and os.path.exists(path)
+        return out
 
     def _on_save_positions(self, _event=None) -> None:
         path = self.positions_file.value.strip()
@@ -583,6 +736,102 @@ class MTBSetupPanel:
 
     # ------------------------------------------------------- tracking
 
+    def _on_read_objective(self, _event=None) -> None:
+        """Ask MTB which objective is in, and derive the pixel pitch.
+
+        Wrong pixel pitch mis-scales every correction, so deriving it
+        beats trusting a typed-in number. Zeiss objective names carry
+        the magnification, which is the fallback if MTB's typed
+        property is unavailable.
+        """
+        if not self._require_connection():
+            return
+        try:
+            obj = self.session.objective()
+            info = obj.probe()
+        except Exception as e:
+            self.objective_info.object = (
+                f"❌ Could not read the nosepiece: {e}"
+            )
+            logger.exception("objective read failed")
+            return
+
+        name = info.get("name")
+        mag = info.get("magnification")
+        pos = info.get("position")
+
+        lines = [
+            f"Nosepiece position **{pos}** — "
+            f"{'`' + str(name) + '`' if name else '_name unavailable_'}"
+        ]
+        if info.get("aperture"):
+            lines.append(f"NA {info['aperture']}")
+
+        if mag:
+            pitch = sample_pixel_size_um(
+                float(self.camera_pixel_um.value), float(mag),
+                float(self.adapter_mag.value),
+            )
+            self.pixel_xy.value = round(pitch, 4)
+            lines.append(
+                f"Magnification **{mag:g}×** → pixel pitch "
+                f"**{pitch:.4f} µm** "
+                f"({self.camera_pixel_um.value:g} / "
+                f"({mag:g} × {self.adapter_mag.value:g}))"
+            )
+            lines.append("_Pixel size XY updated._")
+        else:
+            lines.append(
+                "⚠️ Magnification not readable — neither a typed "
+                "property nor a parseable name. Set **Pixel size XY** "
+                "by hand, and send me this diagnostic so I can wire "
+                "the right interface:"
+            )
+            lines.append(
+                "```\n"
+                + json.dumps(
+                    {k: v for k, v in info.items()
+                     if k != "changer_attrs"},
+                    indent=2, default=str,
+                )
+                + "\n```"
+            )
+            attrs = info.get("element_attrs") or info.get("changer_attrs")
+            if attrs:
+                lines.append(f"Available members: `{attrs}`")
+
+        self.objective_info.object = "\n\n".join(lines)
+
+    @property
+    def tracking_requested(self) -> bool:
+        return "track" in (self.mode.value or "").lower()
+
+    def _refresh_roi_state(self) -> str:
+        """Report which positions have ROIs, and return a summary."""
+        state = self.roi_status()
+        if not state:
+            self.roi_state.object = (
+                "_No positions captured yet._"
+            )
+            return ""
+        ready = [n for n, ok in state.items() if ok]
+        missing = [n for n, ok in state.items() if not ok]
+        lines = [
+            f"ROIs found for **{len(ready)}/{len(state)}** position(s)."
+        ]
+        if missing:
+            lines.append(
+                "Missing: " + ", ".join(f"`{n}`" for n in missing)
+            )
+            lines.append(
+                "Acquire at least one timepoint first, then draw ROIs "
+                "with the **Selection** dashboard "
+                "(`panel serve interactive_tools/panel_app.py`) — it "
+                "writes `<position>/embryo_tracking/tracking_RoIs.json`."
+            )
+        self.roi_state.object = "\n\n".join(lines)
+        return "\n".join(lines)
+
     def _validate_run(self) -> str | None:
         """Return an error message, or None when good to go."""
         if not self.connected:
@@ -599,7 +848,23 @@ class MTBSetupPanel:
         root = self.outdir.value.strip()
         if not root:
             return "Set an experiment root directory."
-        if os.path.isdir(root) and os.listdir(root):
+
+        if self.tracking_requested:
+            # Closed loop needs ROIs to measure drift against, and
+            # those can only be drawn on already-acquired frames.
+            state = self.roi_status(root)
+            missing = [n for n, ok in state.items() if not ok]
+            if missing:
+                return (
+                    f"Closed-loop tracking needs ROIs, and "
+                    f"{len(missing)} position(s) have none: "
+                    f"{', '.join(missing)}. Run *Acquire only* first, "
+                    f"draw ROIs in the Selection dashboard, then come "
+                    f"back."
+                )
+        elif os.path.isdir(root) and os.listdir(root):
+            # Only guard collisions for a fresh acquisition; resuming
+            # into an existing folder to track is the normal path.
             return (f"{root} already exists and is not empty — pick a "
                     f"fresh folder so frames cannot collide.")
         return None
@@ -640,12 +905,29 @@ class MTBSetupPanel:
 
         try:
             self._runner = MicroscopeInterface_MTB(
-                self.positions_config(), root, params
+                self.positions_config(root), root, params
             )
         except Exception as e:
             self.run_status.object = f"❌ Could not start: {e}"
             return
 
+        # Closed loop: build the tracker that turns frames into
+        # corrections. Without this the loop acquires and applies
+        # whatever drift it is told, but nothing measures any.
+        self._tracker = None
+        if self.tracking_requested:
+            try:
+                self._tracker = self._build_tracker(root)
+            except Exception as e:
+                logger.exception("tracker construction failed")
+                self.run_status.object = (
+                    f"❌ Could not build the tracker: {e}"
+                )
+                self._runner = None
+                return
+
+        # The camera is exclusive — live snapping must not interleave.
+        self._stop_live()
         self._stop_flag.clear()
         self._run_thread = threading.Thread(
             target=self._run_loop, name="mtb-panel-run", daemon=True
@@ -660,6 +942,77 @@ class MTBSetupPanel:
         )
         self._append_log("run started")
 
+    def _build_tracker(self, root: str):
+        """Construct a TrackingRunner over our MTB backend.
+
+        Position discovery is deliberately a MERGE of two sources:
+
+          * get_pos_config() scans the experiment root for
+            <position>/embryo_tracking/tracking_RoIs.json and supplies
+            the ROI geometry and log_dir — so only positions with ROIs
+            drawn are trackable, which is the existing convention.
+          * our captured table supplies xyz_um, the stage baseline,
+            which exists nowhere on disk.
+
+        run_zeiss() is the right loop despite the name: it is the
+        variant that owns its own timing and watches the ROI JSON files
+        for changes, so ROIs can be redrawn mid-run.
+        """
+        config_path = os.path.join(
+            _ROOT, "tracking_tools", "tracking_config.yaml"
+        )
+        with open(config_path) as fh:
+            config = yaml.safe_load(fh)
+
+        runner_config = config["tracking_runner"]
+        roi_tracker_config = config["roi_tracker"]
+        position_tracker_config = {
+            "pixel_size_xy": float(self.pixel_xy.value),
+            "pixel_size_z": float(self.pixel_z.value),
+            "tracking_2d": bool(self.tracking_2d.value),
+        }
+        log_dir_name = runner_config["log_dir_name"]
+
+        discovered = get_pos_config(root, log_dir_name)
+        if not discovered:
+            raise RuntimeError(
+                f"No positions with ROIs under {root}. Each position "
+                f"folder needs {log_dir_name}/tracking_RoIs.json."
+            )
+
+        captured = self.positions_config(root, log_dir_name)
+        merged = {}
+        for name, entry in discovered.items():
+            if name not in captured:
+                logger.warning(
+                    "position %s has ROIs but no captured baseline — "
+                    "skipping, the tracker cannot correct it", name
+                )
+                continue
+            merged[name] = dict(entry)
+            merged[name]["xyz_um"] = captured[name]["xyz_um"]
+
+        if not merged:
+            raise RuntimeError(
+                "No position has BOTH a captured baseline and ROIs. "
+                "Capture positions here, acquire, then draw ROIs."
+            )
+
+        # Keep the backend's view consistent with what we will track.
+        self._runner.positions_config = merged
+        self._runner.pos_names = list(merged.keys())
+        for name in merged:
+            self._runner.refresh_filename(name)
+
+        return TrackingRunner(
+            positions_config=merged,
+            microscope_interface=self._runner,
+            dirpath=root,
+            runner_params=runner_config,
+            roi_tracker_params=roi_tracker_config,
+            position_tracker_params=position_tracker_config,
+        )
+
     def _run_loop(self) -> None:
         """Drain frames from the backend until stopped.
 
@@ -671,6 +1024,14 @@ class MTBSetupPanel:
         iface = self._runner
         try:
             iface.connect()
+
+            if self._tracker is not None:
+                # TrackingRunner drives the consume/measure/correct
+                # cycle itself, pulling frames from our backend.
+                self._push_log("closed-loop tracking via TrackingRunner")
+                self._tracker.run_zeiss()
+                return
+
             while not self._stop_flag.is_set():
                 item = iface.wait_for_image(timeout_ms=500)
                 if item is None:
@@ -746,6 +1107,7 @@ class MTBSetupPanel:
         camera = pn.Column(
             "### Camera",
             pn.Row(self.exposure, self.btn_snap),
+            pn.Row(self.btn_live, self.live_fps),
             self.img_stats,
             self.preview,
         )
@@ -769,8 +1131,26 @@ class MTBSetupPanel:
             "### Acquisition",
             pn.Row(self.interval_s, self.n_timepoints, self.settle_s),
             pn.Row(self.zstack_on, self.zstack_range, self.zstack_step),
-            pn.Row(self.max_xy, self.max_z),
             self.outdir,
+            pn.layout.Divider(),
+            "#### Mode",
+            self.mode,
+            pn.pane.Markdown(
+                "Closed loop needs ROIs, and ROIs can only be drawn on "
+                "frames that already exist — so the first run is always "
+                "*Acquire only*.",
+                width=560, styles={"font-size": "0.85em"},
+            ),
+            pn.Row(self.btn_check_rois),
+            self.roi_state,
+            "#### Drift correction",
+            pn.Row(self.camera_pixel_um, self.adapter_mag,
+                   self.btn_read_objective),
+            self.objective_info,
+            pn.Row(self.pixel_xy, self.pixel_z),
+            pn.Row(self.tracking_2d),
+            pn.Row(self.max_xy, self.max_z),
+            pn.layout.Divider(),
             self.run_status,
             pn.Row(self.btn_run, self.btn_stop),
             self.run_log,

@@ -595,3 +595,123 @@ def test_describe_reports_deviations_and_tolerance():
     m, _ = _motion()
     text = m.describe()
     assert "dev typ" in text and "tol" in text
+
+
+# ------------------------------------------------ objective / pixel size
+
+def test_parse_magnification_across_zeiss_naming():
+    from tracking_tools.microscope_interface.mtb import (
+        parse_magnification,
+    )
+    cases = {
+        "Plan-Apochromat 20x/0.8 M27": 20.0,
+        "LD C-Apochromat 40x/1.1 W Korr": 40.0,
+        "EC Plan-Neofluar 10x/0.3 Ph1": 10.0,
+        "Fluar 5x/0.25": 5.0,
+        "63x/1.4 Oil": 63.0,
+        "Plan-Apochromat 1.25X/0.04": 1.25,
+        "objective 100 X oil": 100.0,
+    }
+    for text, expected in cases.items():
+        assert parse_magnification(text) == pytest.approx(expected), text
+
+
+def test_parse_magnification_returns_none_when_absent():
+    from tracking_tools.microscope_interface.mtb import (
+        parse_magnification,
+    )
+    for text in ("", None, "no numbers here", "Plan-Apochromat"):
+        assert parse_magnification(text) is None
+
+
+def test_sample_pixel_size_for_prime95b():
+    """Prime 95B has 11 um pixels; this scope reports a 1x CSU adapter."""
+    from tracking_tools.microscope_interface.mtb import (
+        sample_pixel_size_um,
+    )
+    assert sample_pixel_size_um(11.0, 20.0) == pytest.approx(0.55)
+    assert sample_pixel_size_um(11.0, 40.0) == pytest.approx(0.275)
+    assert sample_pixel_size_um(11.0, 63.0) == pytest.approx(
+        0.174603, abs=1e-5
+    )
+
+
+def test_sample_pixel_size_accounts_for_the_adapter():
+    from tracking_tools.microscope_interface.mtb import (
+        sample_pixel_size_um,
+    )
+    assert sample_pixel_size_um(11.0, 20.0, 0.5) == pytest.approx(1.1)
+    assert sample_pixel_size_um(11.0, 20.0, 2.0) == pytest.approx(0.275)
+
+
+def test_sample_pixel_size_rejects_nonsense_magnification():
+    from tracking_tools.microscope_interface.mtb import (
+        sample_pixel_size_um,
+    )
+    with pytest.raises(ValueError, match="must be positive"):
+        sample_pixel_size_um(11.0, 0.0)
+
+
+class FakeObjectiveElement:
+    def __init__(self, name=None, mag=None, na=None):
+        if name is not None:
+            self.Name = name
+        if mag is not None:
+            self.Magnification = mag
+        if na is not None:
+            self.Aperture = na
+
+
+class FakeChanger:
+    def __init__(self, position=3, element=None):
+        self.Position = position
+        self._element = element
+
+    def GetElement(self, pos):
+        return self._element
+
+
+def _objective(changer):
+    from tracking_tools.microscope_interface.mtb import MTBObjective
+    obj = MTBObjective.__new__(MTBObjective)
+    obj.label = "objective"
+    obj._raw = changer
+    obj._changer = changer
+    return obj
+
+
+def test_objective_prefers_the_typed_magnification():
+    el = FakeObjectiveElement(name="Plan-Apochromat 20x/0.8", mag=20.0)
+    obj = _objective(FakeChanger(element=el))
+    assert obj.magnification == pytest.approx(20.0)
+    assert obj.position == 3
+
+
+def test_objective_falls_back_to_parsing_the_name():
+    """No typed Magnification member — the name must carry it."""
+    el = FakeObjectiveElement(name="LD C-Apochromat 40x/1.1 W")
+    obj = _objective(FakeChanger(element=el))
+    assert obj.magnification == pytest.approx(40.0)
+
+
+def test_objective_reports_none_when_nothing_is_readable():
+    obj = _objective(FakeChanger(element=FakeObjectiveElement()))
+    assert obj.magnification is None
+    assert obj.name is None
+
+
+def test_objective_probe_describes_what_it_found():
+    el = FakeObjectiveElement(name="Fluar 5x/0.25", mag=5.0, na=0.25)
+    info = _objective(FakeChanger(element=el)).probe()
+    assert info["magnification"] == pytest.approx(5.0)
+    assert info["aperture"] == pytest.approx(0.25)
+    assert info["element_found"] is True
+    assert "element_attrs" in info
+
+
+def test_objective_survives_a_changer_without_elements():
+    class Bare:
+        Position = 1
+    obj = _objective(Bare())
+    assert obj.magnification is None
+    assert obj.probe()["element_found"] is False
