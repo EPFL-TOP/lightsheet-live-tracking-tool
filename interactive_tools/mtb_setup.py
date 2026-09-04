@@ -45,6 +45,13 @@ _ROOT = os.path.abspath(os.path.join(_HERE, '..'))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+# Python caches directory listings and failed lookups per sys.path
+# entry. If anything attempted `import tracking_tools` before the line
+# above ran, that miss is remembered and the fresh path entry is
+# ignored — so drop the caches after mutating sys.path.
+import importlib  # noqa: E402
+importlib.invalidate_caches()
+
 pn.extension("tabulator", notifications=True)
 
 logger = logging.getLogger(__name__)
@@ -296,7 +303,24 @@ class MTBSetupPanel:
                 MTBMotion, MTBSession,
             )
         except ImportError as e:
-            self._say(f"Cannot import the MTB layer: {e}", "err")
+            # Report enough to diagnose without another round trip:
+            # which root we computed, whether it is on sys.path, and
+            # whether the package is actually there on disk.
+            expected = os.path.join(_ROOT, "tracking_tools",
+                                    "microscope_interface", "mtb.py")
+            self._say(
+                f"Cannot import the MTB layer: {e}\n\n"
+                f"- repo root computed as `{_ROOT}`\n"
+                f"- on sys.path: `{_ROOT in sys.path}`\n"
+                f"- `{expected}` exists: "
+                f"`{os.path.exists(expected)}`\n\n"
+                f"If the file exists but the import fails, the "
+                f"`panel serve` process is running older code — "
+                f"restart it (Ctrl+C then serve again); it reads the "
+                f"script once at startup.",
+                "err",
+            )
+            logger.exception("MTB layer import failed")
             return
 
         try:
