@@ -59,10 +59,51 @@ MTB_IDS = {
     "reflector": "MTBReflectorChanger",
 }
 
-# MTBCmdSetModes numeric values (the enum is [Flags]).
+# MTBCmdSetModes numeric values (the enum is [Flags]). These are the
+# documented values, but do NOT pass them to .NET directly: pythonnet
+# >= 3.0 refuses implicit int -> Enum conversion and fails with
+#   "since Python.NET 3.0 int can not be converted to Enum implicitly"
+# Use resolve_mode() to obtain a real enum member.
 MODE_DEFAULT = 0
 MODE_SYNCHRONOUS = 1
 MODE_RELATIVE = 2
+
+_MODE_INTS = {
+    "Default": MODE_DEFAULT,
+    "Synchronous": MODE_SYNCHRONOUS,
+    "Relative": MODE_RELATIVE,
+    "UnidirectionalBacklash": 4,
+    "BidirectionalBacklashSmart": 8,
+    "BidirectionalBacklash": 16,
+    "Smooth": 32,
+    "VariableProfile": 64,
+    "Fast": 128,
+}
+_mode_cache: dict[str, object] = {}
+
+
+def resolve_mode(name: str = "Synchronous"):
+    """Return a real MTBCmdSetModes member for `name`.
+
+    Falls back to the plain integer when the Zeiss assembly is not
+    loadable, which is what unit tests run against.
+    """
+    if name in _mode_cache:
+        return _mode_cache[name]
+    if name not in _MODE_INTS:
+        raise ValueError(
+            f"unknown MTBCmdSetModes name {name!r}; "
+            f"known: {sorted(_MODE_INTS)}"
+        )
+    try:
+        from ZEISS.MTB.Api import MTBCmdSetModes
+        value = getattr(MTBCmdSetModes, name)
+    except Exception:
+        # No .NET here (unit tests, non-Zeiss machines). Fakes accept
+        # the int, and the real path never reaches this branch.
+        value = _MODE_INTS[name]
+    _mode_cache[name] = value
+    return value
 
 _UM_ALIASES = ("um", "\u00b5m", "micron", "micrometer", "micrometre")
 
@@ -211,7 +252,7 @@ class MTBAxis:
     # --- writes ---
 
     def move_to(self, position: float,
-                mode: int = MODE_SYNCHRONOUS,
+                mode_name: str = "Synchronous",
                 clamp: bool = True) -> float:
         """Move to an absolute position (µm). Returns where it landed.
 
@@ -230,6 +271,9 @@ class MTBAxis:
                     "%.1f..%.1f)",
                     self.label, position, self.unit, target, lo, hi,
                 )
+
+        # Must be a real enum member — see resolve_mode().
+        mode = resolve_mode(mode_name)
 
         with self._lock:
             try:

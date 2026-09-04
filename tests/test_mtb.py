@@ -352,3 +352,78 @@ def test_is_connected_reflects_state(reset_shared, monkeypatch):
     assert not s.is_connected
     s.connect()
     assert s.is_connected
+
+
+# ====================================================================
+# Enum marshalling
+#
+# pythonnet >= 3.0 refuses implicit int -> Enum conversion. Passing the
+# numeric MTBCmdSetModes value straight to SetPosition failed on the
+# real microscope with:
+#   System.ArgumentException: since Python.NET 3.0 int can not be
+#   converted to Enum implicitly. Use Enum(int_value)
+#   in method Boolean SetPosition(Double, String, MTBCmdSetModes, Int32)
+# Observed 2026-09-04.
+# ====================================================================
+
+def test_resolve_mode_known_names():
+    assert mtb.resolve_mode("Default") == mtb.MODE_DEFAULT
+    assert mtb.resolve_mode("Synchronous") == mtb.MODE_SYNCHRONOUS
+    assert mtb.resolve_mode("Relative") == mtb.MODE_RELATIVE
+
+
+def test_resolve_mode_rejects_unknown_name():
+    with pytest.raises(ValueError, match="unknown MTBCmdSetModes"):
+        mtb.resolve_mode("Teleport")
+
+
+def test_resolve_mode_prefers_the_dotnet_enum_member(monkeypatch):
+    """When the Zeiss assembly is present, the real member must win
+    over the integer fallback."""
+    sentinel = object()
+
+    class FakeModes:
+        Synchronous = sentinel
+
+    import sys
+    import types
+    fake_mod = types.ModuleType("ZEISS.MTB.Api")
+    fake_mod.MTBCmdSetModes = FakeModes
+    monkeypatch.setitem(sys.modules, "ZEISS", types.ModuleType("ZEISS"))
+    monkeypatch.setitem(sys.modules, "ZEISS.MTB",
+                        types.ModuleType("ZEISS.MTB"))
+    monkeypatch.setitem(sys.modules, "ZEISS.MTB.Api", fake_mod)
+    monkeypatch.setattr(mtb, "_mode_cache", {})
+
+    assert mtb.resolve_mode("Synchronous") is sentinel
+
+
+def test_REGRESSION_move_to_resolves_mode_via_resolve_mode(monkeypatch):
+    """move_to must route the mode through resolve_mode(), never hand a
+    bare int to .NET."""
+    seen = []
+
+    def spy(name="Synchronous"):
+        seen.append(name)
+        return f"<enum {name}>"
+
+    monkeypatch.setattr(mtb, "resolve_mode", spy)
+    fake = FakeContinual(position=0.0)
+    ax = MTBAxis(fake, "axis_x")
+    ax.move_to(10.0)
+
+    assert seen == ["Synchronous"], "mode was not resolved"
+    assert fake.set_calls[-1][2] == "<enum Synchronous>", (
+        "a raw int reached SetPosition — pythonnet >=3.0 rejects that"
+    )
+
+
+def test_move_to_accepts_an_alternative_mode_name(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        mtb, "resolve_mode",
+        lambda name="Synchronous": seen.append(name) or f"<{name}>",
+    )
+    ax = MTBAxis(FakeContinual(), "axis_x")
+    ax.move_to(1.0, mode_name="Fast")
+    assert seen == ["Fast"]
