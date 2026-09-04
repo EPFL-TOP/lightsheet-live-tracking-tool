@@ -96,6 +96,9 @@ def parse_args() -> argparse.Namespace:
                    help="MTB SetPosition timeout in ms (default: 10000).")
     p.add_argument("--tol-um", type=float, default=3.0,
                    help="Acceptable position error in um (default: 3).")
+    p.add_argument("--objective", action="store_true",
+                   help="Dump everything readable about the nosepiece, "
+                        "so the magnification API can be identified.")
     return p.parse_args()
 
 
@@ -397,6 +400,117 @@ def test_move_axis(comp, label, unit, delta, mode, timeout, tol,
         _fail(f"{label}: could not restore original position: {e}")
 
 
+def _dump_objective(root, comp) -> None:
+    """Print every route to the objective's magnification.
+
+    The panel could not read it via the routes we guessed, so enumerate
+    exhaustively: the concrete type, the interfaces it can be cast to,
+    the changer position, whatever element sits there, and every public
+    member of each. Whatever names appear here are what we wire up.
+    """
+    import json as _json
+
+    if comp is None:
+        _log("  objective component absent")
+        return
+
+    _log(f"  concrete type: {type(comp).__name__}")
+    try:
+        _log(f"  Name: {comp.Name!r}")
+    except Exception as e:
+        _log(f"  Name unreadable: {type(e).__name__}")
+
+    # Which ZEISS.MTB.Api interfaces does this object accept a cast to?
+    castable = []
+    try:
+        import ZEISS.MTB.Api as api
+        for iface_name in sorted(dir(api)):
+            if not iface_name.startswith("IMTB"):
+                continue
+            try:
+                iface = getattr(api, iface_name)
+                cast = iface(comp)
+            except Exception:
+                continue
+            if cast is not None:
+                castable.append(iface_name)
+    except Exception as e:
+        _log(f"  interface scan failed: {type(e).__name__}: {e}")
+    _log(f"  castable to ({len(castable)}): {castable}")
+
+    # Public members of the raw object.
+    try:
+        members = sorted(a for a in dir(comp) if not a.startswith("_"))
+        _log(f"  raw members ({len(members)}):")
+        for i in range(0, len(members), 4):
+            _log("      " + "  ".join(f"{m:26s}"
+                                      for m in members[i:i + 4]))
+    except Exception as e:
+        _log(f"  member listing failed: {e}")
+
+    # Read anything that looks like magnification / position / element.
+    _log()
+    _log("  Value probe:")
+    for attr in ("Position", "Magnification", "Name", "Aperture",
+                 "NumericalAperture", "ElementCount", "Elements",
+                 "Element", "Objective", "Objectives"):
+        try:
+            val = getattr(comp, attr)
+        except Exception:
+            continue
+        if callable(val):
+            _log(f"    {attr}() -> <callable>")
+            continue
+        _log(f"    {attr} = {val!r}")
+
+    # Walk the changer's elements, which is where per-objective data
+    # usually lives.
+    for getter in ("GetElement", "GetElementAt", "GetObjective"):
+        fn = getattr(comp, getter, None)
+        if not callable(fn):
+            continue
+        _log()
+        _log(f"  {getter}(1..6):")
+        for pos in range(1, 7):
+            try:
+                el = fn(pos)
+            except Exception as e:
+                _log(f"    [{pos}] {type(e).__name__}: {e}")
+                continue
+            if el is None:
+                _log(f"    [{pos}] None")
+                continue
+            bits = {}
+            for a in ("Name", "Magnification", "Aperture",
+                      "NumericalAperture", "Contrast", "WorkingDistance"):
+                try:
+                    v = getattr(el, a)
+                    if not callable(v):
+                        bits[a] = v
+                except Exception:
+                    pass
+            _log(f"    [{pos}] {type(el).__name__} "
+                 f"{_json.dumps(bits, default=str)}")
+            if pos == 1:
+                try:
+                    em = sorted(a for a in dir(el)
+                                if not a.startswith("_"))
+                    _log(f"          members: {em}")
+                except Exception:
+                    pass
+
+    # And what our own wrapper makes of it.
+    try:
+        from tracking_tools.microscope_interface.mtb import MTBObjective
+        _log()
+        _log("  MTBObjective.probe():")
+        info = MTBObjective(comp).probe()
+        for k, v in info.items():
+            _log(f"    {k} = {v!r}")
+    except Exception as e:
+        _log(f"  wrapper probe failed: {type(e).__name__}: {e}")
+
+
 def main() -> int:
     args = parse_args()
     clr, asm = load_api(args.dll)
@@ -442,6 +556,10 @@ def main() -> int:
                     units[role] = unit
                 if cast is not None:
                     casted[role] = cast
+
+        if args.objective:
+            _hdr("OBJECTIVE / NOSEPIECE")
+            _dump_objective(root, comps.get("objective"))
 
         if args.move:
             _hdr("TEST MOVES")

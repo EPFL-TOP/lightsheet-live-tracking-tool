@@ -462,40 +462,50 @@ def test_roi_status_detects_missing_and_present_rois(panel_obj,
     assert state == {"scene_000": True, "scene_001": False}
 
 
-def test_closed_loop_refused_when_rois_are_missing(panel_obj,
-                                                   tmp_path):
-    """ROIs can only be drawn on frames that already exist, so the
-    first run must be acquire-only."""
+def test_REGRESSION_missing_rois_do_not_block_starting(panel_obj,
+                                                       tmp_path):
+    """Tracking runs ON TOP OF a running acquisition: the loop must
+    start with no ROIs at all, because ROIs can only be drawn on
+    frames that already exist. An earlier version refused to start
+    without them, which made the workflow impossible."""
     panel_obj.motion = FakeMotion()
     panel_obj.mmc = object()
     panel_obj._on_capture()
     panel_obj.outdir.value = str(tmp_path / "fresh")
-    panel_obj.mode.value = "Acquire + track (closed loop)"
+    panel_obj.auto_track.value = True
 
-    problem = panel_obj._validate_run()
-    assert problem is not None
-    assert "ROIs" in problem
-    assert "Acquire only" in problem
+    assert panel_obj._validate_run() is None, (
+        "must be able to start acquiring before any ROI exists"
+    )
 
 
-def test_acquire_only_allows_a_fresh_folder(panel_obj, tmp_path):
+def test_start_allowed_with_tracking_disabled(panel_obj, tmp_path):
     panel_obj.motion = FakeMotion()
     panel_obj.mmc = object()
     panel_obj._on_capture()
     panel_obj.outdir.value = str(tmp_path / "fresh")
-    panel_obj.mode.value = "Acquire only (open loop)"
+    panel_obj.auto_track.value = False
     assert panel_obj._validate_run() is None
 
 
-def test_closed_loop_allows_a_populated_folder_when_rois_exist(
-        panel_obj, tmp_path):
-    """Tracking resumes into the folder the acquisition already filled,
-    so the non-empty guard must not apply in that mode."""
+def test_populated_folder_without_rois_is_refused(panel_obj, tmp_path):
+    """Guards against overwriting a previous experiment's frames."""
     panel_obj.motion = FakeMotion()
     panel_obj.mmc = object()
     panel_obj._on_capture()
     panel_obj.outdir.value = str(tmp_path)
-    panel_obj.mode.value = "Acquire + track (closed loop)"
+    (tmp_path / "stale.tif").write_text("x")
+    problem = panel_obj._validate_run()
+    assert problem is not None and "not empty" in problem
+
+
+def test_populated_folder_WITH_rois_is_allowed(panel_obj, tmp_path):
+    """Resuming into the folder the acquisition already filled is the
+    normal path once ROIs have been drawn."""
+    panel_obj.motion = FakeMotion()
+    panel_obj.mmc = object()
+    panel_obj._on_capture()
+    panel_obj.outdir.value = str(tmp_path)
 
     roi_dir = tmp_path / "scene_000" / "embryo_tracking"
     roi_dir.mkdir(parents=True)
@@ -505,10 +515,10 @@ def test_closed_loop_allows_a_populated_folder_when_rois_exist(
     assert panel_obj._validate_run() is None
 
 
-def test_tracking_requested_reflects_the_mode(panel_obj):
-    panel_obj.mode.value = "Acquire only (open loop)"
+def test_tracking_requested_follows_the_auto_track_checkbox(panel_obj):
+    panel_obj.auto_track.value = False
     assert not panel_obj.tracking_requested
-    panel_obj.mode.value = "Acquire + track (closed loop)"
+    panel_obj.auto_track.value = True
     assert panel_obj.tracking_requested
 
 

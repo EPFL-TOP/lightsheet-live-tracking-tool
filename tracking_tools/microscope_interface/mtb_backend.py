@@ -143,7 +143,21 @@ class MicroscopeInterface_MTB:
     # ------------------------------------------------------ lifecycle
 
     def connect(self) -> None:
-        """Open MTB and the camera, then start the acquisition loop."""
+        """Open MTB and the camera, then start the acquisition loop.
+
+        Idempotent. TrackingRunner.run_zeiss() calls connect() itself,
+        and the setup GUI starts acquisition BEFORE any ROIs exist so
+        the operator can draw them on real frames — so connect() gets
+        called twice on the same backend. Without this guard the second
+        call would start a second acquisition thread and both would
+        drive the stage.
+        """
+        if self._thread is not None and self._thread.is_alive():
+            logger.info(
+                "acquisition already running — connect() is a no-op"
+            )
+            return
+
         logger.info("MTB backend connecting")
 
         if self._injected_session is not None:

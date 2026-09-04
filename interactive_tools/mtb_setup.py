@@ -320,12 +320,17 @@ class MTBSetupPanel:
             placeholder=r"D:\Users\zeiss\data\my_experiment",
         )
 
-        self.mode = pn.widgets.RadioBoxGroup(
-            name="Mode",
-            options=["Acquire only (open loop)",
-                     "Acquire + track (closed loop)"],
-            value="Acquire only (open loop)",
-            width=300,
+        # Tracking is not a separate run: acquisition starts first (ROIs
+        # can only be drawn on frames that exist), and the tracker
+        # attaches to the already-running loop as soon as ROIs are
+        # saved. One Start button, one continuous acquisition.
+        self.auto_track = pn.widgets.Checkbox(
+            name="Engage tracking automatically when ROIs are saved",
+            value=True,
+        )
+        self.roi_poll_s = pn.widgets.FloatInput(
+            name="ROI check interval (s)", value=5.0, start=1.0,
+            end=120.0, width=170,
         )
         self.roi_state = pn.pane.Markdown(
             "", width=560, styles={"font-size": "0.85em"},
@@ -804,7 +809,7 @@ class MTBSetupPanel:
 
     @property
     def tracking_requested(self) -> bool:
-        return "track" in (self.mode.value or "").lower()
+        return bool(self.auto_track.value)
 
     def _refresh_roi_state(self) -> str:
         """Report which positions have ROIs, and return a summary."""
@@ -848,25 +853,14 @@ class MTBSetupPanel:
         root = self.outdir.value.strip()
         if not root:
             return "Set an experiment root directory."
-
-        if self.tracking_requested:
-            # Closed loop needs ROIs to measure drift against, and
-            # those can only be drawn on already-acquired frames.
-            state = self.roi_status(root)
-            missing = [n for n, ok in state.items() if not ok]
-            if missing:
-                return (
-                    f"Closed-loop tracking needs ROIs, and "
-                    f"{len(missing)} position(s) have none: "
-                    f"{', '.join(missing)}. Run *Acquire only* first, "
-                    f"draw ROIs in the Selection dashboard, then come "
-                    f"back."
-                )
-        elif os.path.isdir(root) and os.listdir(root):
-            # Only guard collisions for a fresh acquisition; resuming
-            # into an existing folder to track is the normal path.
-            return (f"{root} already exists and is not empty — pick a "
-                    f"fresh folder so frames cannot collide.")
+        # Missing ROIs are NOT an error: acquisition starts first and
+        # the tracker attaches once they are drawn. Only guard against
+        # overwriting a previous experiment's frames.
+        if os.path.isdir(root) and os.listdir(root):
+            existing = self.roi_status(root)
+            if not any(existing.values()):
+                return (f"{root} already exists and is not empty — pick "
+                        f"a fresh folder so frames cannot collide.")
         return None
 
     def _on_run(self, _event=None) -> None:
@@ -911,20 +905,21 @@ class MTBSetupPanel:
             self.run_status.object = f"❌ Could not start: {e}"
             return
 
-        # Closed loop: build the tracker that turns frames into
-        # corrections. Without this the loop acquires and applies
-        # whatever drift it is told, but nothing measures any.
+        # The tracker is NOT built here. Acquisition must start first so
+        # ROIs can be drawn on real frames; _run_loop attaches the
+        # tracker once they appear.
         self._tracker = None
-        if self.tracking_requested:
+
+        # The ROI watcher inside TrackingRunner watches DIRECTORIES, so
+        # they must exist before it starts. Create them now, which also
+        # gives the Selection dashboard somewhere to save into.
+        for name in self.positions_config():
             try:
-                self._tracker = self._build_tracker(root)
+                os.makedirs(os.path.join(root, name, "embryo_tracking"),
+                            exist_ok=True)
             except Exception as e:
-                logger.exception("tracker construction failed")
-                self.run_status.object = (
-                    f"❌ Could not build the tracker: {e}"
-                )
-                self._runner = None
-                return
+                logger.warning("could not create ROI dir for %s: %s",
+                               name, e)
 
         # The camera is exclusive — live snapping must not interleave.
         self._stop_live()
@@ -1022,29 +1017,65 @@ class MTBSetupPanel:
         and the operator can watch the series build.
         """
         iface = self._runner
+        root = self.outdir.value.strip()
         try:
             iface.connect()
+            self._push_log("acquiring (open loop — no ROIs yet)")
 
-            if self._tracker is not None:
-                # TrackingRunner drives the consume/measure/correct
-                # cycle itself, pulling frames from our backend.
-                self._push_log("closed-loop tracking via TrackingRunner")
-                self._tracker.run_zeiss()
-                return
+            next_check = 0.0
+            poll = max(1.0, float(self.roi_poll_s.value))
 
+            # Open-loop phase: acquire and save while the operator draws
+            # ROIs on the frames appearing on disk.
             while not self._stop_flag.is_set():
+                if self.tracking_requested and time.monotonic() >= next_check:
+                    next_check = time.monotonic() + poll
+                    ready = [n for n, ok in
+                             self.roi_status(root).items() if ok]
+                    if ready:
+                        self._push_log(
+                            f"ROIs found for {len(ready)} position(s): "
+                            f"{', '.join(ready)} — attaching tracker"
+                        )
+                        break
+
                 item = iface.wait_for_image(timeout_ms=500)
                 if item is None:
                     thread = getattr(iface, "_thread", None)
                     if thread is None or not thread.is_alive():
-                        break
+                        return
                     continue
                 img, tp, pos_name = item
                 self._push_log(
                     f"t={tp} {pos_name} "
-                    f"mean={float(np.mean(img)):.0f} "
-                    f"drift={iface.get_cum_drift(pos_name)}"
+                    f"mean={float(np.mean(img)):.0f} (open loop)"
                 )
+
+            if self._stop_flag.is_set():
+                return
+
+            # Closed-loop phase: hand consumption to TrackingRunner. The
+            # acquisition thread keeps running untouched — connect() is
+            # idempotent — so this is a change of consumer, not a
+            # restart. Frames are already on disk, so losing one across
+            # the handoff costs nothing.
+            try:
+                self._tracker = self._build_tracker(root)
+            except Exception as e:
+                logger.exception("tracker construction failed")
+                self._push_log(f"ERROR building tracker: {e}")
+                self._push_log("continuing open loop")
+                while not self._stop_flag.is_set():
+                    if iface.wait_for_image(timeout_ms=500) is None:
+                        thread = getattr(iface, "_thread", None)
+                        if thread is None or not thread.is_alive():
+                            break
+                return
+
+            self._push_status("▶ Closed-loop tracking active")
+            self._push_log("closed-loop tracking via TrackingRunner")
+            self._tracker.run_zeiss()
+
         except Exception as e:
             logger.exception("run loop failed")
             self._push_log(f"ERROR {e}")
@@ -1062,6 +1093,15 @@ class MTBSetupPanel:
         except Exception:
             self._append_log(msg)
 
+    def _push_status(self, msg: str) -> None:
+        """Update the run status from a worker thread."""
+        def apply():
+            self.run_status.object = msg
+        try:
+            pn.state.execute(apply)
+        except Exception:
+            self.run_status.object = msg
+
     def _push_done(self) -> None:
         def finish():
             self.btn_run.disabled = False
@@ -1076,6 +1116,12 @@ class MTBSetupPanel:
 
     def _on_stop(self, _event=None) -> None:
         self._stop_flag.set()
+        if self._tracker is not None:
+            # TrackingRunner polls this between frames.
+            try:
+                self._tracker.stop_requested = True
+            except Exception as e:
+                logger.warning("could not stop tracker: %s", e)
         if self._runner is not None:
             try:
                 self._runner.stop()
@@ -1133,15 +1179,17 @@ class MTBSetupPanel:
             pn.Row(self.zstack_on, self.zstack_range, self.zstack_step),
             self.outdir,
             pn.layout.Divider(),
-            "#### Mode",
-            self.mode,
+            "#### Tracking",
             pn.pane.Markdown(
-                "Closed loop needs ROIs, and ROIs can only be drawn on "
-                "frames that already exist — so the first run is always "
-                "*Acquire only*.",
+                "**Start** begins acquiring straight away. Draw ROIs in "
+                "the Selection dashboard while it runs "
+                "(`panel serve interactive_tools/panel_app.py`) and the "
+                "tracker attaches to the running loop — no restart. "
+                "Re-saving ROIs mid-run re-initialises that position.",
                 width=560, styles={"font-size": "0.85em"},
             ),
-            pn.Row(self.btn_check_rois),
+            pn.Row(self.auto_track),
+            pn.Row(self.roi_poll_s, self.btn_check_rois),
             self.roi_state,
             "#### Drift correction",
             pn.Row(self.camera_pixel_um, self.adapter_mag,
