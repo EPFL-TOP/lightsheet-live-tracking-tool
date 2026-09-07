@@ -305,7 +305,15 @@ class MTBSetupPanel:
             height=180, width=520, show_index=False,
         )
         self.btn_add_channel = pn.widgets.Button(
-            name="+ Add channel", width=140
+            name="+ Add empty channel", width=170
+        )
+        # The natural workflow: set the optics up by hand until the
+        # image looks right, then save THAT state as a channel. Mirrors
+        # "capture position" for the stage, and removes the guesswork
+        # of typing reflector position numbers.
+        self.btn_capture_channel = pn.widgets.Button(
+            name="Capture light path → channel",
+            button_type="primary", width=230,
         )
         self.btn_snap_channels = pn.widgets.Button(
             name="Snap all channels", button_type="success", width=170
@@ -470,6 +478,7 @@ class MTBSetupPanel:
         self.btn_read_objective.on_click(self._on_read_objective)
         self.btn_read_lightpath.on_click(self._on_read_lightpath)
         self.btn_add_channel.on_click(self._on_add_channel)
+        self.btn_capture_channel.on_click(self._on_capture_channel)
         self.btn_snap_channels.on_click(self._on_snap_channels)
         self.btn_apply_objective.on_click(self._on_apply_objective)
         self.btn_live.param.watch(self._on_live_toggle, "value")
@@ -899,6 +908,45 @@ class MTBSetupPanel:
         self.chan_table.value = (
             row if df.empty
             else pd.concat([df, row], ignore_index=True)
+        )
+
+    def _on_capture_channel(self, _event=None) -> None:
+        """Save the CURRENT optics state as a new channel row."""
+        if not self._require_connection():
+            return
+        try:
+            refl = self.session.changer("reflector")
+            pos = refl.position or 0
+            cube = None
+            for el in refl.elements():
+                if el["current"]:
+                    cube = el["name"]
+                    break
+        except Exception as e:
+            self._say(f"Could not read the reflector: {e}", "err")
+            return
+
+        import pandas as pd
+        df = self.chan_table.value
+        label = (cube or f"CH{len(df)}")
+        # 'none' as a cube name means brightfield, so do not move the
+        # reflector for that channel.
+        is_bf = (cube or "").strip().lower() in ("none", "", "-")
+        row = pd.DataFrame([{
+            "name": ("BF" if is_bf else
+                     label.replace(" ", "_")[:16]),
+            "reflector_pos": 0 if is_bf else int(pos),
+            "exposure_ms": float(self.exposure.value),
+            "z_stack": not is_bf,
+        }])
+        self.chan_table.value = (
+            row if df.empty
+            else pd.concat([df, row], ignore_index=True)
+        )
+        self._say(
+            f"Captured channel from reflector position {pos} "
+            f"({cube or 'unnamed'}) at "
+            f"{self.exposure.value:g} ms.", "ok",
         )
 
     def _apply_channel(self, channel: dict) -> None:
@@ -1546,39 +1594,27 @@ class MTBSetupPanel:
 
     # --------------------------------------------------------- layout
 
-    def layout(self) -> pn.Column:
-        """Tabbed, but the camera lives BESIDE the stage controls.
+    def layout(self) -> pn.Row:
+        """Tabs on the left, camera PINNED on the right.
 
-        Splitting the camera into its own tab broke the interaction
-        that matters most — you jog the stage while watching the image,
-        so they have to be visible together. The preview is therefore
-        pinned next to the stage on the Hardware tab, and the remaining
-        tabs cover the setup steps that do not need it.
+        The image has to stay visible whatever you are doing — jogging
+        the stage, setting the light path, editing channels — so it
+        lives outside the tab set rather than inside any one tab.
         """
-        header = pn.Column(
-            "# Axio Observer 7",
-            pn.pane.Markdown(
-                "Motion via Zeiss **MTB**, camera via **Micro-Manager "
-                "/ PVCAM**. Close ZEN before connecting — it holds the "
-                "camera exclusively.",
-                width=700, styles={"font-size": "0.9em"},
-            ),
-            pn.Row(self.btn_connect, self.z_axis),
-            self.status,
-        )
-
         camera_column = pn.Column(
+            "### Camera",
             pn.Row(self.exposure, self.btn_snap),
             pn.Row(self.btn_live, self.live_fps),
             self.img_stats,
             self.preview,
-            width=600,
+            pn.layout.Divider(),
+            self.pos_readout,
+            width=620,
         )
 
-        stage_column = pn.Column(
+        tab_stage = pn.Column(
             "### Stage",
-            pn.Row(self.pos_readout, self.btn_refresh),
-            pn.Row(self.xy_step, self.z_step),
+            pn.Row(self.xy_step, self.z_step, self.btn_refresh),
             pn.Row(
                 pn.Column(
                     pn.Row(pn.Spacer(width=70), self.btn_yp),
@@ -1595,12 +1631,7 @@ class MTBSetupPanel:
             pn.Row(self.btn_remove, self.btn_clear),
             pn.Row(self.positions_file, self.btn_save_pos,
                    self.btn_load_pos),
-            width=600,
-        )
-
-        # Stage + camera together: jog while watching the image.
-        tab_hardware = pn.Column(
-            pn.Row(stage_column, pn.Spacer(width=20), camera_column),
+            width=620,
         )
 
         tab_optics = pn.Column(
@@ -1609,31 +1640,43 @@ class MTBSetupPanel:
                    self.btn_read_objective),
             self.objective_info,
             pn.Row(self.objective_choice, self.btn_apply_objective),
-            pn.pane.Markdown(
-                "_**Rotate to it** turns the nosepiece, then re-reads "
-                "the magnification from the hardware, so the pixel "
-                "pitch reflects the objective actually in the light "
-                "path. Check clearance before rotating with a sample "
-                "loaded._",
-                width=600, styles={"font-size": "0.8em"},
-            ),
             pn.layout.Divider(),
-            "### Light path",
+            "### Light path — manual control",
+            pn.pane.Markdown(
+                "These **Set** buttons move the hardware **right now**. "
+                "Use them to get an image looking the way you want. "
+                "Once it does, go to *Channels* and press **Capture "
+                "light path → channel** to save that state as a "
+                "channel the acquisition loop will reproduce.\n\n"
+                "_Reading never moves anything; it only reports where "
+                "things already are._",
+                width=600, styles={"font-size": "0.85em"},
+            ),
             pn.Row(self.btn_read_lightpath),
             self.lightpath_rows,
             self.lightpath_note,
             pn.layout.Divider(),
             self.hw_info,
+            width=620,
         )
 
         tab_channels = pn.Column(
             "### Channels",
-            pn.Row(self.btn_add_channel, self.btn_snap_channels),
+            pn.pane.Markdown(
+                "A channel is a **saved light-path recipe**. The "
+                "acquisition loop applies each one in turn at every "
+                "position. Set the optics up by hand on the *Optics* "
+                "tab, then capture it here.",
+                width=600, styles={"font-size": "0.85em"},
+            ),
+            pn.Row(self.btn_capture_channel, self.btn_add_channel),
+            pn.Row(self.btn_snap_channels),
             self.chan_table,
             self.chan_note,
             pn.layout.Divider(),
             "#### Snap result per channel",
             self.channel_previews,
+            width=620,
         )
 
         tab_acquire = pn.Column(
@@ -1646,7 +1689,7 @@ class MTBSetupPanel:
                 "Applies to channels with `z_stack` ticked. Keep the "
                 "step above the actuator's resolution (~0.06 µm for the "
                 "piezo) — finer steps do not move and silently "
-                "duplicate planes. Warnings appear in the log at start.",
+                "duplicate planes.",
                 width=600, styles={"font-size": "0.8em"},
             ),
             pn.layout.Divider(),
@@ -1654,6 +1697,7 @@ class MTBSetupPanel:
             pn.Row(self.pixel_xy, self.pixel_z),
             pn.Row(self.tracking_2d, self.serverkit),
             pn.Row(self.max_xy, self.max_z),
+            width=620,
         )
 
         tab_run = pn.Column(
@@ -1661,10 +1705,8 @@ class MTBSetupPanel:
             self.outdir,
             pn.pane.Markdown(
                 "**Start** begins acquiring immediately. Draw ROIs in "
-                "the Selection dashboard while it runs "
-                "(`panel serve interactive_tools/panel_app.py`) and the "
-                "tracker attaches to the running loop — no restart. "
-                "Re-saving ROIs mid-run re-initialises that position.",
+                "the Selection dashboard while it runs and the tracker "
+                "attaches to the running loop — no restart.",
                 width=600, styles={"font-size": "0.85em"},
             ),
             pn.Row(self.auto_track),
@@ -1675,18 +1717,26 @@ class MTBSetupPanel:
             self.run_status,
             pn.Row(self.btn_run, self.btn_stop),
             self.run_log,
+            width=620,
         )
 
-        tabs = pn.Tabs(
-            ("Stage + Camera", tab_hardware),
-            ("Optics", tab_optics),
-            ("Channels", tab_channels),
-            ("Acquisition", tab_acquire),
-            ("Run", tab_run),
-            dynamic=False,
+        left = pn.Column(
+            "# Axio Observer 7",
+            pn.Row(self.btn_connect, self.z_axis),
+            self.status,
+            pn.Tabs(
+                ("Stage", tab_stage),
+                ("Optics", tab_optics),
+                ("Channels", tab_channels),
+                ("Acquisition", tab_acquire),
+                ("Run", tab_run),
+                dynamic=False,
+            ),
+            width=640,
         )
 
-        return pn.Column(header, tabs, width=1280)
+        return pn.Row(left, pn.Spacer(width=20), camera_column,
+                      width=1300)
 
 
 def app() -> pn.Column:

@@ -730,41 +730,51 @@ def test_requirements_declare_the_tracker_dependencies():
 # ------------------------------------------------- layout / light path
 
 def test_layout_is_tabbed_in_workflow_order(panel_obj):
-    """One long column buried the Run button below the fold and hid the
-    setup order; tabs follow how a session actually runs."""
     import panel as pn
 
     lay = panel_obj.layout()
-    tabs = [o for o in lay if isinstance(o, pn.Tabs)]
+    tabs = []
+
+    def walk(o):
+        if isinstance(o, pn.Tabs):
+            tabs.append(list(o._names))
+        for c in getattr(o, "objects", []) or []:
+            walk(c)
+
+    walk(lay)
     assert tabs, "layout is not tabbed"
-    assert list(tabs[0]._names) == [
-        "Stage + Camera", "Optics", "Channels", "Acquisition", "Run",
+    assert tabs[0] == [
+        "Stage", "Optics", "Channels", "Acquisition", "Run",
     ]
 
 
-def test_REGRESSION_camera_sits_beside_the_stage_controls():
-    """The camera must NOT be on its own tab: you jog the stage while
-    watching the image, so both have to be visible at once. An earlier
-    layout split them and broke that interaction."""
+def test_REGRESSION_camera_is_outside_the_tabs_always_visible():
+    """The image must stay visible whatever tab is open — jogging the
+    stage, setting the light path, editing channels. An earlier layout
+    put the camera inside a tab, so it vanished during setup."""
     import panel as pn
 
     panel_obj = MTBSetupPanel()
     lay = panel_obj.layout()
-    tabs = [o for o in lay if isinstance(o, pn.Tabs)][0]
-    first_tab = tabs[0]
 
-    ids = set()
+    # Collect everything that lives INSIDE any Tabs container.
+    inside_tabs = set()
 
-    def walk(obj):
-        ids.add(id(obj))
-        for child in getattr(obj, "objects", []) or []:
-            walk(child)
+    def collect(o, in_tabs):
+        if in_tabs:
+            inside_tabs.add(id(o))
+        is_tabs = isinstance(o, pn.Tabs)
+        for c in getattr(o, "objects", []) or []:
+            collect(c, in_tabs or is_tabs)
 
-    walk(first_tab)
+    collect(lay, False)
+
     for name in ("preview", "btn_snap", "btn_live", "exposure",
-                 "btn_xm", "btn_xp", "btn_zp", "pos_readout"):
-        assert id(getattr(panel_obj, name)) in ids, (
-            f"{name} is not on the same tab as the stage controls"
+                 "img_stats"):
+        widget = getattr(panel_obj, name)
+        assert id(widget) not in inside_tabs, (
+            f"{name} is inside a tab — it would disappear when the "
+            f"user switches tabs"
         )
 
 

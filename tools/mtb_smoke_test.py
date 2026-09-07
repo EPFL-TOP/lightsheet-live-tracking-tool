@@ -105,6 +105,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--objective", action="store_true",
                    help="Dump everything readable about the nosepiece, "
                         "so the magnification API can be identified.")
+    p.add_argument("--colibri", action="store_true",
+                   help="Dump the Colibri LED controller exhaustively "
+                        "— which interfaces it and each LED cast to, "
+                        "the operation-mode enums, and the trigger "
+                        "buffer where brightness lives.")
     p.add_argument("--lightpath", action="store_true",
                    help="Report shutters, reflector, sideport and lamps "
                         "— i.e. why no light may be reaching the "
@@ -424,6 +429,149 @@ _LIGHTPATH_IDS = [
     "MTBOptovar", "MTBTLAperture", "MTBTLFieldStop",
     "MTBObservationChanger", "MTBCamera",
 ]
+
+
+def _dump_colibri(root, asm, comp) -> None:
+    """Find how to switch the Colibri on and set its brightness.
+
+    Why this is needed: changing the reflector cube alone produces no
+    fluorescence — without excitation light every "channel" is just
+    the transmitted-light image through a different filter, which is
+    exactly what was observed.
+
+    Neither IMTBFluorescenceLEDControl nor IMTBFluorescenceLED exposes
+    a brightness or on/off member. Brightness DOES appear in
+      GetTriggerBufferEntry(entry, out Double[] brightness, unit,
+                            out UInt32[] duration)
+      SetTriggerBufferEntry(entry, Double[] brightness, unit,
+                            UInt32[] duration)
+    so the control path is probably SetOperationMode(...) plus a
+    trigger-buffer write. Individual LEDs may also cast to
+    IMTBContinual, which would give a plain intensity axis. This dumps
+    every route so the answer stops being a guess.
+    """
+    import ZEISS.MTB.Api as api
+
+    if comp is None:
+        _log("  MTBFLLEDController absent")
+        return
+
+    # --- interfaces the controller casts to ---
+    try:
+        types = [t for t in asm.GetTypes() if t is not None]
+    except Exception as e:
+        types = [t for t in (getattr(e, "Types", None) or []) if t]
+    ifaces = [t for t in types
+              if t.IsInterface and t.IsPublic
+              and (t.Name or "").startswith("IMTB")]
+
+    def scan(obj, indent="    "):
+        hits = []
+        for t in sorted(ifaces, key=lambda x: x.Name):
+            try:
+                cast = getattr(api, t.Name)(obj)
+            except Exception:
+                continue
+            if cast is None:
+                continue
+            members = sorted(
+                a for a in dir(cast)
+                if not a.startswith(("_", "get_", "set_", "add_",
+                                     "remove_"))
+                and a not in ("Equals", "GetHashCode", "GetType",
+                              "ToString")
+            )
+            hits.append(t.Name)
+            _log(f"{indent}{t.Name}: {members}")
+            for a in members:
+                if any(k in a.lower() for k in
+                       ("bright", "intens", "onoff", "active", "power",
+                        "wavelength", "state", "level")):
+                    try:
+                        v = getattr(cast, a)
+                        if not callable(v):
+                            _log(f"{indent}    {a} = {v!r}")
+                    except Exception:
+                        pass
+        return hits
+
+    _log(f"  controller: {comp.Name!r}")
+    _log("  controller casts to:")
+    scan(comp)
+
+    # --- operation / trigger mode enums ---
+    _log()
+    _log("  Relevant enums:")
+    from System import Enum
+    for t in types:
+        nm = t.Name or ""
+        if t.IsEnum and "FluorescenceLED" in nm:
+            try:
+                _log(f"    {nm}: {list(Enum.GetNames(t))}")
+            except Exception:
+                pass
+
+    # --- current operation mode ---
+    _log()
+    try:
+        ctrl = api.IMTBFluorescenceLEDControl(comp)
+        _log(f"  NumberOfLEDs = {ctrl.NumberOfLEDs}")
+        try:
+            res = ctrl.GetOperationMode(None, None)
+            _log(f"  GetOperationMode -> {res!r}")
+        except Exception as e:
+            _log(f"  GetOperationMode failed: {type(e).__name__}: {e}")
+
+        # --- each LED, and what IT casts to ---
+        for i in range(int(ctrl.NumberOfLEDs)):
+            _log()
+            try:
+                led = ctrl.LED[i]
+            except Exception as e:
+                _log(f"  LED[{i}] unavailable: {e}")
+                continue
+            wl = ""
+            try:
+                wl = f" wavelength={led.Wavelength}"
+            except Exception:
+                pass
+            _log(f"  LED[{i}]{wl} casts to:")
+            scan(led, indent="      ")
+            try:
+                name, lo, hi = led.GetExcitationFilter(None, None, None)
+                _log(f"      excitation filter: {name!r} {lo}-{hi} nm")
+            except Exception:
+                try:
+                    r = led.GetExcitationFilter("", 0, 0)
+                    _log(f"      GetExcitationFilter -> {r!r}")
+                except Exception as e:
+                    _log(f"      GetExcitationFilter failed: "
+                         f"{type(e).__name__}")
+
+        # --- the trigger buffer, where brightness lives ---
+        _log()
+        _log("  Trigger buffer (brightness lives here):")
+        try:
+            ptr = ctrl.GetTriggerBufferPointer()
+            _log(f"    GetTriggerBufferPointer() = {ptr}")
+        except Exception as e:
+            _log(f"    pointer failed: {type(e).__name__}: {e}")
+        for entry in range(0, 4):
+            try:
+                r = ctrl.GetTriggerBufferEntry(entry, None, "%", None)
+                _log(f"    entry {entry} -> {r!r}")
+            except Exception as e:
+                _log(f"    entry {entry} failed: {type(e).__name__}: "
+                     f"{e}")
+    except Exception as e:
+        _log(f"  controller cast failed: {type(e).__name__}: {e}")
+
+    _log()
+    _log("  What we are looking for: a member that turns an LED ON and "
+         "sets its intensity. Candidates in order of preference —")
+    _log("    1. an LED that casts to IMTBContinual (plain intensity)")
+    _log("    2. SetOperationMode(...) + SetTriggerBufferEntry(...)")
+    _log("    3. an IMTBShutter/IMTBShutterState on the controller")
 
 
 def _dump_lightpath(root) -> None:
@@ -862,6 +1010,10 @@ def main() -> int:
         if args.objective:
             _hdr("OBJECTIVE / NOSEPIECE")
             _dump_objective(root, comps.get("objective"))
+
+        if args.colibri:
+            _hdr("COLIBRI / FLUORESCENCE LEDS")
+            _dump_colibri(root, asm, comps.get("leds"))
 
         if args.lightpath:
             _hdr("LIGHT PATH")
