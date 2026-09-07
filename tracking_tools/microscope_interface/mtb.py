@@ -437,6 +437,269 @@ def sample_pixel_size_um(camera_pixel_um: float,
     return float(camera_pixel_um) / total
 
 
+class MTBLED:
+    """One Colibri LED: on/off plus intensity.
+
+    Confirmed on the microscope 2026-09-07. Each element of
+    IMTBFluorescenceLEDControl.LED casts to BOTH:
+
+      IMTBFluorescenceLED  -> Wavelength, HasOnOff, GetOnOff/SetOnOff,
+                              IsActive, GetExcitationFilter, LampType
+      IMTBContinual        -> GetPosition/SetPosition, Get{Min,Max}Position,
+                              GetPositionUnit  (this is the INTENSITY axis)
+
+    So intensity is an ordinary continual axis — the same interface the
+    stage uses — and on/off is a separate explicit call. An earlier
+    reading of a filtered dump concluded there was no brightness member
+    and that the trigger buffer was the only route; that was wrong.
+    """
+
+    def __init__(self, led, index: int, timeout_ms: int = 10000):
+        self.index = index
+        self.timeout_ms = timeout_ms
+        self._led = self._as(led, "IMTBFluorescenceLED") or led
+        self._cont = self._as(led, "IMTBContinual")
+        self.unit = self._discover_unit()
+
+    @staticmethod
+    def _as(obj, iface_name):
+        try:
+            mod = __import__("ZEISS.MTB.Api", fromlist=[iface_name])
+            return getattr(mod, iface_name)(obj)
+        except Exception:
+            return None
+
+    def _discover_unit(self) -> str:
+        """Intensity unit — '%' on this hardware, but ask rather than
+        assume; MTBAxis insists on micrometres, which is wrong here."""
+        if self._cont is None:
+            return "%"
+        try:
+            for i in range(self._cont.GetPositionUnitCount()):
+                u = self._cont.GetPositionUnit(i)
+                if u:
+                    return u
+        except Exception:
+            pass
+        return "%"
+
+    @property
+    def wavelength(self) -> int | None:
+        try:
+            return int(self._led.Wavelength)
+        except Exception:
+            return None
+
+    @property
+    def has_on_off(self) -> bool:
+        try:
+            return bool(self._led.HasOnOff)
+        except Exception:
+            return False
+
+    @property
+    def is_on(self) -> bool | None:
+        for getter in ("GetOnOff", "IsActive"):
+            try:
+                val = getattr(self._led, getter)
+                val = val() if callable(val) else val
+            except Exception:
+                continue
+            if isinstance(val, bool):
+                return val
+            # Some builds return an MTBOnOff-style enum.
+            text = str(val).lower()
+            if "on" in text and "off" not in text:
+                return True
+            if "off" in text:
+                return False
+        return None
+
+    def set_on(self, on: bool) -> None:
+        """Switch the LED. Tries the plausible argument shapes."""
+        attempts = [(bool(on),), (1 if on else 0,)]
+        try:
+            from ZEISS.MTB.Api import MTBOnOff
+            attempts.insert(
+                0, (MTBOnOff.On if on else MTBOnOff.Off,)
+            )
+        except Exception:
+            pass
+        last = None
+        for args in attempts:
+            try:
+                self._led.SetOnOff(*args)
+                return
+            except Exception as e:
+                last = e
+        raise MTBError(
+            f"LED {self.wavelength}nm: SetOnOff failed"
+        ) from last
+
+    @property
+    def intensity(self) -> float | None:
+        if self._cont is None:
+            return None
+        try:
+            return float(self._cont.GetPosition(self.unit))
+        except Exception:
+            return None
+
+    @property
+    def intensity_limits(self) -> tuple[float, float]:
+        if self._cont is None:
+            return (0.0, 100.0)
+        try:
+            return (float(self._cont.GetMinPosition(self.unit)),
+                    float(self._cont.GetMaxPosition(self.unit)))
+        except Exception:
+            return (0.0, 100.0)
+
+    def set_intensity(self, value: float) -> float | None:
+        if self._cont is None:
+            raise MTBError(
+                f"LED {self.wavelength}nm has no intensity axis"
+            )
+        lo, hi = self.intensity_limits
+        target = max(lo, min(hi, float(value)))
+        mode = resolve_mode("Synchronous")
+        try:
+            self._cont.SetPosition(target, self.unit, mode,
+                                   self.timeout_ms)
+        except Exception as e:
+            raise MTBError(
+                f"LED {self.wavelength}nm: could not set intensity "
+                f"to {target}{self.unit}"
+            ) from e
+        return self.intensity
+
+    def __repr__(self) -> str:
+        return (f"<MTBLED {self.wavelength}nm "
+                f"on={self.is_on} {self.intensity}{self.unit}>")
+
+
+class MTBColibri:
+    """The Colibri fluorescence LED controller.
+
+    Six LEDs on this unit (385/430/475/511/567/630 nm). Without
+    excitation light a reflector cube change alone produces no
+    fluorescence — every "channel" is just the transmitted-light image
+    through a different filter, which is what was observed before this
+    existed.
+    """
+
+    def __init__(self, comp, timeout_ms: int = 10000):
+        self._raw = comp
+        self.timeout_ms = timeout_ms
+        self._ctrl = MTBLED._as(comp, "IMTBFluorescenceLEDControl")
+        if self._ctrl is None:
+            raise MTBError(
+                "component does not expose IMTBFluorescenceLEDControl"
+            )
+        self._leds: list[MTBLED] | None = None
+
+    @property
+    def n_leds(self) -> int:
+        try:
+            return int(self._ctrl.NumberOfLEDs)
+        except Exception:
+            return 0
+
+    def leds(self) -> list[MTBLED]:
+        if self._leds is None:
+            out = []
+            for i in range(self.n_leds):
+                try:
+                    out.append(MTBLED(self._ctrl.LED[i], i,
+                                      self.timeout_ms))
+                except Exception as e:
+                    logger.warning("LED[%d] unavailable: %s", i, e)
+            self._leds = out
+        return self._leds
+
+    def set_manual_mode(self) -> None:
+        """Put the controller in continuous manual LED control.
+
+        LEDLight + Continuous means "we drive the LEDs directly", as
+        opposed to LEDTriggerBuffer, where brightness comes from the
+        hardware trigger buffer instead.
+        """
+        try:
+            from ZEISS.MTB.Api import (
+                MTBFluorescenceLEDOperationMode,
+                MTBFluorescenceLEDTriggerMode,
+            )
+        except Exception:
+            return
+        mode = resolve_mode("Synchronous")
+        for args in (
+            (MTBFluorescenceLEDOperationMode.LEDLight,
+             MTBFluorescenceLEDTriggerMode.Continuous, mode,
+             self.timeout_ms),
+            (MTBFluorescenceLEDOperationMode.LEDLight,
+             MTBFluorescenceLEDTriggerMode.Continuous, mode),
+        ):
+            try:
+                self._ctrl.SetOperationMode(*args)
+                return
+            except Exception:
+                continue
+        logger.warning("could not set Colibri to manual LED mode")
+
+    def all_off(self) -> None:
+        for led in self.leds():
+            try:
+                led.set_on(False)
+            except Exception as e:
+                logger.warning("LED %s would not switch off: %s",
+                               led.wavelength, e)
+
+    def find(self, wavelength: int) -> MTBLED | None:
+        """The LED closest to `wavelength`, or None."""
+        best, best_gap = None, None
+        for led in self.leds():
+            wl = led.wavelength
+            if wl is None:
+                continue
+            gap = abs(int(wl) - int(wavelength))
+            if best_gap is None or gap < best_gap:
+                best, best_gap = led, gap
+        # Refuse a nonsensical match — 385 is not 630.
+        if best_gap is not None and best_gap > 40:
+            return None
+        return best
+
+    def select(self, wavelength: int, intensity: float) -> MTBLED:
+        """Exclusively switch on one LED at a given intensity."""
+        led = self.find(wavelength)
+        if led is None:
+            raise MTBError(
+                f"no Colibri LED near {wavelength} nm; available: "
+                f"{[l.wavelength for l in self.leds()]}"
+            )
+        self.set_manual_mode()
+        for other in self.leds():
+            if other.index != led.index:
+                try:
+                    other.set_on(False)
+                except Exception:
+                    pass
+        led.set_intensity(intensity)
+        led.set_on(True)
+        return led
+
+    def describe(self) -> str:
+        lines = [f"Colibri: {self.n_leds} LED(s)"]
+        for led in self.leds():
+            lo, hi = led.intensity_limits
+            lines.append(
+                f"    [{led.index}] {led.wavelength} nm  "
+                f"on={led.is_on}  {led.intensity}{led.unit} "
+                f"({lo:g}..{hi:g})"
+            )
+        return "\n".join(lines)
+
+
 class MTBChangerDevice:
     """Any discrete-position MTB changer.
 
@@ -958,6 +1221,14 @@ class MTBSession:
                 self.component(role), role, self.timeout_ms
             )
         return self._axes[role]
+
+    def colibri(self) -> "MTBColibri":
+        """The fluorescence LED controller, cached."""
+        if "_colibri" not in self._axes:
+            self._axes["_colibri"] = MTBColibri(
+                self.component("leds"), self.timeout_ms
+            )
+        return self._axes["_colibri"]
 
     def changer(self, role: str) -> "MTBChangerDevice":
         """A discrete-position changer wrapper, cached per role."""

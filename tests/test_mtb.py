@@ -1020,3 +1020,176 @@ def test_changer_describe_shows_every_option():
     text = dev.describe()
     assert "100% L" in text and "100% R" in text
     assert "<=" in text
+
+
+# ====================================================================
+# Colibri fluorescence LEDs
+#
+# Confirmed 2026-09-07: each LED[i] casts to BOTH IMTBFluorescenceLED
+# (Wavelength, HasOnOff, Get/SetOnOff, IsActive) AND IMTBContinual
+# (Get/SetPosition = INTENSITY). An earlier reading of a filtered dump
+# wrongly concluded there was no brightness member and that the
+# trigger buffer was the only route.
+#
+# This hardware: 6 LEDs at 385/430/475/511/567/630 nm.
+# ====================================================================
+
+class FakeLED:
+    """One Colibri LED, exposing both interfaces on one object."""
+
+    def __init__(self, wavelength, intensity=0.0, on=False):
+        self.Wavelength = wavelength
+        self.HasOnOff = True
+        self.IsActive = on
+        self._on = on
+        self._intensity = intensity
+        self.on_calls = []
+        self.set_calls = []
+
+    # IMTBFluorescenceLED
+    def GetOnOff(self):
+        return self._on
+
+    def SetOnOff(self, value):
+        self.on_calls.append(value)
+        self._on = bool(value)
+
+    # IMTBContinual (the intensity axis)
+    def GetPositionUnitCount(self):
+        return 1
+
+    def GetPositionUnit(self, i):
+        return "%"
+
+    def GetPosition(self, unit):
+        return self._intensity
+
+    def GetMinPosition(self, unit):
+        return 0.0
+
+    def GetMaxPosition(self, unit):
+        return 100.0
+
+    def SetPosition(self, pos, unit, mode, timeout):
+        self.set_calls.append((pos, unit, mode, timeout))
+        self._intensity = float(pos)
+        return True
+
+
+class FakeLEDControl:
+    def __init__(self, leds):
+        self.LED = leds
+        self.NumberOfLEDs = len(leds)
+        self.mode_calls = []
+
+    def SetOperationMode(self, *args):
+        self.mode_calls.append(args)
+        return True
+
+
+def _colibri(wavelengths=(385, 430, 475, 511, 567, 630)):
+    from tracking_tools.microscope_interface.mtb import (
+        MTBColibri, MTBLED,
+    )
+    leds = [FakeLED(w) for w in wavelengths]
+    ctrl = FakeLEDControl(leds)
+
+    col = MTBColibri.__new__(MTBColibri)
+    col._raw = ctrl
+    col._ctrl = ctrl
+    col.timeout_ms = 10000
+    col._leds = None
+
+    # Both casts resolve to the same fake object.
+    import tracking_tools.microscope_interface.mtb as m
+    orig = MTBLED._as
+    MTBLED._as = staticmethod(lambda obj, iface: obj)
+    try:
+        col.leds()
+    finally:
+        MTBLED._as = orig
+    return col, ctrl, leds
+
+
+def test_colibri_reports_all_six_leds():
+    col, _, _ = _colibri()
+    assert col.n_leds == 6
+    assert [l.wavelength for l in col.leds()] == [
+        385, 430, 475, 511, 567, 630
+    ]
+
+
+def test_led_intensity_is_a_continual_axis():
+    """Brightness comes from IMTBContinual, not the trigger buffer."""
+    col, _, leds = _colibri()
+    led = col.leds()[2]
+    assert led.unit == "%"
+    assert led.intensity_limits == (0.0, 100.0)
+    led.set_intensity(35.0)
+    assert leds[2].set_calls[-1][0] == pytest.approx(35.0)
+    assert led.intensity == pytest.approx(35.0)
+
+
+def test_led_intensity_is_clamped_to_its_limits():
+    col, _, leds = _colibri()
+    led = col.leds()[0]
+    led.set_intensity(500.0)
+    assert leds[0].set_calls[-1][0] == pytest.approx(100.0)
+    led.set_intensity(-10.0)
+    assert leds[0].set_calls[-1][0] == pytest.approx(0.0)
+
+
+def test_led_on_off_round_trips():
+    col, _, leds = _colibri()
+    led = col.leds()[1]
+    assert led.is_on is False
+    led.set_on(True)
+    assert led.is_on is True
+    assert leds[1].on_calls
+
+
+def test_find_matches_the_nearest_wavelength():
+    col, _, _ = _colibri()
+    assert col.find(475).wavelength == 475
+    assert col.find(470).wavelength == 475      # near enough
+
+
+def test_find_refuses_a_nonsensical_match():
+    """385 is not 630 — returning the 'nearest' of a bad request would
+    silently excite the wrong fluorophore."""
+    col, _, _ = _colibri()
+    assert col.find(750) is None
+
+
+def test_select_switches_off_every_other_led():
+    """Channels must not bleed into each other."""
+    col, _, leds = _colibri()
+    col.leds()[0].set_on(True)
+    col.leds()[4].set_on(True)
+
+    col.select(475, 20.0)
+
+    on = [l.wavelength for l in col.leds() if l.is_on]
+    assert on == [475], f"expected only 475 on, got {on}"
+    assert col.leds()[2].intensity == pytest.approx(20.0)
+
+
+def test_select_raises_for_an_absent_wavelength():
+    col, _, _ = _colibri()
+    with pytest.raises(MTBError, match="no Colibri LED near"):
+        col.select(750, 10.0)
+
+
+def test_all_off_switches_everything_off():
+    col, _, _ = _colibri()
+    for led in col.leds():
+        led.set_on(True)
+    col.all_off()
+    assert not any(l.is_on for l in col.leds())
+
+
+def test_describe_lists_wavelengths_and_state():
+    col, _, _ = _colibri()
+    text = col.describe()
+    for wl in (385, 630):
+        assert str(wl) in text

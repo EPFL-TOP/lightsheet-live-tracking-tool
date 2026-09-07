@@ -299,10 +299,11 @@ class MTBSetupPanel:
         # what brightfield wants.
         self.chan_table = pn.widgets.Tabulator(
             pd.DataFrame([
-                {"name": "BF", "reflector_pos": 0,
+                {"name": "BF", "reflector_pos": 0, "led_nm": 0,
+                 "led_percent": 0.0,
                  "exposure_ms": DEFAULT_EXPOSURE_MS, "z_stack": False},
             ]),
-            height=180, width=520, show_index=False,
+            height=200, width=620, show_index=False,
         )
         self.btn_add_channel = pn.widgets.Button(
             name="+ Add empty channel", width=170
@@ -318,7 +319,17 @@ class MTBSetupPanel:
         self.btn_snap_channels = pn.widgets.Button(
             name="Snap all channels", button_type="success", width=170
         )
+        self.btn_del_channel = pn.widgets.Button(
+            name="Delete selected", button_type="danger", width=150
+        )
+        self.btn_leds_off = pn.widgets.Button(
+            name="All LEDs off", width=130
+        )
+        self.led_info = pn.pane.Markdown(
+            "", width=600, styles={"font-size": "0.85em"},
+        )
         self.channel_previews = pn.Row()
+        self.chan_table.selectable = "checkbox"
         self.chan_note = pn.pane.Markdown(
             "`reflector_pos` picks the filter cube by **position "
             "number** (0 = leave it alone, for brightfield); read the "
@@ -326,11 +337,15 @@ class MTBSetupPanel:
             "channel also carries its own exposure and whether it is "
             "acquired as a z-stack — fluorescence usually wants a "
             "stack, brightfield usually does not.\n\n"
-            "⚠️ Colibri **LED intensity / on-off is not wired up yet**: "
-            "`IMTBFluorescenceLEDControl` exposes `NumberOfLEDs` and an "
-            "`LED[]` array but no brightness member, so it needs one "
-            "more API probe rather than a guess. For now set the lamp "
-            "by hand, or switch with the reflector and TL shutter.",
+            "`led_nm` selects the Colibri LED by **wavelength** "
+            "(0 = no LED, for brightfield) and `led_percent` its "
+            "intensity. Available: **385 / 430 / 475 / 511 / 567 / "
+            "630 nm**. Selecting an LED switches every other one off, "
+            "so channels cannot bleed into each other.\n\n"
+            "A fluorescence channel needs **both** the LED and the "
+            "matching reflector cube — a cube change alone gives you "
+            "the transmitted-light image through a filter, which is "
+            "why earlier channels all looked like brightfield.",
             width=560, styles={"font-size": "0.8em"},
         )
 
@@ -479,6 +494,10 @@ class MTBSetupPanel:
         self.btn_read_lightpath.on_click(self._on_read_lightpath)
         self.btn_add_channel.on_click(self._on_add_channel)
         self.btn_capture_channel.on_click(self._on_capture_channel)
+        self.btn_del_channel.on_click(self._on_del_channel)
+        self.btn_leds_off.on_click(
+            lambda e: self._all_leds_off()
+        )
         self.btn_snap_channels.on_click(self._on_snap_channels)
         self.btn_apply_objective.on_click(self._on_apply_objective)
         self.btn_live.param.watch(self._on_live_toggle, "value")
@@ -580,6 +599,11 @@ class MTBSetupPanel:
         parts = []
         if self.motion is not None:
             parts.append("```\n" + self.motion.describe() + "\n```")
+        try:
+            parts.append("```\n" + self.session.colibri().describe()
+                         + "\n```")
+        except Exception:
+            pass
         if self.mmc is not None:
             try:
                 parts.append(
@@ -890,6 +914,8 @@ class MTBSetupPanel:
             out.append({
                 "name": str(r["name"]),
                 "reflector_pos": int(r.get("reflector_pos", 0) or 0),
+                "led_nm": int(r.get("led_nm", 0) or 0),
+                "led_percent": float(r.get("led_percent", 0.0) or 0.0),
                 "exposure_ms": float(r.get("exposure_ms",
                                            DEFAULT_EXPOSURE_MS)),
                 "z_stack": bool(r.get("z_stack", False)),
@@ -902,6 +928,8 @@ class MTBSetupPanel:
         row = pd.DataFrame([{
             "name": f"CH{len(df)}",
             "reflector_pos": 0,
+            "led_nm": 0,
+            "led_percent": 0.0,
             "exposure_ms": float(self.exposure.value),
             "z_stack": True,
         }])
@@ -926,6 +954,17 @@ class MTBSetupPanel:
             self._say(f"Could not read the reflector: {e}", "err")
             return
 
+        # Capture the live LED state as well as the cube.
+        led_nm, led_pct = 0, 0.0
+        try:
+            for led in self.session.colibri().leds():
+                if led.is_on:
+                    led_nm = int(led.wavelength or 0)
+                    led_pct = float(led.intensity or 0.0)
+                    break
+        except Exception as e:
+            logger.info("could not read the LEDs: %s", e)
+
         import pandas as pd
         df = self.chan_table.value
         label = (cube or f"CH{len(df)}")
@@ -933,24 +972,69 @@ class MTBSetupPanel:
         # reflector for that channel.
         is_bf = (cube or "").strip().lower() in ("none", "", "-")
         row = pd.DataFrame([{
-            "name": ("BF" if is_bf else
-                     label.replace(" ", "_")[:16]),
+            "name": (f"{led_nm}nm" if led_nm else
+                     ("BF" if is_bf else
+                      label.replace(" ", "_")[:16])),
             "reflector_pos": 0 if is_bf else int(pos),
+            "led_nm": led_nm,
+            "led_percent": led_pct,
             "exposure_ms": float(self.exposure.value),
-            "z_stack": not is_bf,
+            "z_stack": bool(led_nm) or not is_bf,
         }])
         self.chan_table.value = (
             row if df.empty
             else pd.concat([df, row], ignore_index=True)
         )
         self._say(
-            f"Captured channel from reflector position {pos} "
-            f"({cube or 'unnamed'}) at "
+            f"Captured channel: reflector {pos} ({cube or 'unnamed'}), "
+            f"LED {led_nm or 'off'}"
+            f"{f' @ {led_pct:g}%' if led_nm else ''}, "
             f"{self.exposure.value:g} ms.", "ok",
         )
 
+    def _all_leds_off(self) -> None:
+        if not self._require_connection():
+            return
+        try:
+            self.session.colibri().all_off()
+            self._say("All Colibri LEDs off.", "ok")
+        except Exception as e:
+            self._say(f"Could not switch the LEDs off: {e}", "err")
+
+    def _on_del_channel(self, _event=None) -> None:
+        rows = list(self.chan_table.selection or [])
+        if not rows:
+            self._say("Tick the channels to delete first.", "warn")
+            return
+        df = self.chan_table.value
+        self.chan_table.value = df.drop(
+            df.index[rows]
+        ).reset_index(drop=True)
+        self.chan_table.selection = []
+        self._say(f"Deleted {len(rows)} channel(s).", "ok")
+
     def _apply_channel(self, channel: dict) -> None:
-        """Put the hardware into a channel's configuration."""
+        """Put the hardware into a channel's configuration.
+
+        Order matters: switch the LED FIRST, then the cube, then the
+        exposure — so a bright LED is never shining through the wrong
+        filter, and the exposure is already correct when the frame is
+        taken.
+        """
+        led_nm = int(channel.get("led_nm", 0) or 0)
+        try:
+            colibri = self.session.colibri()
+            if led_nm:
+                colibri.select(
+                    led_nm, float(channel.get("led_percent", 0.0) or 0.0)
+                )
+            else:
+                # Brightfield: no excitation at all.
+                colibri.all_off()
+        except Exception as e:
+            logger.warning("LED setup failed for channel %s: %s",
+                           channel.get("name"), e)
+
         pos = channel.get("reflector_pos") or 0
         if pos:
             # 0 means "leave the reflector alone" — brightfield.
@@ -1671,8 +1755,18 @@ class MTBSetupPanel:
             ),
             pn.Row(self.btn_capture_channel, self.btn_add_channel),
             pn.Row(self.btn_snap_channels),
+            pn.pane.Markdown(
+                "_With **Live** running you can change the reflector "
+                "or LED and watch the effect immediately — that is the "
+                "intended way to dial a channel in before capturing "
+                "it._",
+                width=600, styles={"font-size": "0.8em"},
+            ),
             self.chan_table,
             self.chan_note,
+            pn.layout.Divider(),
+            pn.Row(self.btn_del_channel, self.btn_leds_off),
+            self.led_info,
             pn.layout.Divider(),
             "#### Snap result per channel",
             self.channel_previews,
