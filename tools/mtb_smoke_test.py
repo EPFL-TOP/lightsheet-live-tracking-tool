@@ -506,14 +506,24 @@ def _dump_lightpath(root) -> None:
                     lo = int(cast.MinPosition)
                     hi = int(cast.MaxPosition)
                     cur = int(cast.Position)
+                    # Scan from 0: EVERY changer fails at its
+                    # MaxPosition, which means GetElement() indexes a
+                    # 0-based array while Position is 1-based. Dumping
+                    # from 0 makes the true mapping visible instead of
+                    # leaving an off-by-one to guess at.
                     names = []
-                    for i in range(lo, hi + 1):
+                    for i in range(0, hi + 1):
                         try:
                             nm = cast.GetElement(i).Name
                         except Exception:
                             nm = "?"
-                        mark = " <=" if i == cur else ""
-                        names.append(f"{i}={nm!r}{mark}")
+                        marks = []
+                        if i == cur:
+                            marks.append("<= Position")
+                        if i == cur - 1:
+                            marks.append("<= Position-1")
+                        suffix = ("  " + " ".join(marks)) if marks else ""
+                        names.append(f"{i}={nm!r}{suffix}")
                     if names:
                         bits.append("\n        options: "
                                     + ", ".join(names))

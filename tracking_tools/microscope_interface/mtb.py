@@ -58,7 +58,21 @@ MTB_IDS = {
     "leds":      "MTBFLLEDController",
     "objective": "MTBObjectiveChanger",
     "reflector": "MTBReflectorChanger",
+    # Light path — all confirmed present 2026-09-04. The camera sits on
+    # the LEFT sideport, so a sideport on '100% R' starves it; and a
+    # condenser on a phase ring (PH1/2/3) instead of brightfield throws
+    # away most of the transmitted light. Both were responsible for
+    # exposure-independent read-noise frames.
+    "tl_shutter": "MTBTLShutter",
+    "tl_lamp": "MTBTLHalogenLamp",
+    "sideport": "MTBSideportChanger",
+    "condenser": "MTBCondenserContrastChanger",
 }
+
+# Roles that make up the transmitted-light path to the camera, in the
+# order light travels. Used to build the light-path UI.
+LIGHT_PATH_ROLES = ("tl_shutter", "condenser", "objective",
+                    "reflector", "sideport")
 
 # MTBCmdSetModes numeric values (the enum is [Flags]). These are the
 # documented values, but do NOT pass them to .NET directly: pythonnet
@@ -423,6 +437,117 @@ def sample_pixel_size_um(camera_pixel_um: float,
     return float(camera_pixel_um) / total
 
 
+class MTBChangerDevice:
+    """Any discrete-position MTB changer.
+
+    Covers the sideport turret, condenser, reflector wheel and TL
+    shutter — all of which cast to IMTBChanger and expose
+    Position/MinPosition/MaxPosition (Int16, 1-based),
+    GetElement(n) and SetPosition(position, mode, timeout).
+
+    Confirmed present on this stand (2026-09-04):
+
+      MTBSideportChanger      1..3   '100% L' / '100% R'
+      MTBReflectorChanger     1..6   named filter cubes / 'none'
+      MTBCondenserContrast    1..6   'PH1' / 'PH2' / 'PH3' / 'none'
+      MTBTLShutter            1..2   'Open' / ...
+
+    CAUTION on element names: GetElement(MaxPosition) raises on every
+    changer here, which suggests GetElement indexes a 0-BASED array
+    while Position is 1-based. SetPosition is unambiguous (it takes the
+    1-based position), but a NAME read at GetElement(p) may belong to a
+    neighbouring slot. Element listings therefore report the index they
+    were read at so a mismatch is visible rather than silent.
+    """
+
+    _IFACES = ("IMTBChanger",)
+
+    def __init__(self, comp, label: str, timeout_ms: int = 30000):
+        self.label = label
+        self.timeout_ms = timeout_ms
+        self._raw = comp
+        self._c = self._cast(comp)
+
+    @classmethod
+    def _cast(cls, comp):
+        for name in cls._IFACES:
+            try:
+                mod = __import__("ZEISS.MTB.Api", fromlist=[name])
+                cast = getattr(mod, name)(comp)
+            except Exception:
+                continue
+            if cast is not None:
+                return cast
+        return comp
+
+    @property
+    def name(self) -> str:
+        try:
+            return str(self._raw.Name)
+        except Exception:
+            return self.label
+
+    @property
+    def position(self) -> int | None:
+        try:
+            return int(self._c.Position)
+        except Exception:
+            return None
+
+    @property
+    def bounds(self) -> tuple[int, int] | None:
+        try:
+            return (int(self._c.MinPosition), int(self._c.MaxPosition))
+        except Exception:
+            return None
+
+    def elements(self) -> list[dict]:
+        """All positions with whatever name is readable at that index."""
+        out = []
+        bounds = self.bounds
+        if bounds is None:
+            return out
+        lo, hi = bounds
+        cur = self.position
+        for idx in range(lo, hi + 1):
+            entry = {"index": idx, "name": None,
+                     "current": idx == cur, "error": None}
+            try:
+                el = self._c.GetElement(idx)
+                entry["name"] = str(el.Name)
+            except Exception as e:
+                entry["error"] = type(e).__name__
+            out.append(entry)
+        return out
+
+    def set_position(self, index: int) -> int | None:
+        """Move to a 1-based position. Returns the position after."""
+        mode = resolve_mode("Synchronous")
+        try:
+            ok = self._c.SetPosition(int(index), mode, self.timeout_ms)
+        except Exception as e:
+            raise MTBError(
+                f"{self.label}: could not move to position {index}"
+            ) from e
+        if ok is False and self.position != int(index):
+            raise MTBError(
+                f"{self.label}: move to position {index} was refused; "
+                f"still at {self.position}"
+            )
+        return self.position
+
+    def describe(self) -> str:
+        bounds = self.bounds
+        rng = f"{bounds[0]}..{bounds[1]}" if bounds else "?"
+        parts = [f"{self.label} ({self.name}) position "
+                 f"{self.position} of {rng}"]
+        for e in self.elements():
+            mark = " <=" if e["current"] else ""
+            nm = e["name"] or f"<{e['error']}>"
+            parts.append(f"    {e['index']}: {nm}{mark}")
+        return "\n".join(parts)
+
+
 class MTBObjective:
     """The nosepiece: which objective is in, and its magnification.
 
@@ -576,16 +701,24 @@ class MTBObjective:
         """Every nosepiece slot: index, name, magnification, aperture.
 
         Reported in full rather than just the current one, because the
-        indexing convention is not fully settled: GetElementCount()
-        returns 6 on this scope while GetElement(6) raises "Index was
-        outside the bounds of the array", which hints the underlying
-        array may be 0-based. Showing all slots lets the operator
-        confirm against what is physically in the light path instead of
-        trusting a possibly off-by-one lookup.
+        indexing convention is NOT settled. Every changer on this stand
+        — nosepiece, sideport, condenser, TL shutter — raises "Index was
+        outside the bounds of the array" for GetElement(MaxPosition),
+        which strongly suggests GetElement() indexes a 0-based array
+        while Position/MinPosition/MaxPosition are 1-based.
+
+        Consequences if that is right: the element for Position p is at
+        GetElement(p-1), and reading GetElement(p) returns the NEXT
+        slot's objective — a silently wrong magnification, hence a
+        silently wrong pixel pitch, hence every drift correction
+        mis-scaled. So show the operator all slots and let them confirm
+        against the light path rather than trusting the lookup.
+
+        Scanning starts at 0 so index 0 is not missed.
         """
         out = []
         count = self.element_count or 0
-        for idx in range(1, count + 1):
+        for idx in range(0, count + 1):
             entry = {"index": idx, "name": None, "magnification": None,
                      "aperture": None, "empty": True, "error": None}
             try:
@@ -825,6 +958,26 @@ class MTBSession:
                 self.component(role), role, self.timeout_ms
             )
         return self._axes[role]
+
+    def changer(self, role: str) -> "MTBChangerDevice":
+        """A discrete-position changer wrapper, cached per role."""
+        key = f"_changer_{role}"
+        if key not in self._axes:
+            self._axes[key] = MTBChangerDevice(
+                self.component(role), role, self.timeout_ms
+            )
+        return self._axes[key]
+
+    def light_path(self) -> dict[str, "MTBChangerDevice"]:
+        """Every reachable light-path changer, keyed by role."""
+        out = {}
+        for role in LIGHT_PATH_ROLES:
+            try:
+                out[role] = self.changer(role)
+            except Exception as e:
+                logger.info("light-path role %s unavailable: %s",
+                            role, e)
+        return out
 
     def objective(self) -> "MTBObjective":
         """The nosepiece wrapper, for reading magnification."""

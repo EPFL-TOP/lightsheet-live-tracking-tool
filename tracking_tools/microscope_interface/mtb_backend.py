@@ -187,6 +187,9 @@ class MicroscopeInterface_MTB:
         else:
             logger.info("synthetic_source supplied — camera not opened")
 
+        for warning in self.check_z_stack():
+            logger.warning("Z-STACK: %s", warning)
+
         self._stop_event.clear()
         self._finished = False
         self._thread = threading.Thread(
@@ -361,11 +364,25 @@ class MicroscopeInterface_MTB:
         self._image_queue.put((img, tp, pos_name))
 
     def _acquire(self, pos_name, x, y, z) -> np.ndarray:
+        """One frame, or one z-stack, for this position.
+
+        The per-plane grabber is passed in so a z-stack works with the
+        synthetic source too — an earlier version short-circuited on
+        synthetic_source before reaching the stack branch, which made
+        the stack path untestable without a camera.
+        """
         if self.synthetic_source is not None:
-            return np.asarray(self.synthetic_source(x, y, z, pos_name))
+            def grab(zz):
+                return np.asarray(
+                    self.synthetic_source(x, y, zz, pos_name)
+                )
+        else:
+            def grab(zz):
+                return self._snap()
+
         if self.z_stack:
-            return self._acquire_stack(z)
-        return self._snap()
+            return self._acquire_stack(z, grab)
+        return grab(z)
 
     def _snap(self) -> np.ndarray:
         with self._config_lock:
@@ -373,26 +390,104 @@ class MicroscopeInterface_MTB:
         self.mmc.snapImage()
         return np.asarray(self.mmc.getImage())
 
-    def _acquire_stack(self, z_centre: float) -> np.ndarray:
-        """Z-stack around the current plane, using the active Z axis.
+    def plane_offsets(self) -> list[float]:
+        """Z offsets of the stack planes, symmetric about the centre.
 
-        The piezo suits this well: 10 nm steps and ~250 µm of travel
-        either side of its mid-point.
+        Derived from range and step. The plane count follows the step,
+        and the offsets are then centred on zero so the stack is
+        symmetric even when the range is not an exact multiple of the
+        step — computing them as `-range/2 + i*step` left the last
+        plane short and the stack lopsided.
         """
-        rng = float(self.z_stack.get("range_um", 10.0))
+        rng = abs(float(self.z_stack.get("range_um", 10.0)))
         step = float(self.z_stack.get("step_um", 1.0))
         if step <= 0:
-            raise ValueError("z_stack step_um must be positive")
+            raise ValueError(
+                f"z_stack step_um must be positive, got {step}"
+            )
         n = max(1, int(round(rng / step)) + 1)
-        offsets = [(-rng / 2.0) + i * step for i in range(n)]
+        if n == 1:
+            return [0.0]
+        span = (n - 1) * step
+        return [-span / 2.0 + i * step for i in range(n)]
 
+    def check_z_stack(self) -> list[str]:
+        """Problems that would silently corrupt a stack. Empty if fine.
+
+        Both failure modes here produce DUPLICATE planes rather than an
+        error, which is far worse than a refusal: the file looks like a
+        valid stack and nothing flags it.
+        """
+        if not self.z_stack or self.motion is None:
+            return []
+        warnings = []
+        offsets = self.plane_offsets()
+        step = float(self.z_stack.get("step_um", 1.0))
+        axis = self.motion.z
+
+        # 1. A step finer than the axis can resolve: move_to() treats
+        #    it as a no-op, so consecutive planes image the same slice.
+        tol = axis.arrival_tolerance
+        if step < tol:
+            warnings.append(
+                f"z-stack step {step:g} µm is below the {axis.label}'s "
+                f"arrival tolerance ({tol:g} µm) — consecutive planes "
+                f"would not actually move and would duplicate. Use a "
+                f"step above {tol:g} µm, or switch Z actuator."
+            )
+
+        # 2. A range beyond the axis limits: move_to() clamps, so the
+        #    outer planes pile up at the same clamped position.
+        try:
+            lo, hi = axis.limits
+            centre = axis.position
+            want_lo, want_hi = centre + offsets[0], centre + offsets[-1]
+            if want_lo < lo or want_hi > hi:
+                warnings.append(
+                    f"z-stack spans {want_lo:.2f}..{want_hi:.2f} µm but "
+                    f"the {axis.label} is limited to {lo:.2f}..{hi:.2f} "
+                    f"— outer planes would be clamped and duplicated. "
+                    f"Reduce the range or re-centre Z."
+                )
+        except Exception:
+            pass
+
+        # 3. Settling dominates long stacks; warn if it will not fit.
+        est = len(offsets) * (self.settle_s + self.exposure_ms / 1000.0)
+        total = est * len(self.pos_names)
+        if total > self.interval_s:
+            warnings.append(
+                f"{len(offsets)} planes x {len(self.pos_names)} "
+                f"position(s) needs about {total:.1f} s, longer than "
+                f"the {self.interval_s:g} s interval — timepoints will "
+                f"run back-to-back with no idle time."
+            )
+        return warnings
+
+    def _acquire_stack(self, z_centre: float, grab) -> np.ndarray:
+        """Z-stack around z_centre. Returns a (planes, H, W) array.
+
+        The piezo suits this well: 10 nm steps and ~250 µm of travel
+        either side of its mid-point. Z is always returned to z_centre,
+        including on failure, so a bad plane cannot leave the focus
+        parked somewhere unexpected for the next position.
+        """
+        offsets = self.plane_offsets()
         planes = []
-        for off in offsets:
-            self.motion.z.move_to(z_centre + off)
-            if self.settle_s:
-                time.sleep(self.settle_s)
-            planes.append(self._snap())
-        self.motion.z.move_to(z_centre)
+        try:
+            for off in offsets:
+                self.motion.z.move_to(z_centre + off)
+                if self.settle_s:
+                    time.sleep(self.settle_s)
+                planes.append(grab(z_centre + off))
+        finally:
+            try:
+                self.motion.z.move_to(z_centre)
+            except Exception as e:
+                logger.warning(
+                    "could not restore Z to %.3f after the stack: %s",
+                    z_centre, e,
+                )
         return np.stack(planes)
 
     def _save(self, img: np.ndarray, pos_name: str, tp: int) -> str:

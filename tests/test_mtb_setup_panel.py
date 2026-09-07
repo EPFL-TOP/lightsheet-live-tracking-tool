@@ -725,3 +725,73 @@ def test_requirements_declare_the_tracker_dependencies():
     text = (root / "requirements.txt").read_text().lower()
     for pkg in ("torch", "scipy", "tifffile", "watchdog"):
         assert pkg in text, f"{pkg} missing from requirements.txt"
+
+
+# ------------------------------------------------- layout / light path
+
+def test_layout_is_tabbed_in_workflow_order(panel_obj):
+    """One long column buried the Run button below the fold and hid the
+    setup order; tabs follow how a session actually runs."""
+    import panel as pn
+
+    lay = panel_obj.layout()
+    tabs = [o for o in lay if isinstance(o, pn.Tabs)]
+    assert tabs, "layout is not tabbed"
+    assert list(tabs[0]._names) == [
+        "Hardware", "Camera", "Positions", "Acquisition", "Run",
+    ]
+
+
+def test_every_widget_still_reachable_after_the_reshuffle(panel_obj):
+    """A tab rewrite must not orphan a control."""
+    import panel as pn
+
+    lay = panel_obj.layout()
+    seen = set()
+
+    def walk(obj):
+        seen.add(id(obj))
+        for attr in ("objects", "_names"):
+            pass
+        for child in getattr(obj, "objects", []) or []:
+            walk(child)
+
+    walk(lay)
+    for name in ("btn_connect", "btn_run", "btn_stop", "btn_snap",
+                 "btn_live", "btn_capture", "pos_table", "outdir",
+                 "exposure", "pixel_xy", "serverkit", "zstack_on",
+                 "btn_read_lightpath", "btn_read_objective",
+                 "auto_track", "require_all_rois", "chan_table"):
+        widget = getattr(panel_obj, name)
+        assert id(widget) in seen, f"{name} is not in the layout"
+
+
+def test_lightpath_starts_empty_and_needs_a_connection(panel_obj):
+    assert panel_obj._lightpath_widgets == {}
+    panel_obj._on_read_lightpath()
+    assert "Connect the hardware" in panel_obj.status.object
+
+
+def test_setting_a_lightpath_changer_without_connection_is_safe(
+        panel_obj):
+    panel_obj._set_lightpath("sideport", 1)
+    assert "Connect the hardware" in panel_obj.status.object
+
+
+def test_setting_a_lightpath_changer_with_no_selection_warns(
+        panel_obj):
+    panel_obj.motion = FakeMotion()
+    panel_obj.session = object()
+    panel_obj._set_lightpath("sideport", None)
+    assert "Nothing selected" in panel_obj.status.object
+
+
+def test_lightpath_roles_cover_the_transmitted_path():
+    """Order matters for the UI: light travels shutter -> condenser ->
+    objective -> reflector -> sideport."""
+    from tracking_tools.microscope_interface.mtb import (
+        LIGHT_PATH_ROLES,
+    )
+    assert LIGHT_PATH_ROLES == (
+        "tl_shutter", "condenser", "objective", "reflector", "sideport",
+    )

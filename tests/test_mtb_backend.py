@@ -21,9 +21,23 @@ from tracking_tools.microscope_interface.mtb_backend import (
 
 
 class FakeAxis:
-    def __init__(self, position=0.0, lo=-1e6, hi=1e6):
+    """Stands in for MTBAxis.
+
+    Must expose arrival_tolerance: the real axis grew it when the
+    servoing piezo turned out to dither well above its step width, and
+    the z-stack checks read it. A double that lags the real class hides
+    exactly the bugs the tests exist to catch.
+    """
+
+    def __init__(self, position=0.0, lo=-1e6, hi=1e6,
+                 arrival_tolerance=0.01):
         self.position = position
         self.limits = (lo, hi)
+        self.arrival_tolerance = arrival_tolerance
+        self.step = arrival_tolerance
+        self.typical_deviation = 0.0
+        self.max_deviation = 0.0
+        self.label = "fake-z"
         self.moves = []
 
     def move_to(self, target, **kw):
@@ -617,3 +631,173 @@ def test_frames_still_unpack_as_a_triple(patched):
         assert pos in ("scene_000", "scene_001")
     finally:
         iface.disconnect()
+
+
+# ====================================================================
+# Z-stacks
+#
+# The stack path had no coverage at all. Both failure modes below
+# produce DUPLICATE planes rather than an error, so the file looks like
+# a valid stack and nothing flags it — worse than a refusal.
+# ====================================================================
+
+def test_plane_offsets_are_symmetric_about_zero():
+    """An earlier version computed -range/2 + i*step, which left the
+    last plane short and the stack lopsided."""
+    make = None
+    iface = MicroscopeInterface_MTB(
+        {"p": {"xyz_um": (0.0, 0.0, 0.0)}}, "/tmp",
+        {"z_stack": {"range_um": 10.0, "step_um": 1.0}},
+    )
+    offsets = iface.plane_offsets()
+    assert len(offsets) == 11
+    assert offsets[0] == pytest.approx(-5.0)
+    assert offsets[-1] == pytest.approx(5.0)
+    assert sum(offsets) == pytest.approx(0.0)
+
+
+def test_plane_offsets_stay_symmetric_for_awkward_steps():
+    iface = MicroscopeInterface_MTB(
+        {"p": {"xyz_um": (0.0, 0.0, 0.0)}}, "/tmp",
+        {"z_stack": {"range_um": 10.0, "step_um": 3.0}},
+    )
+    offsets = iface.plane_offsets()
+    assert sum(offsets) == pytest.approx(0.0)
+    assert offsets == pytest.approx([-4.5, -1.5, 1.5, 4.5])
+
+
+def test_plane_offsets_single_plane():
+    iface = MicroscopeInterface_MTB(
+        {"p": {"xyz_um": (0.0, 0.0, 0.0)}}, "/tmp",
+        {"z_stack": {"range_um": 0.0, "step_um": 1.0}},
+    )
+    assert iface.plane_offsets() == [0.0]
+
+
+def test_plane_offsets_rejects_a_nonpositive_step():
+    iface = MicroscopeInterface_MTB(
+        {"p": {"xyz_um": (0.0, 0.0, 0.0)}}, "/tmp",
+        {"z_stack": {"range_um": 10.0, "step_um": 0.0}},
+    )
+    with pytest.raises(ValueError, match="must be positive"):
+        iface.plane_offsets()
+
+
+def test_zstack_returns_a_3d_array_with_one_plane_per_offset(patched):
+    make, motion, tmp_path = patched
+    iface = make(z_stack={"range_um": 4.0, "step_um": 1.0},
+                 stop_after_tp=1)
+    iface.connect()
+    try:
+        deadline = time.monotonic() + 5.0
+        got = None
+        while time.monotonic() < deadline:
+            image, _, _ = iface.wait_for_image(timeout_ms=200)
+            if image is not None:
+                got = image
+                break
+        assert got is not None, "no stack arrived"
+        assert got.ndim == 3, f"expected a stack, got {got.shape}"
+        assert got.shape[0] == 5, f"expected 5 planes, got {got.shape}"
+    finally:
+        iface.disconnect()
+
+
+def test_REGRESSION_zstack_works_with_a_synthetic_source(patched):
+    """_acquire() used to short-circuit on synthetic_source before
+    reaching the stack branch, so the whole stack path was untestable
+    without a camera — and therefore untested."""
+    make, _, _ = patched
+    seen_z = []
+
+    def synthetic(x, y, z, pos_name):
+        seen_z.append(z)
+        return np.full((4, 4), 7, dtype=np.uint16)
+
+    iface = make(synthetic_source=synthetic, stop_after_tp=1,
+                 z_stack={"range_um": 2.0, "step_um": 1.0})
+    iface.connect()
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            image, _, _ = iface.wait_for_image(timeout_ms=200)
+            if image is not None:
+                assert image.ndim == 3
+                break
+    finally:
+        iface.disconnect()
+    # Distinct Z per plane, not the same value repeated.
+    assert len(set(seen_z)) > 1, (
+        f"synthetic source saw a single Z {seen_z} — planes duplicated"
+    )
+
+
+def test_zstack_restores_z_to_the_centre(patched):
+    make, motion, _ = patched
+    iface = make(z_stack={"range_um": 4.0, "step_um": 1.0},
+                 stop_after_tp=1)
+    iface.connect()
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            image, _, _ = iface.wait_for_image(timeout_ms=200)
+            if image is None and iface.stop_requested:
+                break
+    finally:
+        iface.disconnect()
+    # Last commanded Z must be a plane centre, not an outer plane.
+    assert motion.z.moves, "Z never moved"
+    assert motion.z.moves[-1] in (250.0, 260.0), (
+        f"Z left at {motion.z.moves[-1]} instead of a centre"
+    )
+
+
+def test_check_z_stack_warns_when_step_is_below_axis_resolution(patched):
+    """A step finer than the axis can resolve makes move_to() a no-op,
+    so consecutive planes image the same slice."""
+    make, motion, _ = patched
+    motion.z.arrival_tolerance = 0.5
+    iface = make(z_stack={"range_um": 2.0, "step_um": 0.05})
+    iface.motion = motion
+    warnings = iface.check_z_stack()
+    assert any("arrival tolerance" in w for w in warnings), warnings
+
+
+def test_check_z_stack_warns_when_the_range_exceeds_the_limits(patched):
+    """move_to() clamps, so outer planes pile up at the same position."""
+    make, motion, _ = patched
+    motion.z.arrival_tolerance = 0.01
+    motion.z.limits = (0.0, 500.0)
+    motion.z.position = 250.0
+    iface = make(z_stack={"range_um": 900.0, "step_um": 10.0})
+    iface.motion = motion
+    warnings = iface.check_z_stack()
+    assert any("clamped" in w for w in warnings), warnings
+
+
+def test_check_z_stack_warns_when_it_cannot_fit_the_interval(patched):
+    make, motion, _ = patched
+    motion.z.arrival_tolerance = 0.01
+    iface = make(z_stack={"range_um": 100.0, "step_um": 1.0},
+                 settle_s=0.5, interval_s=5.0)
+    iface.motion = motion
+    warnings = iface.check_z_stack()
+    assert any("interval" in w for w in warnings), warnings
+
+
+def test_check_z_stack_silent_when_everything_is_sane(patched):
+    make, motion, _ = patched
+    motion.z.arrival_tolerance = 0.01
+    motion.z.limits = (0.0, 500.0)
+    motion.z.position = 250.0
+    iface = make(z_stack={"range_um": 10.0, "step_um": 1.0},
+                 settle_s=0.05, interval_s=600.0)
+    iface.motion = motion
+    assert iface.check_z_stack() == []
+
+
+def test_check_z_stack_empty_without_a_stack(patched):
+    make, motion, _ = patched
+    iface = make()
+    iface.motion = motion
+    assert iface.check_z_stack() == []

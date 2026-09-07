@@ -782,10 +782,19 @@ def _nosepiece(position=3):
     return obj
 
 
-def test_slots_lists_every_position():
+def test_slots_lists_every_position_including_index_zero():
+    """Scanning starts at 0: every changer on this stand raises for
+    GetElement(MaxPosition), so GetElement() is very likely 0-based
+    while Position is 1-based. Index 0 must not be skipped."""
     slots = _nosepiece().slots()
-    assert len(slots) == 6
-    assert [s["index"] for s in slots] == [1, 2, 3, 4, 5, 6]
+    assert [s["index"] for s in slots] == [0, 1, 2, 3, 4, 5, 6]
+
+
+def test_slots_flags_indices_that_raise():
+    """The out-of-bounds index is reported, not silently dropped."""
+    by_idx = {s["index"]: s for s in _nosepiece().slots()}
+    assert by_idx[6]["error"] is not None
+    assert by_idx[0]["error"] is not None    # fake has no slot 0
 
 
 def test_slots_identifies_the_installed_objectives():
@@ -909,3 +918,105 @@ def test_magnification_follows_the_rotation():
     assert obj.magnification == pytest.approx(40.0)
     obj.set_position(2)
     assert obj.magnification == pytest.approx(10.0)
+
+
+# ---------------------------------------------- generic changers
+
+class FakeLightChanger:
+    """Mirrors a real light-path changer, MaxPosition included."""
+
+    def __init__(self, position, names, name="fake"):
+        self.Position = position
+        self.MinPosition = 1
+        self.MaxPosition = len(names)
+        self.Name = name
+        self._names = names
+        self.set_calls = []
+
+    def GetElement(self, n):
+        # Real changers raise at MaxPosition — keep that behaviour so
+        # the 0-vs-1-based ambiguity stays visible in tests.
+        if not (1 <= n < self.MaxPosition + 1) or n > len(self._names):
+            raise RuntimeError("Index was outside the bounds")
+        el = type("El", (), {"Name": self._names[n - 1]})()
+        return el
+
+    def SetPosition(self, position, mode, timeout):
+        self.set_calls.append((position, mode, timeout))
+        self.Position = int(position)
+        return True
+
+
+def _changer(position=2, names=("100% L", "100% R", "50/50")):
+    from tracking_tools.microscope_interface.mtb import MTBChangerDevice
+    dev = MTBChangerDevice.__new__(MTBChangerDevice)
+    dev.label = "sideport"
+    dev.timeout_ms = 30000
+    raw = FakeLightChanger(position, list(names),
+                           "3x Motorized Sideport Turret")
+    dev._raw = raw
+    dev._c = raw
+    return dev, raw
+
+
+def test_changer_reports_position_and_bounds():
+    dev, _ = _changer(position=2)
+    assert dev.position == 2
+    assert dev.bounds == (1, 3)
+    assert "Sideport" in dev.name
+
+
+def test_changer_lists_elements_and_marks_the_current_one():
+    dev, _ = _changer(position=2)
+    els = dev.elements()
+    assert [e["index"] for e in els] == [1, 2, 3]
+    assert [e["current"] for e in els] == [False, True, False]
+    assert els[0]["name"] == "100% L"
+
+
+def test_changer_reports_an_unreadable_element_rather_than_failing():
+    dev, _ = _changer(position=1, names=("Open",))
+    # MaxPosition is 1 here, so index 1 reads and nothing raises;
+    # widen to force the out-of-bounds path.
+    dev._c.MaxPosition = 2
+    els = dev.elements()
+    assert els[1]["error"] is not None
+    assert els[1]["name"] is None
+
+
+def test_changer_set_position_uses_the_one_based_position():
+    """SetPosition is unambiguous even though GetElement's indexing is
+    not: it takes the same 1-based number Position reports."""
+    dev, raw = _changer(position=2)
+    assert dev.set_position(1) == 1
+    assert raw.set_calls[-1][0] == 1
+
+
+def test_changer_set_position_passes_a_real_enum(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        mtb, "resolve_mode",
+        lambda name="Synchronous": seen.append(name) or f"<{name}>",
+    )
+    dev, raw = _changer()
+    dev.set_position(3)
+    assert seen == ["Synchronous"]
+    assert raw.set_calls[-1][1] == "<Synchronous>"
+
+
+def test_changer_raises_when_a_move_is_refused():
+    dev, raw = _changer(position=2)
+
+    def refuse(position, mode, timeout):
+        raw.set_calls.append((position, mode, timeout))
+        return False               # and does not move
+    raw.SetPosition = refuse
+    with pytest.raises(MTBError, match="refused"):
+        dev.set_position(3)
+
+
+def test_changer_describe_shows_every_option():
+    dev, _ = _changer(position=2)
+    text = dev.describe()
+    assert "100% L" in text and "100% R" in text
+    assert "<=" in text

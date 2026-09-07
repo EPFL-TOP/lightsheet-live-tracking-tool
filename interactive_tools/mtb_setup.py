@@ -61,6 +61,7 @@ importlib.invalidate_caches()
 # the import is what broke.
 try:
     from tracking_tools.microscope_interface.mtb import (  # noqa: E402
+        LIGHT_PATH_ROLES,
         MTBMotion,
         MTBSession,
         sample_pixel_size_um,
@@ -68,6 +69,7 @@ try:
     _MTB_IMPORT_ERROR = None
 except Exception as _e:            # pragma: no cover - env dependent
     MTBMotion = MTBSession = sample_pixel_size_um = None
+    LIGHT_PATH_ROLES = ()
     _MTB_IMPORT_ERROR = _e
 
 try:
@@ -209,6 +211,21 @@ class MTBSetupPanel:
             "", width=600, styles={"font-size": "0.8em",
                                    "font-family": "monospace"},
         )
+
+        # --- light path ---
+        # The camera is on the LEFT sideport, so a sideport set to
+        # '100% R' starves it, and a condenser on a phase ring throws
+        # away the transmitted light. Both happened, and produced
+        # exposure-independent read-noise frames that looked like a
+        # camera fault.
+        self.btn_read_lightpath = pn.widgets.Button(
+            name="Read light path", button_type="primary", width=160
+        )
+        self.lightpath_rows = pn.Column(width=620)
+        self.lightpath_note = pn.pane.Markdown(
+            "", width=620, styles={"font-size": "0.8em"},
+        )
+        self._lightpath_widgets = {}
 
         # --- positions ---
         import pandas as pd
@@ -393,6 +410,7 @@ class MTBSetupPanel:
         self.btn_stop.on_click(self._on_stop)
         self.btn_check_rois.on_click(lambda e: self._refresh_roi_state())
         self.btn_read_objective.on_click(self._on_read_objective)
+        self.btn_read_lightpath.on_click(self._on_read_lightpath)
         self.btn_apply_objective.on_click(self._on_apply_objective)
         self.btn_live.param.watch(self._on_live_toggle, "value")
         self.z_axis.param.watch(self._on_z_axis_change, "value")
@@ -766,6 +784,95 @@ class MTBSetupPanel:
         self._say(f"Loaded {len(cfg)} position(s).", "ok")
 
     # ------------------------------------------------------- tracking
+
+    def _on_read_lightpath(self, _event=None) -> None:
+        """Build a dropdown per light-path changer, from the hardware.
+
+        Element NAMES may be offset by one: GetElement(MaxPosition)
+        raises on every changer here, which points at a 0-based element
+        array behind a 1-based Position. SetPosition takes the 1-based
+        position and is unambiguous, so switching is reliable even
+        while the labels are uncertain — the position number is shown
+        alongside each name so a mismatch is visible.
+        """
+        if not self._require_connection():
+            return
+        try:
+            devices = self.session.light_path()
+        except Exception as e:
+            self.lightpath_note.object = (
+                f"❌ Could not read the light path: {e}"
+            )
+            logger.exception("light path read failed")
+            return
+
+        rows = []
+        self._lightpath_widgets = {}
+        for role in LIGHT_PATH_ROLES:
+            dev = devices.get(role)
+            if dev is None:
+                continue
+            try:
+                elements = dev.elements()
+                cur = dev.position
+            except Exception as e:
+                rows.append(pn.pane.Markdown(
+                    f"**{role}** — unreadable ({e})", width=600))
+                continue
+
+            options, current_label = {}, None
+            for el in elements:
+                nm = el["name"] or f"<{el['error'] or 'unnamed'}>"
+                label = f"{el['index']}: {nm}"
+                options[label] = el["index"]
+                if el["current"]:
+                    current_label = label
+
+            select = pn.widgets.Select(
+                name=f"{role} ({dev.name})",
+                options=list(options), value=current_label,
+                width=420,
+            )
+            btn = pn.widgets.Button(name="Set", width=70)
+            btn.on_click(
+                lambda e, r=role, sel=select, opts=options:
+                self._set_lightpath(r, opts.get(sel.value))
+            )
+            self._lightpath_widgets[role] = (select, options)
+            rows.append(pn.Row(select, btn))
+
+        if not rows:
+            rows.append(pn.pane.Markdown(
+                "_No light-path components reachable._", width=600))
+        self.lightpath_rows.objects = rows
+        self.lightpath_note.object = (
+            "Light travels shutter → condenser → objective → reflector "
+            "→ sideport. **The camera is on the LEFT sideport**, so a "
+            "sideport on `100% R` gives it nothing. For brightfield the "
+            "condenser wants a non-phase position, and the transmitted "
+            "lamp must be on (the Colibri is fluorescence excitation "
+            "only). Position numbers are authoritative; names may be "
+            "offset by one."
+        )
+        self._say("Light path read.", "ok")
+
+    def _set_lightpath(self, role: str, index) -> None:
+        """Move one light-path changer, then re-read everything."""
+        if index is None:
+            self._say("Nothing selected.", "warn")
+            return
+        if not self._require_connection():
+            return
+        try:
+            dev = self.session.changer(role)
+            self._say(f"Setting {role} to position {index} …")
+            dev.set_position(int(index))
+        except Exception as e:
+            self._say(f"Could not set {role}: {e}", "err")
+            logger.exception("light path set failed for %s", role)
+            return
+        self._on_read_lightpath()
+        self._say(f"{role} set to position {index}.", "ok")
 
     def _on_read_objective(self, _event=None) -> None:
         """Ask MTB which objective is in, and derive the pixel pitch.
@@ -1260,9 +1367,27 @@ class MTBSetupPanel:
     # --------------------------------------------------------- layout
 
     def layout(self) -> pn.Column:
-        connect_row = pn.Row(self.btn_connect, self.z_axis)
+        """Tabbed layout, ordered the way a session actually runs.
 
-        jog = pn.Column(
+        Previously one long column: connect, jog, camera, positions,
+        channels and acquisition all stacked, so the Run button sat far
+        below the fold and setup order was not obvious. Tabs follow the
+        workflow — check the hardware, frame the sample, mark positions,
+        then acquire.
+        """
+        header = pn.Column(
+            "# Axio Observer 7",
+            pn.pane.Markdown(
+                "Motion via Zeiss **MTB**, camera via **Micro-Manager "
+                "/ PVCAM**. Close ZEN before connecting — it holds the "
+                "camera exclusively.",
+                width=700, styles={"font-size": "0.9em"},
+            ),
+            pn.Row(self.btn_connect, self.z_axis),
+            self.status,
+        )
+
+        tab_hardware = pn.Column(
             "### Stage",
             pn.Row(self.pos_readout, self.btn_refresh),
             pn.Row(self.xy_step, self.z_step),
@@ -1275,9 +1400,30 @@ class MTBSetupPanel:
                 pn.Spacer(width=30),
                 pn.Column(self.btn_zp, self.btn_zm),
             ),
+            pn.layout.Divider(),
+            "### Objective",
+            pn.Row(self.camera_pixel_um, self.adapter_mag,
+                   self.btn_read_objective),
+            self.objective_info,
+            pn.Row(self.objective_choice, self.btn_apply_objective),
+            pn.pane.Markdown(
+                "_**Rotate to it** turns the nosepiece, then re-reads "
+                "the magnification from the hardware, so the pixel "
+                "pitch reflects the objective actually in the light "
+                "path. Check clearance before rotating with a sample "
+                "loaded._",
+                width=600, styles={"font-size": "0.8em"},
+            ),
+            pn.layout.Divider(),
+            "### Light path",
+            pn.Row(self.btn_read_lightpath),
+            self.lightpath_rows,
+            self.lightpath_note,
+            pn.layout.Divider(),
+            self.hw_info,
         )
 
-        camera = pn.Column(
+        tab_camera = pn.Column(
             "### Camera",
             pn.Row(self.exposure, self.btn_snap),
             pn.Row(self.btn_live, self.live_fps),
@@ -1285,8 +1431,13 @@ class MTBSetupPanel:
             self.preview,
         )
 
-        positions = pn.Column(
+        tab_positions = pn.Column(
             "### Positions",
+            pn.pane.Markdown(
+                "Jog to each embryo on the **Hardware** tab, then "
+                "capture. The name column is editable.",
+                width=600, styles={"font-size": "0.85em"},
+            ),
             pn.Row(self.btn_capture, self.btn_goto),
             self.pos_table,
             pn.Row(self.btn_remove, self.btn_clear),
@@ -1294,72 +1445,61 @@ class MTBSetupPanel:
                    self.btn_load_pos),
         )
 
-        channels = pn.Column(
+        tab_acquire = pn.Column(
+            "### Timing",
+            pn.Row(self.interval_s, self.n_timepoints, self.settle_s),
+            pn.layout.Divider(),
+            "### Z-stack",
+            pn.Row(self.zstack_on, self.zstack_range, self.zstack_step),
+            pn.pane.Markdown(
+                "Keep the step above the actuator's resolution "
+                "(~0.06 µm for the piezo) — finer steps do not move and "
+                "silently duplicate planes. Warnings appear in the log "
+                "when the run starts.",
+                width=600, styles={"font-size": "0.8em"},
+            ),
+            pn.layout.Divider(),
             "### Channels",
             self.chan_table,
             self.chan_note,
+            pn.layout.Divider(),
+            "### Drift correction",
+            pn.Row(self.pixel_xy, self.pixel_z),
+            pn.Row(self.tracking_2d, self.serverkit),
+            pn.Row(self.max_xy, self.max_z),
         )
 
-        acquisition = pn.Column(
-            "### Acquisition",
-            pn.Row(self.interval_s, self.n_timepoints, self.settle_s),
-            pn.Row(self.zstack_on, self.zstack_range, self.zstack_step),
+        tab_run = pn.Column(
+            "### Run",
             self.outdir,
-            pn.layout.Divider(),
-            "#### Tracking",
             pn.pane.Markdown(
-                "**Start** begins acquiring straight away. Draw ROIs in "
+                "**Start** begins acquiring immediately. Draw ROIs in "
                 "the Selection dashboard while it runs "
                 "(`panel serve interactive_tools/panel_app.py`) and the "
                 "tracker attaches to the running loop — no restart. "
                 "Re-saving ROIs mid-run re-initialises that position.",
-                width=560, styles={"font-size": "0.85em"},
+                width=600, styles={"font-size": "0.85em"},
             ),
             pn.Row(self.auto_track),
             pn.Row(self.require_all_rois),
             pn.Row(self.roi_poll_s, self.btn_check_rois),
             self.roi_state,
-            "#### Drift correction",
-            pn.Row(self.camera_pixel_um, self.adapter_mag,
-                   self.btn_read_objective),
-            self.objective_info,
-            pn.Row(self.objective_choice, self.btn_apply_objective),
-            pn.pane.Markdown(
-                "_**Rotate to it** physically turns the nosepiece, "
-                "then re-reads the magnification from the hardware — "
-                "so the pixel pitch reflects the objective actually in "
-                "the light path. Check clearance before rotating with "
-                "a sample loaded._",
-                width=560, styles={"font-size": "0.8em"},
-            ),
-            pn.Row(self.pixel_xy, self.pixel_z),
-            pn.Row(self.tracking_2d, self.serverkit),
-            pn.Row(self.max_xy, self.max_z),
             pn.layout.Divider(),
             self.run_status,
             pn.Row(self.btn_run, self.btn_stop),
             self.run_log,
         )
 
-        return pn.Column(
-            "# Axio Observer 7 — Setup",
-            pn.pane.Markdown(
-                "Motion via Zeiss **MTB**, camera via **Micro-Manager "
-                "/ PVCAM**. Close ZEN before connecting — it holds the "
-                "camera exclusively.",
-                width=700, styles={"font-size": "0.9em"},
-            ),
-            connect_row,
-            self.status,
-            self.hw_info,
-            pn.layout.Divider(),
-            pn.Row(jog, pn.Spacer(width=40), camera),
-            pn.layout.Divider(),
-            pn.Row(positions, pn.Spacer(width=40), channels),
-            pn.layout.Divider(),
-            acquisition,
-            width=1250,
+        tabs = pn.Tabs(
+            ("Hardware", tab_hardware),
+            ("Camera", tab_camera),
+            ("Positions", tab_positions),
+            ("Acquisition", tab_acquire),
+            ("Run", tab_run),
+            dynamic=False,
         )
+
+        return pn.Column(header, tabs, width=1000)
 
 
 def app() -> pn.Column:
