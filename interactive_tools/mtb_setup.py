@@ -112,6 +112,21 @@ Z_STEPS = [0.1, 0.5, 1.0, 5.0, 10.0, 50.0]
 DEFAULT_EXPOSURE_MS = 5.0     # 5-20 ms is the good range; 50 saturates
 
 
+def _stretch(img: np.ndarray, lo_pct=1.0, hi_pct=99.5) -> np.ndarray:
+    """Percentile-stretch to float 0..1, max-projecting a stack.
+
+    Raw frames sit around 11000-14800 of 65535, so a naive cast renders
+    almost black; stretching to percentiles reveals the structure.
+    """
+    a = np.asarray(img, dtype=np.float32)
+    if a.ndim == 3:                       # z-stack -> max projection
+        a = a.max(axis=0)
+    lo, hi = np.percentile(a, [lo_pct, hi_pct])
+    if hi <= lo:
+        hi = lo + 1.0
+    return np.clip((a - lo) / (hi - lo), 0.0, 1.0)
+
+
 def _stretch_to_png(img: np.ndarray, lo_pct=1.0, hi_pct=99.5) -> bytes:
     """Percentile-stretch a frame to 8-bit PNG bytes for display.
 
@@ -199,14 +214,39 @@ class MTBSetupPanel:
         self.btn_snap = pn.widgets.Button(
             name="Snap", button_type="success", width=100
         )
+        # Label flips with state so it is obvious live is running.
         self.btn_live = pn.widgets.Toggle(
-            name="● Live", button_type="warning", width=100, value=False
+            name="● Start live", button_type="warning", width=130,
+            value=False,
         )
         self.live_fps = pn.widgets.FloatInput(
             name="Live rate (fps)", value=2.0, start=0.2, end=20.0,
             step=0.5, width=120,
         )
-        self.preview = pn.pane.PNG(None, width=600)
+        # A Bokeh image glyph rather than a PNG pane: replacing a PNG's
+        # bytes makes the browser swap the <img>, which flashes white
+        # between live frames. Updating a ColumnDataSource mutates the
+        # existing glyph in place, so live view is smooth.
+        from bokeh.models import ColumnDataSource, LinearColorMapper
+        from bokeh.plotting import figure
+
+        self._img_source = ColumnDataSource(
+            data={"image": [np.zeros((2, 2), dtype=np.float32)]}
+        )
+        self._img_fig = figure(
+            width=560, height=560, x_range=(0, 1), y_range=(0, 1),
+            toolbar_location="above",
+            tools="pan,box_zoom,wheel_zoom,reset",
+        )
+        self._img_fig.axis.visible = False
+        self._img_fig.grid.visible = False
+        self._img_fig.image(
+            image="image", x=0, y=0, dw=1, dh=1,
+            source=self._img_source,
+            color_mapper=LinearColorMapper(palette="Greys256",
+                                           low=0.0, high=1.0),
+        )
+        self.preview = pn.pane.Bokeh(self._img_fig)
         self.img_stats = pn.pane.Markdown(
             "", width=600, styles={"font-size": "0.8em",
                                    "font-family": "monospace"},
@@ -252,19 +292,37 @@ class MTBSetupPanel:
         self.btn_load_pos = pn.widgets.Button(name="Load", width=80)
 
         # --- channels ---
+        # A channel is (reflector cube, exposure, z-stack): the
+        # reflector position IS what distinguishes a fluorescence
+        # channel, and it is settable through MTBReflectorChanger.
+        # reflector_pos = 0 means "leave the reflector alone", which is
+        # what brightfield wants.
         self.chan_table = pn.widgets.Tabulator(
-            pd.DataFrame(
-                [{"name": "BF", "exposure_ms": DEFAULT_EXPOSURE_MS}]
-            ),
-            height=140, width=380, show_index=False,
+            pd.DataFrame([
+                {"name": "BF", "reflector_pos": 0,
+                 "exposure_ms": DEFAULT_EXPOSURE_MS, "z_stack": False},
+            ]),
+            height=180, width=520, show_index=False,
         )
+        self.btn_add_channel = pn.widgets.Button(
+            name="+ Add channel", width=140
+        )
+        self.btn_snap_channels = pn.widgets.Button(
+            name="Snap all channels", button_type="success", width=170
+        )
+        self.channel_previews = pn.Row()
         self.chan_note = pn.pane.Markdown(
-            "⚠️ Channels currently vary **exposure only**. Colibri LED "
-            "switching is not wired up yet: `IMTBFluorescenceLEDControl` "
-            "exposes `NumberOfLEDs`, an `LED[]` array and "
-            "`SetOperationMode`, but no brightness/on-off member — that "
-            "needs one more API probe before it can be done correctly "
-            "rather than guessed.",
+            "`reflector_pos` picks the filter cube by **position "
+            "number** (0 = leave it alone, for brightfield); read the "
+            "positions under *Light path* on the Optics tab. Each "
+            "channel also carries its own exposure and whether it is "
+            "acquired as a z-stack — fluorescence usually wants a "
+            "stack, brightfield usually does not.\n\n"
+            "⚠️ Colibri **LED intensity / on-off is not wired up yet**: "
+            "`IMTBFluorescenceLEDControl` exposes `NumberOfLEDs` and an "
+            "`LED[]` array but no brightness member, so it needs one "
+            "more API probe rather than a guess. For now set the lamp "
+            "by hand, or switch with the reflector and TL shutter.",
             width=560, styles={"font-size": "0.8em"},
         )
 
@@ -411,6 +469,8 @@ class MTBSetupPanel:
         self.btn_check_rois.on_click(lambda e: self._refresh_roi_state())
         self.btn_read_objective.on_click(self._on_read_objective)
         self.btn_read_lightpath.on_click(self._on_read_lightpath)
+        self.btn_add_channel.on_click(self._on_add_channel)
+        self.btn_snap_channels.on_click(self._on_snap_channels)
         self.btn_apply_objective.on_click(self._on_apply_objective)
         self.btn_live.param.watch(self._on_live_toggle, "value")
         self.z_axis.param.watch(self._on_z_axis_change, "value")
@@ -560,6 +620,12 @@ class MTBSetupPanel:
 
     # --------------------------------------------------------- camera
 
+    def _sync_live_label(self) -> None:
+        self.btn_live.name = ("■ Stop live" if self.btn_live.value
+                              else "● Start live")
+        self.btn_live.button_type = ("danger" if self.btn_live.value
+                                     else "warning")
+
     def _on_live_toggle(self, event) -> None:
         """Start/stop repeated snapping.
 
@@ -571,11 +637,13 @@ class MTBSetupPanel:
         if event.new:
             if self._run_thread is not None and self._run_thread.is_alive():
                 self.btn_live.value = False
+                self._sync_live_label()
                 self._say("Cannot go live while a run is active — the "
                           "camera is exclusive.", "warn")
                 return
             if self.mmc is None:
                 self.btn_live.value = False
+                self._sync_live_label()
                 self._say("Camera not available.", "warn")
                 return
             period_ms = int(1000.0 / max(0.2, float(self.live_fps.value)))
@@ -583,14 +651,17 @@ class MTBSetupPanel:
                 self._live_cb = pn.state.add_periodic_callback(
                     self._live_tick, period=period_ms
                 )
+                self._sync_live_label()
                 self._say(f"Live at ~{self.live_fps.value:g} fps.", "ok")
             except Exception as e:
                 # No server context (e.g. under pytest) — degrade to a
                 # single snap rather than breaking.
                 self.btn_live.value = False
+                self._sync_live_label()
                 self._say(f"Could not start live mode: {e}", "warn")
         else:
             self._stop_live()
+            self._sync_live_label()
             self._say("Live stopped.")
 
     def _stop_live(self) -> None:
@@ -602,6 +673,7 @@ class MTBSetupPanel:
             self._live_cb = None
         if self.btn_live.value:
             self.btn_live.value = False
+        self._sync_live_label()
 
     def _live_tick(self) -> None:
         """One live frame. Stops itself on repeated failure."""
@@ -642,8 +714,24 @@ class MTBSetupPanel:
             f"min {mn:.0f}  max {mx:.0f}  mean {mean:.1f}  "
             f"std {std:.1f}{note}"
         )
+        self._render(img)
+
+    def _render(self, img: np.ndarray) -> None:
+        """Push a frame into the existing glyph — no <img> swap."""
         try:
-            self.preview.object = _stretch_to_png(img)
+            a = _stretch(img)
+            h, w = a.shape
+            self._img_fig.x_range.end = float(w)
+            self._img_fig.y_range.end = float(h)
+            # Bokeh draws bottom-up; flip so the image is not mirrored.
+            self._img_source.data = {"image": [a[::-1]]}
+            for r in self._img_fig.renderers:
+                for attr in ("dw", "dh"):
+                    try:
+                        setattr(r.glyph, attr,
+                                float(w) if attr == "dw" else float(h))
+                    except Exception:
+                        pass
         except Exception as e:
             self._say(f"Could not render preview: {e}", "warn")
 
@@ -784,6 +872,93 @@ class MTBSetupPanel:
         self._say(f"Loaded {len(cfg)} position(s).", "ok")
 
     # ------------------------------------------------------- tracking
+
+    def channels(self) -> list[dict]:
+        """The channel list as plain dicts."""
+        out = []
+        df = self.chan_table.value
+        for _, r in df.iterrows():
+            out.append({
+                "name": str(r["name"]),
+                "reflector_pos": int(r.get("reflector_pos", 0) or 0),
+                "exposure_ms": float(r.get("exposure_ms",
+                                           DEFAULT_EXPOSURE_MS)),
+                "z_stack": bool(r.get("z_stack", False)),
+            })
+        return out
+
+    def _on_add_channel(self, _event=None) -> None:
+        import pandas as pd
+        df = self.chan_table.value
+        row = pd.DataFrame([{
+            "name": f"CH{len(df)}",
+            "reflector_pos": 0,
+            "exposure_ms": float(self.exposure.value),
+            "z_stack": True,
+        }])
+        self.chan_table.value = (
+            row if df.empty
+            else pd.concat([df, row], ignore_index=True)
+        )
+
+    def _apply_channel(self, channel: dict) -> None:
+        """Put the hardware into a channel's configuration."""
+        pos = channel.get("reflector_pos") or 0
+        if pos:
+            # 0 means "leave the reflector alone" — brightfield.
+            self.session.changer("reflector").set_position(int(pos))
+        if self.mmc is not None:
+            self.mmc.setExposure(float(channel["exposure_ms"]))
+
+    def _on_snap_channels(self, _event=None) -> None:
+        """Snap every channel in turn and show them side by side.
+
+        Sequential rather than simultaneous: one camera, one filter
+        cube, so channels are inherently acquired one after another —
+        the same order the acquisition loop will use.
+        """
+        if self.mmc is None:
+            self._say("Camera not available.", "warn")
+            return
+        if not self._require_connection():
+            return
+        chans = self.channels()
+        if not chans:
+            self._say("No channels defined.", "warn")
+            return
+
+        self._stop_live()
+        panes, summary = [], []
+        for ch in chans:
+            try:
+                self._apply_channel(ch)
+                self.mmc.snapImage()
+                img = np.asarray(self.mmc.getImage())
+            except Exception as e:
+                self._say(f"Channel {ch['name']} failed: {e}", "err")
+                logger.exception("channel snap failed")
+                continue
+            mn, mx = float(img.min()), float(img.max())
+            std = float(img.std())
+            summary.append(
+                f"{ch['name']}: refl={ch['reflector_pos'] or '-'} "
+                f"exp={ch['exposure_ms']:g}ms "
+                f"min={mn:.0f} max={mx:.0f} std={std:.1f}"
+            )
+            panes.append(pn.Column(
+                pn.pane.Markdown(
+                    f"**{ch['name']}**  \n"
+                    f"<span style='font-size:0.75em'>refl "
+                    f"{ch['reflector_pos'] or '-'} · "
+                    f"{ch['exposure_ms']:g} ms · std {std:.0f}</span>",
+                    width=260,
+                ),
+                pn.pane.PNG(_stretch_to_png(img), width=260),
+            ))
+
+        self.channel_previews.objects = panes
+        self.img_stats.object = "\n".join(summary)
+        self._say(f"Snapped {len(panes)} channel(s).", "ok")
 
     def _on_read_lightpath(self, _event=None) -> None:
         """Build a dropdown per light-path changer, from the hardware.
@@ -1057,16 +1232,21 @@ class MTBSetupPanel:
         root = self.outdir.value.strip()
         os.makedirs(root, exist_ok=True)
 
-        channels = self.chan_table.value
-        first = channels.iloc[0] if channels.shape[0] else None
-        channel_name = str(first["name"]) if first is not None else "BF"
-        exposure = (float(first["exposure_ms"]) if first is not None
-                    else float(self.exposure.value))
+        chans = self.channels()
+        if not chans:
+            self.run_status.object = "⚠️ No channels defined."
+            return
+        first = chans[0]
 
         params = {
             "z_axis": self.z_axis.value,
-            "exposure_ms": exposure,
-            "channel": channel_name,
+            "exposure_ms": first["exposure_ms"],
+            "channel": first["name"],
+            # Every channel, so the backend can cycle them per
+            # position. Each carries its own reflector cube, exposure
+            # and whether it is a stack.
+            "channels": chans,
+            "apply_channel": self._apply_channel,
             "interval_s": float(self.interval_s.value),
             "settle_s": float(self.settle_s.value),
             "max_xy_um": float(self.max_xy.value),
@@ -1367,13 +1547,13 @@ class MTBSetupPanel:
     # --------------------------------------------------------- layout
 
     def layout(self) -> pn.Column:
-        """Tabbed layout, ordered the way a session actually runs.
+        """Tabbed, but the camera lives BESIDE the stage controls.
 
-        Previously one long column: connect, jog, camera, positions,
-        channels and acquisition all stacked, so the Run button sat far
-        below the fold and setup order was not obvious. Tabs follow the
-        workflow — check the hardware, frame the sample, mark positions,
-        then acquire.
+        Splitting the camera into its own tab broke the interaction
+        that matters most — you jog the stage while watching the image,
+        so they have to be visible together. The preview is therefore
+        pinned next to the stage on the Hardware tab, and the remaining
+        tabs cover the setup steps that do not need it.
         """
         header = pn.Column(
             "# Axio Observer 7",
@@ -1387,7 +1567,15 @@ class MTBSetupPanel:
             self.status,
         )
 
-        tab_hardware = pn.Column(
+        camera_column = pn.Column(
+            pn.Row(self.exposure, self.btn_snap),
+            pn.Row(self.btn_live, self.live_fps),
+            self.img_stats,
+            self.preview,
+            width=600,
+        )
+
+        stage_column = pn.Column(
             "### Stage",
             pn.Row(self.pos_readout, self.btn_refresh),
             pn.Row(self.xy_step, self.z_step),
@@ -1401,6 +1589,21 @@ class MTBSetupPanel:
                 pn.Column(self.btn_zp, self.btn_zm),
             ),
             pn.layout.Divider(),
+            "### Positions",
+            pn.Row(self.btn_capture, self.btn_goto),
+            self.pos_table,
+            pn.Row(self.btn_remove, self.btn_clear),
+            pn.Row(self.positions_file, self.btn_save_pos,
+                   self.btn_load_pos),
+            width=600,
+        )
+
+        # Stage + camera together: jog while watching the image.
+        tab_hardware = pn.Column(
+            pn.Row(stage_column, pn.Spacer(width=20), camera_column),
+        )
+
+        tab_optics = pn.Column(
             "### Objective",
             pn.Row(self.camera_pixel_um, self.adapter_mag,
                    self.btn_read_objective),
@@ -1423,26 +1626,14 @@ class MTBSetupPanel:
             self.hw_info,
         )
 
-        tab_camera = pn.Column(
-            "### Camera",
-            pn.Row(self.exposure, self.btn_snap),
-            pn.Row(self.btn_live, self.live_fps),
-            self.img_stats,
-            self.preview,
-        )
-
-        tab_positions = pn.Column(
-            "### Positions",
-            pn.pane.Markdown(
-                "Jog to each embryo on the **Hardware** tab, then "
-                "capture. The name column is editable.",
-                width=600, styles={"font-size": "0.85em"},
-            ),
-            pn.Row(self.btn_capture, self.btn_goto),
-            self.pos_table,
-            pn.Row(self.btn_remove, self.btn_clear),
-            pn.Row(self.positions_file, self.btn_save_pos,
-                   self.btn_load_pos),
+        tab_channels = pn.Column(
+            "### Channels",
+            pn.Row(self.btn_add_channel, self.btn_snap_channels),
+            self.chan_table,
+            self.chan_note,
+            pn.layout.Divider(),
+            "#### Snap result per channel",
+            self.channel_previews,
         )
 
         tab_acquire = pn.Column(
@@ -1452,16 +1643,12 @@ class MTBSetupPanel:
             "### Z-stack",
             pn.Row(self.zstack_on, self.zstack_range, self.zstack_step),
             pn.pane.Markdown(
-                "Keep the step above the actuator's resolution "
-                "(~0.06 µm for the piezo) — finer steps do not move and "
-                "silently duplicate planes. Warnings appear in the log "
-                "when the run starts.",
+                "Applies to channels with `z_stack` ticked. Keep the "
+                "step above the actuator's resolution (~0.06 µm for the "
+                "piezo) — finer steps do not move and silently "
+                "duplicate planes. Warnings appear in the log at start.",
                 width=600, styles={"font-size": "0.8em"},
             ),
-            pn.layout.Divider(),
-            "### Channels",
-            self.chan_table,
-            self.chan_note,
             pn.layout.Divider(),
             "### Drift correction",
             pn.Row(self.pixel_xy, self.pixel_z),
@@ -1491,15 +1678,15 @@ class MTBSetupPanel:
         )
 
         tabs = pn.Tabs(
-            ("Hardware", tab_hardware),
-            ("Camera", tab_camera),
-            ("Positions", tab_positions),
+            ("Stage + Camera", tab_hardware),
+            ("Optics", tab_optics),
+            ("Channels", tab_channels),
             ("Acquisition", tab_acquire),
             ("Run", tab_run),
             dynamic=False,
         )
 
-        return pn.Column(header, tabs, width=1000)
+        return pn.Column(header, tabs, width=1280)
 
 
 def app() -> pn.Column:

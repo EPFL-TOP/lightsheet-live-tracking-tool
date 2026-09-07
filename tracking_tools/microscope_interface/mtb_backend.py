@@ -101,6 +101,21 @@ class MicroscopeInterface_MTB:
         self.stop_after_tp = p.get("stop_after_tp")
         self.buffer_mb = int(p.get("buffer_mb", 512))
         self.synthetic_source = p.get("synthetic_source")
+        # Multi-channel: each entry is
+        #   {name, reflector_pos, exposure_ms, z_stack}
+        # Channels are acquired SEQUENTIALLY per position — one camera
+        # and one filter cube means they cannot be simultaneous.
+        # apply_channel(channel) puts the hardware into that channel's
+        # configuration; the GUI supplies it so the reflector cube and
+        # exposure are set the same way whether snapping by hand or
+        # running the loop.
+        self.channels = p.get("channels") or [{
+            "name": p.get("channel", "BF"),
+            "reflector_pos": 0,
+            "exposure_ms": self.exposure_ms,
+            "z_stack": bool(p.get("z_stack")),
+        }]
+        self.apply_channel = p.get("apply_channel")
         # An injected session belongs to the caller: we must not log it
         # out, because MTB cannot Login again in this process.
         self._injected_session = p.get("session")
@@ -352,18 +367,49 @@ class MicroscopeInterface_MTB:
                         tp)
 
     def _visit(self, pos_name: str, tp: int) -> None:
-        """Move to one position, acquire, save, hand to the tracker."""
+        """Move to one position, acquire every channel, save, publish.
+
+        Only the FIRST channel is handed to the tracker: drift is
+        measured once per position per timepoint, and mixing channels
+        would correlate a brightfield frame against a fluorescence one.
+        Put the channel you want to track on first — brightfield is
+        usually the right choice, being brighter and structure-rich.
+        Every channel is still written to disk.
+        """
         x, y, z = self._target_for(pos_name)
         self.motion.move_to(x=x, y=y, z=z)
         if self.settle_s:
             time.sleep(self.settle_s)
 
-        img = self._acquire(pos_name, x, y, z)
-        path = self._save(img, pos_name, tp)
-        logger.debug("t=%d %s -> %s", tp, pos_name, path)
-        self._image_queue.put((img, tp, pos_name))
+        for idx, channel in enumerate(self.channels):
+            if self._stop_event.is_set():
+                return
+            try:
+                if self.apply_channel is not None:
+                    self.apply_channel(channel)
+                elif self.mmc is not None:
+                    with self._config_lock:
+                        self.mmc.setExposure(
+                            float(channel["exposure_ms"])
+                        )
+            except Exception:
+                logger.exception(
+                    "could not apply channel %s", channel.get("name")
+                )
 
-    def _acquire(self, pos_name, x, y, z) -> np.ndarray:
+            want_stack = bool(channel.get("z_stack")) and self.z_stack
+            img = self._acquire(pos_name, x, y, z, stack=want_stack,
+                                exposure_ms=channel.get("exposure_ms"))
+            path = self._save(img, pos_name, tp,
+                              channel=str(channel.get("name", "BF")))
+            logger.debug("t=%d %s [%s] -> %s",
+                         tp, pos_name, channel.get("name"), path)
+
+            if idx == 0:
+                self._image_queue.put((img, tp, pos_name))
+
+    def _acquire(self, pos_name, x, y, z, stack=None,
+                 exposure_ms=None) -> np.ndarray:
         """One frame, or one z-stack, for this position.
 
         The per-plane grabber is passed in so a z-stack works with the
@@ -378,15 +424,21 @@ class MicroscopeInterface_MTB:
                 )
         else:
             def grab(zz):
-                return self._snap()
+                return self._snap(exposure_ms)
 
-        if self.z_stack:
+        want = self.z_stack if stack is None else (
+            stack and self.z_stack
+        )
+        if want:
             return self._acquire_stack(z, grab)
         return grab(z)
 
-    def _snap(self) -> np.ndarray:
+    def _snap(self, exposure_ms=None) -> np.ndarray:
         with self._config_lock:
-            self.mmc.setExposure(self.exposure_ms)
+            self.mmc.setExposure(
+                float(exposure_ms) if exposure_ms is not None
+                else self.exposure_ms
+            )
         self.mmc.snapImage()
         return np.asarray(self.mmc.getImage())
 
@@ -490,11 +542,18 @@ class MicroscopeInterface_MTB:
                 )
         return np.stack(planes)
 
-    def _save(self, img: np.ndarray, pos_name: str, tp: int) -> str:
-        """Write a frame using the convention every backend shares."""
+    def _save(self, img: np.ndarray, pos_name: str, tp: int,
+              channel: str | None = None) -> str:
+        """Write a frame using the convention every backend shares.
+
+        t{tp:04d}_{channel}.tif — the ROI selection dashboard matches
+        t{NNNN}<suffix>.tif, so per-channel files sit side by side and
+        the suffix picks which one the tracker reads.
+        """
         folder = os.path.join(self.dirpath, pos_name)
         os.makedirs(folder, exist_ok=True)
-        path = os.path.join(folder, f"t{tp:04d}_{self.channel}.tif")
+        label = channel if channel is not None else self.channel
+        path = os.path.join(folder, f"t{tp:04d}_{label}.tif")
         try:
             import tifffile
             tifffile.imwrite(path, img)

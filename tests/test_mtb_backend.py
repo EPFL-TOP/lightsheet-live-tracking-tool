@@ -801,3 +801,133 @@ def test_check_z_stack_empty_without_a_stack(patched):
     iface = make()
     iface.motion = motion
     assert iface.check_z_stack() == []
+
+
+# ====================================================================
+# Multi-channel acquisition
+#
+# One camera and one filter cube, so channels are inherently
+# sequential. Each carries its own reflector cube, exposure and
+# whether it is a stack.
+# ====================================================================
+
+def test_default_is_a_single_channel(patched):
+    make, _, _ = patched
+    iface = make()
+    assert len(iface.channels) == 1
+    assert iface.channels[0]["name"] == "BF"
+
+
+def test_every_channel_is_written_to_its_own_file(patched):
+    make, _, tmp_path = patched
+    iface = make(
+        stop_after_tp=1,
+        channels=[
+            {"name": "BF", "reflector_pos": 0, "exposure_ms": 5.0,
+             "z_stack": False},
+            {"name": "GFP", "reflector_pos": 3, "exposure_ms": 200.0,
+             "z_stack": False},
+        ],
+    )
+    iface.connect()
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            image, _, _ = iface.wait_for_image(timeout_ms=200)
+            if image is None and iface.stop_requested:
+                break
+    finally:
+        iface.disconnect()
+
+    for name in ("BF", "GFP"):
+        assert (tmp_path / "scene_000" / f"t0000_{name}.tif").exists(), (
+            f"channel {name} was not saved"
+        )
+
+
+def test_apply_channel_is_called_for_each_channel(patched):
+    """The GUI supplies apply_channel so the reflector and exposure are
+    set the same way whether snapping by hand or running the loop."""
+    make, _, _ = patched
+    applied = []
+    iface = make(
+        stop_after_tp=1,
+        apply_channel=lambda ch: applied.append(ch["name"]),
+        channels=[
+            {"name": "BF", "reflector_pos": 0, "exposure_ms": 5.0},
+            {"name": "GFP", "reflector_pos": 3, "exposure_ms": 200.0},
+        ],
+    )
+    iface.connect()
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            image, _, _ = iface.wait_for_image(timeout_ms=200)
+            if image is None and iface.stop_requested:
+                break
+    finally:
+        iface.disconnect()
+
+    assert applied[:2] == ["BF", "GFP"]
+    # Two positions x one timepoint x two channels.
+    assert applied.count("GFP") == 2
+
+
+def test_only_the_first_channel_reaches_the_tracker(patched):
+    """Drift is measured once per position; correlating a brightfield
+    frame against a fluorescence one would be meaningless."""
+    make, _, _ = patched
+    iface = make(
+        stop_after_tp=1,
+        channels=[
+            {"name": "BF", "reflector_pos": 0, "exposure_ms": 5.0},
+            {"name": "GFP", "reflector_pos": 3, "exposure_ms": 200.0},
+        ],
+    )
+    iface.connect()
+    try:
+        frames = []
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            image, tp, pos = iface.wait_for_image(timeout_ms=200)
+            if image is None:
+                if iface.stop_requested:
+                    break
+                continue
+            frames.append((tp, pos))
+    finally:
+        iface.disconnect()
+
+    # One frame per position per timepoint, not one per channel.
+    assert len(frames) == 2, f"expected 2 tracker frames, got {frames}"
+
+
+def test_per_channel_z_stack_is_honoured(patched):
+    """Fluorescence usually wants a stack, brightfield usually does
+    not — so the flag is per channel, not global."""
+    make, _, tmp_path = patched
+    iface = make(
+        stop_after_tp=1,
+        z_stack={"range_um": 2.0, "step_um": 1.0},
+        channels=[
+            {"name": "BF", "reflector_pos": 0, "exposure_ms": 5.0,
+             "z_stack": False},
+            {"name": "GFP", "reflector_pos": 3, "exposure_ms": 200.0,
+             "z_stack": True},
+        ],
+    )
+    iface.connect()
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            image, _, _ = iface.wait_for_image(timeout_ms=200)
+            if image is None and iface.stop_requested:
+                break
+    finally:
+        iface.disconnect()
+
+    import tifffile
+    bf = tifffile.imread(tmp_path / "scene_000" / "t0000_BF.tif")
+    gfp = tifffile.imread(tmp_path / "scene_000" / "t0000_GFP.tif")
+    assert bf.ndim == 2, f"BF should be a single plane, got {bf.shape}"
+    assert gfp.ndim == 3, f"GFP should be a stack, got {gfp.shape}"

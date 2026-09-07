@@ -738,8 +738,34 @@ def test_layout_is_tabbed_in_workflow_order(panel_obj):
     tabs = [o for o in lay if isinstance(o, pn.Tabs)]
     assert tabs, "layout is not tabbed"
     assert list(tabs[0]._names) == [
-        "Hardware", "Camera", "Positions", "Acquisition", "Run",
+        "Stage + Camera", "Optics", "Channels", "Acquisition", "Run",
     ]
+
+
+def test_REGRESSION_camera_sits_beside_the_stage_controls():
+    """The camera must NOT be on its own tab: you jog the stage while
+    watching the image, so both have to be visible at once. An earlier
+    layout split them and broke that interaction."""
+    import panel as pn
+
+    panel_obj = MTBSetupPanel()
+    lay = panel_obj.layout()
+    tabs = [o for o in lay if isinstance(o, pn.Tabs)][0]
+    first_tab = tabs[0]
+
+    ids = set()
+
+    def walk(obj):
+        ids.add(id(obj))
+        for child in getattr(obj, "objects", []) or []:
+            walk(child)
+
+    walk(first_tab)
+    for name in ("preview", "btn_snap", "btn_live", "exposure",
+                 "btn_xm", "btn_xp", "btn_zp", "pos_readout"):
+        assert id(getattr(panel_obj, name)) in ids, (
+            f"{name} is not on the same tab as the stage controls"
+        )
 
 
 def test_every_widget_still_reachable_after_the_reshuffle(panel_obj):
