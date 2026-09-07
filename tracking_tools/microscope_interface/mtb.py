@@ -515,16 +515,101 @@ class MTBLED:
                 return False
         return None
 
-    def set_on(self, on: bool) -> None:
-        """Switch the LED. Tries the plausible argument shapes."""
-        attempts = [(bool(on),), (1 if on else 0,)]
+    def signature_of(self, method_name: str) -> list[str]:
+        """Reflected parameter types of every overload. Diagnostic."""
+        out = []
         try:
-            from ZEISS.MTB.Api import MTBOnOff
-            attempts.insert(
-                0, (MTBOnOff.On if on else MTBOnOff.Off,)
-            )
+            for m in self._led.GetType().GetMethods():
+                if m.Name != method_name:
+                    continue
+                params = ", ".join(
+                    f"{p.ParameterType.Name} {p.Name}"
+                    for p in m.GetParameters()
+                )
+                out.append(f"{m.ReturnType.Name} {m.Name}({params})")
         except Exception:
             pass
+        return out
+
+    def _args_for(self, method_name: str, value: bool):
+        """Build argument tuples from the REFLECTED signature.
+
+        Guessing shapes did not work — three plausible ones all failed
+        with "SetOnOff failed" on real hardware. Every other MTB setter
+        takes (value, mode, timeout), so rather than guess a fourth
+        time, read the parameter types and construct arguments to match:
+        a two-state enum gets On/Off, an MTBCmdSetModes gets
+        Synchronous, and a trailing integer gets the timeout.
+        """
+        try:
+            from System import Enum
+        except ImportError:
+            # No .NET here (unit tests, non-Zeiss machines) — the
+            # caller falls back to the naive argument shapes.
+            return []
+
+        candidates = []
+        try:
+            methods = [m for m in self._led.GetType().GetMethods()
+                       if m.Name == method_name]
+        except Exception:
+            methods = []
+
+        for m in methods:
+            params = list(m.GetParameters())
+            args, usable = [], True
+            for idx, p in enumerate(params):
+                pt = p.ParameterType
+                tname = pt.Name or ""
+                try:
+                    is_enum = bool(pt.IsEnum)
+                except Exception:
+                    is_enum = False
+
+                if is_enum:
+                    try:
+                        names = list(Enum.GetNames(pt))
+                    except Exception:
+                        usable = False
+                        break
+                    lowered = [n.lower() for n in names]
+                    if "on" in lowered and "off" in lowered:
+                        want = names[lowered.index(
+                            "on" if value else "off"
+                        )]
+                        args.append(Enum.Parse(pt, want))
+                    elif "cmdsetmodes" in tname.lower():
+                        args.append(resolve_mode("Synchronous"))
+                    else:
+                        args.append(Enum.Parse(pt, names[0]))
+                elif tname == "Boolean":
+                    args.append(bool(value))
+                elif tname in ("Int32", "Int16", "Byte", "UInt32"):
+                    # A trailing integer is the timeout.
+                    args.append(int(self.timeout_ms)
+                                if idx == len(params) - 1 else 0)
+                elif tname == "String":
+                    # clientID overloads — skip, the short forms work.
+                    usable = False
+                    break
+                else:
+                    usable = False
+                    break
+            if usable:
+                candidates.append((len(args), tuple(args)))
+
+        # Prefer the richest overload; the bare one often is not
+        # implemented on these devices.
+        candidates.sort(reverse=True)
+        return [a for _, a in candidates]
+
+    def set_on(self, on: bool) -> None:
+        """Switch the LED on or off."""
+        attempts = self._args_for("SetOnOff", on)
+        # Fall back to naive shapes if reflection yielded nothing.
+        if not attempts:
+            attempts = [(bool(on),), (1 if on else 0,)]
+
         last = None
         for args in attempts:
             try:
@@ -532,8 +617,10 @@ class MTBLED:
                 return
             except Exception as e:
                 last = e
+        sig = self.signature_of("SetOnOff") or ["<unavailable>"]
         raise MTBError(
-            f"LED {self.wavelength}nm: SetOnOff failed"
+            f"LED {self.wavelength}nm: SetOnOff rejected every "
+            f"argument form. Reflected signature(s): {sig}"
         ) from last
 
     @property
@@ -694,9 +781,14 @@ class MTBColibri:
             lo, hi = led.intensity_limits
             lines.append(
                 f"    [{led.index}] {led.wavelength} nm  "
-                f"on={led.is_on}  {led.intensity}{led.unit} "
-                f"({lo:g}..{hi:g})"
+                f"on={led.is_on}  has_on_off={led.has_on_off}  "
+                f"{led.intensity}{led.unit} ({lo:g}..{hi:g})"
             )
+        first = self.leds()[0] if self.leds() else None
+        if first is not None:
+            for meth in ("SetOnOff", "GetOnOff"):
+                for sig in first.signature_of(meth):
+                    lines.append(f"    sig: {sig}")
         return "\n".join(lines)
 
 

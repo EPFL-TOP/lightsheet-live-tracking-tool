@@ -1193,3 +1193,167 @@ def test_describe_lists_wavelengths_and_state():
     text = col.describe()
     for wl in (385, 630):
         assert str(wl) in text
+
+
+# ====================================================================
+# SetOnOff argument shape
+#
+# Three guessed shapes — MTBOnOff enum, bool, int — were ALL rejected
+# on real hardware:
+#   LED 385 would not switch off: LED 385nm: SetOnOff failed
+# so the LEDs never switched on and no fluorescence appeared. Every
+# other MTB setter takes (value, mode, timeout), so the arguments are
+# now built from the REFLECTED signature instead of guessed.
+# Observed 2026-09-07.
+# ====================================================================
+
+class FakeParam:
+    def __init__(self, type_name, param_name="p", is_enum=False,
+                 enum_names=()):
+        self.Name = param_name
+        self.ParameterType = type(
+            "T", (), {"Name": type_name, "IsEnum": is_enum,
+                      "_names": list(enum_names)}
+        )()
+
+
+class FakeMethod:
+    def __init__(self, name, params):
+        self.Name = name
+        self._params = params
+        self.ReturnType = type("T", (), {"Name": "Void"})()
+
+    def GetParameters(self):
+        return self._params
+
+
+class ReflectiveLED(FakeLED):
+    """A LED whose SetOnOff only accepts (enum, mode, timeout)."""
+
+    def __init__(self, wavelength, accepted_arity=3):
+        super().__init__(wavelength)
+        self.accepted_arity = accepted_arity
+        self.rejected = []
+
+    def GetType(self):
+        led = self
+
+        class T:
+            @staticmethod
+            def GetMethods():
+                return [
+                    FakeMethod("SetOnOff", [
+                        FakeParam("MTBOnOff", "onOff", True,
+                                  ("Off", "On")),
+                        FakeParam("MTBCmdSetModes", "mode", True,
+                                  ("Default", "Synchronous")),
+                        FakeParam("Int32", "timeout"),
+                    ]),
+                    FakeMethod("SetOnOff", [
+                        FakeParam("MTBOnOff", "onOff", True,
+                                  ("Off", "On")),
+                    ]),
+                ]
+        return T()
+
+    def SetOnOff(self, *args):
+        if len(args) != self.accepted_arity:
+            self.rejected.append(args)
+            raise RuntimeError("wrong arity")
+        self.on_calls.append(args)
+        self._on = "on" in str(args[0]).lower()
+
+
+def test_signature_of_reports_the_overloads():
+    from tracking_tools.microscope_interface.mtb import MTBLED
+    led = MTBLED.__new__(MTBLED)
+    led._led = ReflectiveLED(475)
+    led.timeout_ms = 10000
+    sigs = led.signature_of("SetOnOff")
+    assert any("MTBCmdSetModes" in s for s in sigs), sigs
+    assert any("Int32 timeout" in s for s in sigs), sigs
+
+
+def test_args_for_prefers_the_richest_overload(monkeypatch):
+    """The bare one-argument form is often not implemented on these
+    devices, so the (value, mode, timeout) form must be tried first."""
+    import sys
+    import types
+
+    fake_system = types.ModuleType("System")
+
+    class FakeEnum:
+        @staticmethod
+        def GetNames(t):
+            return list(getattr(t, "_names", []))
+
+        @staticmethod
+        def Parse(t, name):
+            return f"<{t.Name}.{name}>"
+
+    fake_system.Enum = FakeEnum
+    monkeypatch.setitem(sys.modules, "System", fake_system)
+
+    from tracking_tools.microscope_interface.mtb import MTBLED
+    led = MTBLED.__new__(MTBLED)
+    led._led = ReflectiveLED(475)
+    led.timeout_ms = 4321
+
+    shapes = led._args_for("SetOnOff", True)
+    assert shapes, "reflection produced no argument shapes"
+    assert len(shapes[0]) == 3, "richest overload should come first"
+    assert shapes[0][0] == "<MTBOnOff.On>"
+    assert shapes[0][2] == 4321, "trailing integer should be timeout"
+
+
+def test_args_for_picks_off_when_switching_off(monkeypatch):
+    import sys
+    import types
+
+    fake_system = types.ModuleType("System")
+
+    class FakeEnum:
+        @staticmethod
+        def GetNames(t):
+            return list(getattr(t, "_names", []))
+
+        @staticmethod
+        def Parse(t, name):
+            return f"<{t.Name}.{name}>"
+
+    fake_system.Enum = FakeEnum
+    monkeypatch.setitem(sys.modules, "System", fake_system)
+
+    from tracking_tools.microscope_interface.mtb import MTBLED
+    led = MTBLED.__new__(MTBLED)
+    led._led = ReflectiveLED(475)
+    led.timeout_ms = 1000
+    assert led._args_for("SetOnOff", False)[0][0] == "<MTBOnOff.Off>"
+
+
+def test_args_for_returns_empty_without_dotnet():
+    """Off-Windows the caller must fall back to naive shapes rather
+    than crash on `import System`."""
+    from tracking_tools.microscope_interface.mtb import MTBLED
+    led = MTBLED.__new__(MTBLED)
+    led._led = FakeLED(475)
+    led.timeout_ms = 1000
+    assert led._args_for("SetOnOff", True) == []
+
+
+def test_set_on_error_message_includes_the_signature():
+    """When it still fails, the message must carry the real signature
+    so the next fix is informed rather than another guess."""
+    from tracking_tools.microscope_interface.mtb import MTBLED
+
+    class AlwaysRejects(ReflectiveLED):
+        def SetOnOff(self, *args):
+            raise RuntimeError("nope")
+
+    led = MTBLED.__new__(MTBLED)
+    led._led = AlwaysRejects(475)
+    led.timeout_ms = 1000
+    led._cont = None
+    led.unit = "%"
+    with pytest.raises(MTBError, match="Reflected signature"):
+        led.set_on(True)
