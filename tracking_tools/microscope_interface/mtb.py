@@ -909,6 +909,57 @@ class MTBChangerDevice:
             )
         return self.position
 
+    def find_position(self, *keywords: str) -> int | None:
+        """The position whose element name contains any keyword.
+
+        Element names vary between stands, so 'which position closes
+        the shutter' has to be looked up rather than hard-coded.
+        """
+        for el in self.elements():
+            name = (el["name"] or "").lower()
+            if any(k.lower() in name for k in keywords):
+                return el["index"]
+        return None
+
+    def set_open(self, open_it: bool) -> int | None:
+        """Open or close a two-state changer used as a shutter.
+
+        Matters for fluorescence: with the transmitted-light shutter
+        OPEN, brightfield floods the sensor and the fluorescence image
+        has a bright background instead of a dark one. Excitation-only
+        imaging needs TL closed.
+        """
+        want = (("open",) if open_it
+                else ("closed", "close", "shut", "blocked"))
+        pos = self.find_position(*want)
+        if pos is None:
+            # Only two positions and one is named 'Open': the other
+            # one is closed, whatever it is called.
+            open_pos = self.find_position("open")
+            bounds = self.bounds
+            if open_pos is not None and bounds and bounds[1] == 2:
+                pos = open_pos if open_it else (
+                    1 if open_pos == 2 else 2
+                )
+        if pos is None:
+            raise MTBError(
+                f"{self.label}: cannot tell which position is "
+                f"{'open' if open_it else 'closed'}; elements are "
+                f"{[e['name'] for e in self.elements()]}"
+            )
+        return self.set_position(pos)
+
+    @property
+    def is_open(self) -> bool | None:
+        for el in self.elements():
+            if el["current"]:
+                name = (el["name"] or "").lower()
+                if "open" in name:
+                    return True
+                if any(k in name for k in ("closed", "close", "shut")):
+                    return False
+        return None
+
     def describe(self) -> str:
         bounds = self.bounds
         rng = f"{bounds[0]}..{bounds[1]}" if bounds else "?"

@@ -267,6 +267,23 @@ class MTBSetupPanel:
         )
         self._lightpath_widgets = {}
 
+        # --- LED live control (Optics tab) ---
+        # Interactive tuning: pick an LED, slide the intensity, watch
+        # it on Live. Channels are the saved recipe; this is the dial.
+        self.btn_read_leds = pn.widgets.Button(
+            name="Read LEDs", button_type="primary", width=130
+        )
+        self.led_rows = pn.Column(width=620)
+        self.led_note = pn.pane.Markdown(
+            "", width=620, styles={"font-size": "0.8em"},
+        )
+        self.btn_tl_on = pn.widgets.Button(
+            name="TL light ON", width=130
+        )
+        self.btn_tl_off = pn.widgets.Button(
+            name="TL light OFF", width=130
+        )
+
         # --- positions ---
         import pandas as pd
         self.pos_table = pn.widgets.Tabulator(
@@ -300,7 +317,7 @@ class MTBSetupPanel:
         self.chan_table = pn.widgets.Tabulator(
             pd.DataFrame([
                 {"name": "BF", "reflector_pos": 0, "led_nm": 0,
-                 "led_percent": 0.0,
+                 "led_percent": 0.0, "tl": True, "invert": True,
                  "exposure_ms": DEFAULT_EXPOSURE_MS, "z_stack": False},
             ]),
             height=200, width=620, show_index=False,
@@ -492,6 +509,9 @@ class MTBSetupPanel:
         self.btn_check_rois.on_click(lambda e: self._refresh_roi_state())
         self.btn_read_objective.on_click(self._on_read_objective)
         self.btn_read_lightpath.on_click(self._on_read_lightpath)
+        self.btn_read_leds.on_click(self._on_read_leds)
+        self.btn_tl_on.on_click(lambda e: self._set_tl(True))
+        self.btn_tl_off.on_click(lambda e: self._set_tl(False))
         self.btn_add_channel.on_click(self._on_add_channel)
         self.btn_capture_channel.on_click(self._on_capture_channel)
         self.btn_del_channel.on_click(self._on_del_channel)
@@ -916,6 +936,14 @@ class MTBSetupPanel:
                 "reflector_pos": int(r.get("reflector_pos", 0) or 0),
                 "led_nm": int(r.get("led_nm", 0) or 0),
                 "led_percent": float(r.get("led_percent", 0.0) or 0.0),
+                # Transmitted light: ON for brightfield, OFF for
+                # fluorescence — otherwise brightfield floods the
+                # sensor and the fluo image has a bright background.
+                "tl": bool(r.get("tl", False)),
+                # Invert before tracking: the tracker thresholds for a
+                # BRIGHT object on a DARK background, which is true of
+                # fluorescence but inverted in brightfield.
+                "invert": bool(r.get("invert", False)),
                 "exposure_ms": float(r.get("exposure_ms",
                                            DEFAULT_EXPOSURE_MS)),
                 "z_stack": bool(r.get("z_stack", False)),
@@ -930,6 +958,8 @@ class MTBSetupPanel:
             "reflector_pos": 0,
             "led_nm": 0,
             "led_percent": 0.0,
+            "tl": True,
+            "invert": True,
             "exposure_ms": float(self.exposure.value),
             "z_stack": True,
         }])
@@ -971,6 +1001,9 @@ class MTBSetupPanel:
         # 'none' as a cube name means brightfield, so do not move the
         # reflector for that channel.
         is_bf = (cube or "").strip().lower() in ("none", "", "-")
+        # A channel with an LED is fluorescence: transmitted light
+        # off, and no inversion (background is already dark).
+        is_fluo = bool(led_nm)
         row = pd.DataFrame([{
             "name": (f"{led_nm}nm" if led_nm else
                      ("BF" if is_bf else
@@ -978,8 +1011,10 @@ class MTBSetupPanel:
             "reflector_pos": 0 if is_bf else int(pos),
             "led_nm": led_nm,
             "led_percent": led_pct,
+            "tl": not is_fluo,
+            "invert": not is_fluo,
             "exposure_ms": float(self.exposure.value),
-            "z_stack": bool(led_nm) or not is_bf,
+            "z_stack": is_fluo or not is_bf,
         }])
         self.chan_table.value = (
             row if df.empty
@@ -991,6 +1026,85 @@ class MTBSetupPanel:
             f"{f' @ {led_pct:g}%' if led_nm else ''}, "
             f"{self.exposure.value:g} ms.", "ok",
         )
+
+    def _set_tl(self, open_it: bool) -> None:
+        """Open or close the transmitted-light shutter."""
+        if not self._require_connection():
+            return
+        try:
+            self.session.changer("tl_shutter").set_open(open_it)
+        except Exception as e:
+            self._say(f"Could not switch transmitted light: {e}", "err")
+            return
+        self._say(
+            f"Transmitted light {'ON' if open_it else 'OFF'}.", "ok"
+        )
+
+    def _on_read_leds(self, _event=None) -> None:
+        """Build a live on/off + intensity control per Colibri LED."""
+        if not self._require_connection():
+            return
+        try:
+            colibri = self.session.colibri()
+            leds = colibri.leds()
+        except Exception as e:
+            self.led_note.object = f"❌ Could not read the LEDs: {e}"
+            logger.exception("LED read failed")
+            return
+
+        rows = []
+        for led in leds:
+            lo, hi = led.intensity_limits
+            toggle = pn.widgets.Toggle(
+                name=f"{led.wavelength} nm",
+                value=bool(led.is_on), width=110,
+                button_type="success",
+            )
+            slider = pn.widgets.FloatSlider(
+                name=f"{led.unit}", start=lo, end=hi,
+                value=float(led.intensity or 0.0),
+                step=1.0, width=330,
+            )
+
+            def on_toggle(event, _led=led):
+                try:
+                    _led.set_on(bool(event.new))
+                    self._say(
+                        f"LED {_led.wavelength} nm "
+                        f"{'ON' if event.new else 'OFF'}.", "ok",
+                    )
+                except Exception as exc:
+                    self._say(
+                        f"LED {_led.wavelength} nm would not switch: "
+                        f"{exc}", "err",
+                    )
+
+            def on_slide(event, _led=led):
+                try:
+                    _led.set_intensity(float(event.new))
+                except Exception as exc:
+                    self._say(
+                        f"LED {_led.wavelength} nm intensity: {exc}",
+                        "err",
+                    )
+
+            toggle.param.watch(on_toggle, "value")
+            slider.param.watch(on_slide, "value")
+            rows.append(pn.Row(toggle, slider))
+
+        self.led_rows.objects = rows or [
+            pn.pane.Markdown("_No LEDs reachable._", width=600)
+        ]
+        self.led_note.object = (
+            "Switching one LED on does **not** switch the others off "
+            "here — that only happens when a channel is applied. For a "
+            "clean fluorescence image also turn the **transmitted "
+            "light OFF**: leaving it on is what makes a fluo frame come "
+            "back with a bright background.\n\n"
+            "Adjust with **Live** running to see the effect "
+            "immediately, then use *Capture light path → channel*."
+        )
+        self._say(f"Read {len(leds)} LED(s).", "ok")
 
     def _all_leds_off(self) -> None:
         if not self._require_connection():
@@ -1034,6 +1148,18 @@ class MTBSetupPanel:
         except Exception as e:
             logger.warning("LED setup failed for channel %s: %s",
                            channel.get("name"), e)
+
+        # Transmitted light. Leaving it on during fluorescence is what
+        # makes a "fluo" frame come back with a BRIGHT background —
+        # brightfield simply swamps the emission.
+        want_tl = bool(channel.get("tl", not led_nm))
+        try:
+            self.session.changer("tl_shutter").set_open(want_tl)
+        except Exception as e:
+            logger.warning(
+                "could not %s the transmitted-light shutter: %s",
+                "open" if want_tl else "close", e,
+            )
 
         pos = channel.get("reflector_pos") or 0
         if pos:
@@ -1739,6 +1865,11 @@ class MTBSetupPanel:
             pn.Row(self.btn_read_lightpath),
             self.lightpath_rows,
             self.lightpath_note,
+            pn.layout.Divider(),
+            "### Illumination",
+            pn.Row(self.btn_read_leds, self.btn_tl_on, self.btn_tl_off),
+            self.led_rows,
+            self.led_note,
             pn.layout.Divider(),
             self.hw_info,
             width=620,

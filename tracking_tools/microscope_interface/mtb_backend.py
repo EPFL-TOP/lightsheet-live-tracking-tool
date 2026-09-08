@@ -52,6 +52,28 @@ from .mtb import MTBError, MTBMotion, MTBSession
 logger = logging.getLogger(__name__)
 
 
+def invert_for_tracking(img: np.ndarray) -> np.ndarray:
+    """Flip contrast so a dark-on-bright object becomes bright-on-dark.
+
+    The ROI tracker segments by thresholding for a bright object
+    against a dark background. That holds for fluorescence but is
+    exactly reversed in transmitted light, where the background is the
+    brightest thing in the frame and survives every threshold.
+
+    Inverts within the data's own range rather than the dtype's, so a
+    16-bit frame spanning 11000..14800 still uses the full contrast
+    instead of collapsing into the bottom of a 0..65535 scale.
+    Geometry is untouched, so ROIs drawn on the raw image remain
+    valid.
+    """
+    a = np.asarray(img)
+    lo = a.min()
+    hi = a.max()
+    if hi == lo:
+        return a.copy()
+    return (hi + lo) - a
+
+
 class MicroscopeInterface_MTB:
     """Closed-loop tracking backend: MTB motion + PVCAM camera.
 
@@ -406,7 +428,16 @@ class MicroscopeInterface_MTB:
                          tp, pos_name, channel.get("name"), path)
 
             if idx == 0:
-                self._image_queue.put((img, tp, pos_name))
+                # The tracker thresholds for a BRIGHT object on a DARK
+                # background — true of fluorescence, but inverted in
+                # brightfield, where the background is the bright part
+                # and never gets thresholded out. Invert what the
+                # TRACKER sees; the file on disk stays raw.
+                self._image_queue.put(
+                    (invert_for_tracking(img)
+                     if channel.get("invert") else img,
+                     tp, pos_name)
+                )
 
     def _acquire(self, pos_name, x, y, z, stack=None,
                  exposure_ms=None) -> np.ndarray:

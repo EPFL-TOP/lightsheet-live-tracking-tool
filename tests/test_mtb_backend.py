@@ -931,3 +931,138 @@ def test_per_channel_z_stack_is_honoured(patched):
     gfp = tifffile.imread(tmp_path / "scene_000" / "t0000_GFP.tif")
     assert bf.ndim == 2, f"BF should be a single plane, got {bf.shape}"
     assert gfp.ndim == 3, f"GFP should be a stack, got {gfp.shape}"
+
+
+# ====================================================================
+# Brightfield contrast inversion
+#
+# The ROI tracker thresholds for a BRIGHT object on a DARK background.
+# True of fluorescence; exactly reversed in transmitted light, where
+# the background is the brightest thing in the frame and survives
+# every threshold. Reported 2026-09-08 after brightfield tracking
+# worked but the masking did not.
+# ====================================================================
+
+def test_invert_makes_a_dark_object_bright():
+    from tracking_tools.microscope_interface.mtb_backend import (
+        invert_for_tracking,
+    )
+    img = np.full((8, 8), 14000, dtype=np.uint16)
+    img[3:5, 3:5] = 11000              # dark embryo, bright field
+    out = invert_for_tracking(img)
+    assert out[4, 4] > out[0, 0], "object should now be the bright part"
+
+
+def test_invert_uses_the_data_range_not_the_dtype_range():
+    """Inverting against 65535 would push a frame spanning
+    11000..14800 into the bottom of the scale and destroy contrast."""
+    from tracking_tools.microscope_interface.mtb_backend import (
+        invert_for_tracking,
+    )
+    img = np.array([[11000, 14800]], dtype=np.uint16)
+    out = invert_for_tracking(img)
+    assert set(out.ravel().tolist()) == {11000, 14800}
+    assert out[0, 0] == 14800 and out[0, 1] == 11000
+
+
+def test_invert_preserves_shape_and_dtype():
+    from tracking_tools.microscope_interface.mtb_backend import (
+        invert_for_tracking,
+    )
+    img = np.random.default_rng(0).integers(
+        11000, 14800, size=(6, 7), dtype=np.uint16
+    )
+    out = invert_for_tracking(img)
+    assert out.shape == img.shape
+    assert out.dtype == img.dtype
+
+
+def test_invert_survives_a_flat_frame():
+    from tracking_tools.microscope_interface.mtb_backend import (
+        invert_for_tracking,
+    )
+    flat = np.full((4, 4), 99, dtype=np.uint16)
+    out = invert_for_tracking(flat)
+    assert (out == 99).all()
+
+
+def test_invert_is_its_own_inverse():
+    from tracking_tools.microscope_interface.mtb_backend import (
+        invert_for_tracking,
+    )
+    img = np.random.default_rng(1).integers(
+        100, 900, size=(5, 5), dtype=np.uint16
+    )
+    assert (invert_for_tracking(invert_for_tracking(img)) == img).all()
+
+
+def test_REGRESSION_tracker_gets_inverted_but_disk_keeps_raw(patched):
+    """The saved file must stay raw — inverting on disk would confuse
+    the ROI dashboard and anyone reviewing the data later."""
+    make, _, tmp_path = patched
+    seen = []
+
+    def synthetic(x, y, z, pos_name):
+        img = np.full((8, 8), 14000, dtype=np.uint16)
+        img[3:5, 3:5] = 11000
+        return img
+
+    iface = make(
+        synthetic_source=synthetic, stop_after_tp=1,
+        channels=[{"name": "BF", "reflector_pos": 0, "led_nm": 0,
+                   "exposure_ms": 5.0, "invert": True}],
+    )
+    iface.connect()
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            image, _, _ = iface.wait_for_image(timeout_ms=200)
+            if image is None:
+                if iface.stop_requested:
+                    break
+                continue
+            seen.append(image)
+    finally:
+        iface.disconnect()
+
+    assert seen, "no frame reached the tracker"
+    tracked = seen[0]
+    assert tracked[4, 4] > tracked[0, 0], (
+        "tracker did not receive an inverted frame"
+    )
+
+    import tifffile
+    on_disk = tifffile.imread(
+        tmp_path / "scene_000" / "t0000_BF.tif"
+    )
+    assert on_disk[4, 4] < on_disk[0, 0], (
+        "the file on disk was inverted; it must stay raw"
+    )
+
+
+def test_no_inversion_when_the_channel_does_not_ask(patched):
+    make, _, _ = patched
+
+    def synthetic(x, y, z, pos_name):
+        img = np.full((8, 8), 14000, dtype=np.uint16)
+        img[3:5, 3:5] = 11000
+        return img
+
+    iface = make(
+        synthetic_source=synthetic, stop_after_tp=1,
+        channels=[{"name": "GFP", "reflector_pos": 3, "led_nm": 475,
+                   "exposure_ms": 200.0, "invert": False}],
+    )
+    iface.connect()
+    try:
+        got = None
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            image, _, _ = iface.wait_for_image(timeout_ms=200)
+            if image is not None:
+                got = image
+                break
+    finally:
+        iface.disconnect()
+    assert got is not None
+    assert got[4, 4] < got[0, 0], "fluorescence must not be inverted"
