@@ -154,27 +154,66 @@ re-saving ROIs mid-run re-initialises that position.
 
 ---
 
-## Brightfield tracking and the `invert` flag
+## Brightfield tracking and preprocessing
 
 The ROI tracker segments by thresholding for a **bright object on a
 dark background**. That is how fluorescence looks. Transmitted light is
 the opposite: the background is the brightest thing in the frame, so it
 survives every threshold and the embryo is never isolated.
 
-`invert` flips the contrast of the frame **handed to the tracker**,
-within the data's own range so a frame spanning 11000–14800 keeps its
-full contrast rather than collapsing into the bottom of a 0–65535
-scale. **The file on disk stays raw**, so the ROI dashboard and later
-review see the real image, and ROI geometry is unaffected.
+### Where preprocessing is configured
 
-Set `invert` ☑ for brightfield, ☐ for fluorescence.
+**In the ROI selection dashboard**, alongside the ROIs themselves —
+because that is where you decide what to track and can see the effect
+on the very image the tracker will receive.
 
-If brightfield masking is still poor, the remaining knobs live in
-`tracking_tools/tracking_config.yaml` under `roi_tracker`:
-`blur_factor`, `scaling_factor`, `mask_kernel_size`,
-`containment_threshold`, `score_threshold`. Transmitted light gives
-lower contrast than fluorescence, so more blur and a gentler threshold
-usually help.
+```bat
+panel serve interactive_tools\panel_app.py
+```
+
+The **Selection** tab's preprocessing controls all apply to the preview
+*and* are saved into `tracking_RoIs.json`:
+
+| Control | Effect |
+|---|---|
+| **Invert contrast (brightfield)** | flips dark-on-bright to bright-on-dark |
+| Downscale | speed vs precision |
+| Gaussian blur factor | suppresses texture; transmitted light usually needs more than fluorescence |
+| Mask kernel size | morphological cleanup |
+| Grid size | density of tracked points |
+| Tracking mode | single vs multi-ROI |
+
+### How it reaches the tracker
+
+```
+ROI dashboard  →  tracking_RoIs.json
+               →  TrackingRunner merges every key into positions_config
+               →  MicroscopeInterface_MTB.refresh_filename(pos)
+               →  frames handed to the tracker are transformed
+```
+
+So the dashboard is **authoritative and per position** — different
+embryos can need different preprocessing. The channel's `invert` column
+is only a default for before any ROIs exist. Re-saving ROIs mid-run
+re-applies immediately, no restart.
+
+Two properties worth knowing:
+
+- Inversion works **within the data's own range**, not the dtype's, so
+  a frame spanning 11000–14800 keeps full contrast instead of
+  collapsing into the bottom of a 0–65535 scale.
+- **The file on disk stays raw.** Only what the tracker sees is
+  transformed, so later review and the dashboard show the real image,
+  and ROI geometry is unaffected.
+
+### If brightfield masking is still poor
+
+Raise the **blur factor** first — transmitted light is inherently
+lower-contrast than fluorescence and carries more texture. Then try
+downscaling, which both speeds things up and smooths. Global
+thresholding knobs (`containment_threshold`, `score_threshold`, `k`,
+`c0`) live in `tracking_tools/tracking_config.yaml` under
+`roi_tracker`.
 
 ---
 

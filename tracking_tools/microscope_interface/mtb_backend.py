@@ -169,6 +169,21 @@ class MicroscopeInterface_MTB:
             x, y, z = entry["xyz_um"]
             self._baseline_um[name] = (float(x), float(y), float(z))
 
+        # Per-position preprocessing, authored in the ROI selection
+        # dashboard and carried in tracking_RoIs.json. TrackingRunner
+        # merges every key of that file into positions_config and then
+        # calls refresh_filename(), which is how it reaches us.
+        self._invert: dict[str, bool] = {
+            name: bool(positions_config[name].get("invert", False))
+            for name in self.pos_names
+        }
+        # Which positions had it stated explicitly, so the channel
+        # default is not mistaken for an operator decision.
+        self._invert_explicit: set[str] = {
+            name for name in self.pos_names
+            if "invert" in positions_config[name]
+        }
+
         self._cum_drift: dict[str, list[float]] = {
             name: [0.0, 0.0, 0.0] for name in self.pos_names
         }
@@ -428,14 +443,14 @@ class MicroscopeInterface_MTB:
                          tp, pos_name, channel.get("name"), path)
 
             if idx == 0:
-                # The tracker thresholds for a BRIGHT object on a DARK
-                # background — true of fluorescence, but inverted in
-                # brightfield, where the background is the bright part
-                # and never gets thresholded out. Invert what the
-                # TRACKER sees; the file on disk stays raw.
+                # Invert what the TRACKER sees; the file on disk stays
+                # raw. The ROI dashboard is authoritative because that
+                # is where the operator configures what to track and
+                # sees the preview — the channel's flag is only the
+                # default until ROIs are saved.
                 self._image_queue.put(
                     (invert_for_tracking(img)
-                     if channel.get("invert") else img,
+                     if self.wants_invert(pos_name, channel) else img,
                      tp, pos_name)
                 )
 
@@ -668,10 +683,38 @@ class MicroscopeInterface_MTB:
         logger.info("%s: cum_drift updated -> (%.2f, %.2f, %.2f)",
                     position_name, *total)
 
+    def wants_invert(self, pos_name: str, channel: dict | None = None):
+        """Whether frames for this position are inverted for tracking.
+
+        The ROI selection dashboard wins: it is where the operator
+        decides what to track and previews the result, and its choice
+        travels in tracking_RoIs.json. The channel's flag is only a
+        default for before any ROIs exist.
+        """
+        with self._config_lock:
+            if pos_name in self._invert_explicit:
+                return self._invert[pos_name]
+        return bool((channel or {}).get("invert", False))
+
     def refresh_filename(self, pos_name: str) -> None:
-        """Re-read a baseline after the config changed on disk."""
+        """Re-read per-position config after it changed on disk.
+
+        Called by TrackingRunner when tracking_RoIs.json changes, after
+        it has merged that file into positions_config — so this is
+        where preprocessing chosen in the ROI dashboard reaches us.
+        """
         entry = self.positions_config.get(pos_name)
-        if not entry or "xyz_um" not in entry:
+        if not entry:
+            return
+
+        if "invert" in entry:
+            with self._config_lock:
+                self._invert[pos_name] = bool(entry["invert"])
+                self._invert_explicit.add(pos_name)
+            logger.info("%s: invert-for-tracking = %s (from ROI config)",
+                        pos_name, entry["invert"])
+
+        if "xyz_um" not in entry:
             return
         x, y, z = entry["xyz_um"]
         with self._config_lock:

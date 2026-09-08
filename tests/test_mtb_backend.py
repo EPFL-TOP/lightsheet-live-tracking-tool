@@ -1066,3 +1066,64 @@ def test_no_inversion_when_the_channel_does_not_ask(patched):
         iface.disconnect()
     assert got is not None
     assert got[4, 4] < got[0, 0], "fluorescence must not be inverted"
+
+
+# ====================================================================
+# Preprocessing is authored in the ROI dashboard
+#
+# The transformation belongs where the ROIs are configured: that is
+# where the operator sees the preview and decides what to track. It
+# travels in tracking_RoIs.json, which TrackingRunner merges into
+# positions_config before calling refresh_filename().
+# ====================================================================
+
+def test_invert_defaults_to_the_channel_flag(patched):
+    """Before any ROIs exist the channel's flag is all we have."""
+    make, _, _ = patched
+    iface = make()
+    assert iface.wants_invert("scene_000", {"invert": True}) is True
+    assert iface.wants_invert("scene_000", {"invert": False}) is False
+
+
+def test_roi_config_overrides_the_channel_flag(patched):
+    """The dashboard wins once the operator has chosen."""
+    make, _, _ = patched
+    iface = make()
+    iface.positions_config["scene_000"]["invert"] = False
+    iface.refresh_filename("scene_000")
+    # Channel says invert, ROI config says do not — ROI config wins.
+    assert iface.wants_invert("scene_000", {"invert": True}) is False
+
+    iface.positions_config["scene_000"]["invert"] = True
+    iface.refresh_filename("scene_000")
+    assert iface.wants_invert("scene_000", {"invert": False}) is True
+
+
+def test_invert_is_read_from_positions_config_at_construction(tmp_path):
+    iface = MicroscopeInterface_MTB(
+        {"p": {"xyz_um": (0.0, 0.0, 0.0), "invert": True}},
+        str(tmp_path), {},
+    )
+    assert iface.wants_invert("p") is True
+
+
+def test_invert_is_per_position(patched):
+    """Different positions can need different preprocessing."""
+    make, _, _ = patched
+    iface = make()
+    iface.positions_config["scene_000"]["invert"] = True
+    iface.positions_config["scene_001"]["invert"] = False
+    iface.refresh_filename("scene_000")
+    iface.refresh_filename("scene_001")
+    assert iface.wants_invert("scene_000") is True
+    assert iface.wants_invert("scene_001") is False
+
+
+def test_refresh_filename_without_invert_key_leaves_the_default(patched):
+    """An ROI file that predates the invert flag must not silently
+    switch preprocessing off."""
+    make, _, _ = patched
+    iface = make()
+    iface.positions_config["scene_000"].pop("invert", None)
+    iface.refresh_filename("scene_000")
+    assert iface.wants_invert("scene_000", {"invert": True}) is True

@@ -39,6 +39,15 @@ def make_layout():
     # Checkboxes
     checkbox_maxproj = CheckboxGroup(labels=["Max projection"], active=[0])
     checkbox_detection = CheckboxGroup(labels=["Use detection"], active=[])
+    # Transmitted light (brightfield) has a BRIGHT background, but the
+    # tracker segments for a bright object on a dark one — so in BF the
+    # background survives every threshold and the embryo is never
+    # isolated. Inverting fixes that, and it belongs here because this
+    # is where the ROIs are configured: the preview shows exactly what
+    # the tracker will see, and the flag travels in tracking_RoIs.json.
+    checkbox_invert = CheckboxGroup(
+        labels=["Invert contrast (brightfield)"], active=[]
+    )
     
     # Dropdowns
     downscale=['0','1','2','3','4','5']
@@ -278,6 +287,14 @@ def make_layout():
         blur_factor = int(dropdown_blur_factor.value)
         if blur_factor > 0 :
             working = gaussian(working, blur_factor, preserve_range=True)
+        # Invert contrast for brightfield. Applied within the data's own
+        # range, not the dtype's, so a frame spanning e.g. 11000..14800
+        # keeps full contrast instead of collapsing to the bottom of a
+        # 0..65535 scale.
+        if 0 in checkbox_invert.active :
+            lo, hi = float(np.min(working)), float(np.max(working))
+            if hi > lo :
+                working = (hi + lo) - working
         # Update data source
         working_source.data = dict(
             image=[working], x=[0], y=[0], dw=[working.shape[1]], dh=[working.shape[0]]
@@ -599,6 +616,11 @@ def make_layout():
         outdict = {
             'shape':original_source.data["image"][0].shape, 
             'detection':use_detection, 
+            # Read back by MicroscopeInterface_MTB.refresh_filename via
+            # TrackingRunner, which merges every key of this file into
+            # positions_config — so the preprocessing chosen here is
+            # what the tracker actually receives.
+            'invert': 0 in checkbox_invert.active, 
             'scaling_factor':int(dropdown_downscale.value),
             'blur_factor':int(dropdown_blur_factor.value),
             'mask_kernel_size':sigma_size_slider.value,
@@ -761,6 +783,7 @@ def make_layout():
     original_source.on_change("data", update_working)
     slice_slider.on_change("value", update_working)
     checkbox_maxproj.on_change("active", update_working)
+    checkbox_invert.on_change("active", update_working)
     mask_alpha_slider.on_change("value", update_mask_alpha)
     points_alpha_slider.on_change("value", update_points_alpha)
     sigma_size_slider.on_change("value_throttled", update_mask, update_points)
@@ -789,7 +812,8 @@ def make_layout():
         row(
             p,mk_div(),column(mk_div(),
                      row(dropdown_downscale,dropdown_blur_factor),dropdown_tracking_mode, 
-                     grid_size_slider, sigma_size_slider,checkbox_detection,
+                     grid_size_slider, sigma_size_slider,
+                     checkbox_invert, checkbox_detection,
                      mk_div(),mk_div(),
                      checkbox_maxproj, contrast_slider, 
                      dropdown_model,detect_button, mask_alpha_slider, 
