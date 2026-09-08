@@ -857,18 +857,36 @@ class MTBChangerDevice:
             return None
 
     def elements(self) -> list[dict]:
-        """All positions with whatever name is readable at that index."""
+        """All positions, each with the name of the element in it.
+
+        CONFIRMED against the stand's own display 2026-09-08:
+        `GetElement` indexes a 0-BASED array while `Position` is
+        1-based, so the element sitting at position p is at
+        **GetElement(p - 1)**.
+
+        The sideport turret proved it — the panel reports
+
+            position 1  VIS 100%, Sideport 0%
+            position 2  Sideport 100% Left
+            position 3  Sideport 100% Right
+
+        while GetElement(1) returned '100% L' and GetElement(2)
+        returned '100% R'. Reading GetElement(p) therefore labelled
+        every position with its NEIGHBOUR's element, which mislabelled
+        the whole light path and made the objective's magnification —
+        and hence the pixel pitch — wrong.
+        """
         out = []
         bounds = self.bounds
         if bounds is None:
             return out
         lo, hi = bounds
         cur = self.position
-        for idx in range(lo, hi + 1):
-            entry = {"index": idx, "name": None,
-                     "current": idx == cur, "error": None}
+        for pos in range(lo, hi + 1):
+            entry = {"index": pos, "name": None,
+                     "current": pos == cur, "error": None}
             try:
-                el = self._c.GetElement(idx)
+                el = self._c.GetElement(pos - 1)
                 entry["name"] = str(el.Name)
             except Exception as e:
                 entry["error"] = type(e).__name__
@@ -978,29 +996,30 @@ class MTBObjective:
         except Exception:
             return None
 
-    def _element(self):
-        """The changer element for the current position, cast onward.
+    def _element(self, position: int | None = None):
+        """The element at `position` (default: current), cast onward.
 
-        GetElement() hands back an IMTBChangerElement, which carries
-        only ElementType — so cast it to whatever objective-specific
-        interface exists before reading magnification off it.
+        Uses GetElement(position - 1): confirmed 2026-09-08 that
+        GetElement indexes a 0-based array while Position is 1-based.
+        Reading GetElement(position) returned the NEXT slot's
+        objective, so the magnification — and therefore the pixel
+        pitch and every drift correction — was silently wrong.
+
+        GetElement hands back an IMTBChangerElement carrying only
+        ElementType, so cast it to IMTBObjective before reading
+        magnification.
         """
-        pos = self.position
+        pos = self.position if position is None else position
         if pos is None:
             return None
-        for getter in ("GetElement", "GetElementAt", "Element"):
-            try:
-                fn = getattr(self._changer, getter)
-            except Exception:
-                continue
-            try:
-                el = fn(pos) if callable(fn) else fn[pos]
-            except Exception:
-                continue
-            if el is not None:
-                cast, _ = self._cast(el, self._ELEMENT_IFACES)
-                return cast
-        return None
+        try:
+            el = self._changer.GetElement(int(pos) - 1)
+        except Exception:
+            return None
+        if el is None:
+            return None
+        cast, _ = self._cast(el, self._ELEMENT_IFACES)
+        return cast
 
     @property
     def element_count(self) -> int | None:
@@ -1053,42 +1072,31 @@ class MTBObjective:
         return parse_magnification(self.name or "")
 
     def slots(self) -> list[dict]:
-        """Every nosepiece slot: index, name, magnification, aperture.
+        """Every nosepiece POSITION with the objective actually in it.
 
-        Reported in full rather than just the current one, because the
-        indexing convention is NOT settled. Every changer on this stand
-        — nosepiece, sideport, condenser, TL shutter — raises "Index was
-        outside the bounds of the array" for GetElement(MaxPosition),
-        which strongly suggests GetElement() indexes a 0-based array
-        while Position/MinPosition/MaxPosition are 1-based.
-
-        Consequences if that is right: the element for Position p is at
-        GetElement(p-1), and reading GetElement(p) returns the NEXT
-        slot's objective — a silently wrong magnification, hence a
-        silently wrong pixel pitch, hence every drift correction
-        mis-scaled. So show the operator all slots and let them confirm
-        against the light path rather than trusting the lookup.
-
-        Scanning starts at 0 so index 0 is not missed.
+        Iterates 1-based positions and reads each element at
+        GetElement(pos - 1) — confirmed 2026-09-08 against the stand's
+        own display that GetElement is 0-based while Position is
+        1-based. The previous version listed raw element indices, which
+        both mislabelled the objectives and offered index 0 as a
+        selectable slot, producing
+          rotation to slot 0 was refused; the turret is still at 2
         """
         out = []
         count = self.element_count or 0
-        for idx in range(0, count + 1):
-            entry = {"index": idx, "name": None, "magnification": None,
-                     "aperture": None, "empty": True, "error": None}
-            try:
-                raw = self._changer.GetElement(idx)
-            except Exception as e:
-                entry["error"] = f"{type(e).__name__}"
+        cur = self.position
+        for pos in range(1, count + 1):
+            entry = {"index": pos, "name": None, "magnification": None,
+                     "aperture": None, "empty": True, "error": None,
+                     "current": pos == cur}
+            el = self._element(pos)
+            if el is None:
+                entry["error"] = "unreadable"
                 out.append(entry)
                 continue
-            if raw is None:
-                out.append(entry)
-                continue
-            el, _ = self._cast(raw, self._ELEMENT_IFACES)
+
             name, _ = self._first_attr(el, self._NAME_ATTRS)
             entry["name"] = str(name) if name else None
-            # 'None' is how MTB labels an unpopulated slot.
             etype = None
             try:
                 etype = str(el.ElementType)
@@ -1096,6 +1104,7 @@ class MTBObjective:
                 pass
             entry["empty"] = (etype == "None"
                               or (entry["name"] or "").lower() == "none")
+
             mag, _ = self._first_attr(el, self._MAG_ATTRS)
             if mag is not None:
                 try:
@@ -1114,6 +1123,19 @@ class MTBObjective:
                     pass
             out.append(entry)
         return out
+
+    @property
+    def is_empty(self) -> bool:
+        """True when the current position holds no objective."""
+        el = self._element()
+        if el is None:
+            return True
+        try:
+            if str(el.ElementType) == "None":
+                return True
+        except Exception:
+            pass
+        return (self.name or "").lower() in ("", "none")
 
     def set_position(self, index: int, timeout_ms: int = 30000) -> int:
         """Rotate the nosepiece to `index`. Returns the position after.
@@ -1148,19 +1170,6 @@ class MTBObjective:
                     f"may be blocking the change."
                 )
         return self.position
-
-    @property
-    def is_empty(self) -> bool:
-        """True when the current slot holds no objective."""
-        el = self._element()
-        if el is None:
-            return True
-        try:
-            if str(el.ElementType) == "None":
-                return True
-        except Exception:
-            pass
-        return (self.name or "").lower() in ("", "none")
 
     def probe(self) -> dict:
         """Report what is readable and how — for diagnosing the API."""

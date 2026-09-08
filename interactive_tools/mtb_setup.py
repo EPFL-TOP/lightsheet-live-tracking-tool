@@ -1209,7 +1209,7 @@ class MTBSetupPanel:
         # (GetElementCount()=6 but GetElement(6) is out of bounds), so
         # the operator confirms against the light path rather than
         # trusting one possibly off-by-one lookup.
-        rows = ["| Slot | Objective | Mag | NA | Pixel µm |",
+        rows = ["| Position | Objective | Mag | NA | Pixel µm |",
                 "|---|---|---|---|---|"]
         options = {}
         for s in slots:
@@ -1232,7 +1232,7 @@ class MTBSetupPanel:
                 f"| {s['index']}{marker} | `{s['name']}` | | | |"
             )
             if pitch:
-                label = (f"Slot {s['index']}: {s['name']} "
+                label = (f"Position {s['index']}: {s['name']} "
                          f"({mag:g}×, {pitch:.4f} µm)")
                 options[label] = (s["index"], pitch)
 

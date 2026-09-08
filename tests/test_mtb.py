@@ -750,26 +750,47 @@ class FakeEmptyEl:
 
 
 class FakeNosepiece:
-    """Mirrors the real 6-slot changer, including the bad index 6."""
+    """Mirrors the real 6-slot changer.
+
+    Critically, GetElement is 0-BASED while Position is 1-based —
+    confirmed against the stand's own display 2026-09-08. So the
+    element at position p is GetElement(p - 1), and GetElement(count)
+    raises. Modelling it the other way round is what let the off-by-one
+    survive in the code for days.
+
+    Real layout: 10x at position 2, 40x at position 4, others empty.
+    """
+
+    #: keyed by 1-based POSITION
+    LAYOUT = {
+        1: None,
+        2: ("Fluar 10x/0.50 M27", 10.0, 0.5),
+        3: None,
+        4: ("Plan-Apochromat 40x/0.95 Korr M27", 40.0, 0.95),
+        5: None,
+        6: None,
+    }
 
     def __init__(self, position=3):
         self.Position = position
-        self._slots = {
-            1: FakeEmptyEl(),
-            2: FakeObjectiveEl("Fluar 10x/0.50 M27", 10.0, 0.5),
-            3: FakeEmptyEl(),
-            4: FakeObjectiveEl("Plan-Apochromat 40x/0.95 Korr M27",
-                               40.0, 0.95),
-            5: FakeEmptyEl(),
-        }
+        self.MinPosition = 1
+        self.MaxPosition = 6
 
     def GetElementCount(self):
-        return 6            # yes, 6 — but index 6 raises
+        return 6
 
     def GetElement(self, n):
-        if n not in self._slots:
-            raise RuntimeError("Index was outside the bounds of the array.")
-        return self._slots[n]
+        # n is a 0-based ARRAY INDEX; position = n + 1
+        pos = n + 1
+        if pos not in self.LAYOUT or n < 0 or n >= 6:
+            raise RuntimeError(
+                "Index was outside the bounds of the array."
+            )
+        spec = self.LAYOUT[pos]
+        if spec is None:
+            return FakeEmptyEl()
+        name, mag, na = spec
+        return FakeObjectiveEl(name, mag, na)
 
 
 def _nosepiece(position=3):
@@ -782,19 +803,34 @@ def _nosepiece(position=3):
     return obj
 
 
-def test_slots_lists_every_position_including_index_zero():
-    """Scanning starts at 0: every changer on this stand raises for
-    GetElement(MaxPosition), so GetElement() is very likely 0-based
-    while Position is 1-based. Index 0 must not be skipped."""
+def test_REGRESSION_slots_are_one_based_positions():
+    """slots() enumerates POSITIONS (1..count), not raw element
+    indices. Listing indices offered 0 as selectable and produced
+      rotation to slot 0 was refused; the turret is still at 2
+    """
     slots = _nosepiece().slots()
-    assert [s["index"] for s in slots] == [0, 1, 2, 3, 4, 5, 6]
+    assert [s["index"] for s in slots] == [1, 2, 3, 4, 5, 6]
+    assert all(s["index"] >= 1 for s in slots), "0 is not a position"
 
 
-def test_slots_flags_indices_that_raise():
-    """The out-of-bounds index is reported, not silently dropped."""
-    by_idx = {s["index"]: s for s in _nosepiece().slots()}
-    assert by_idx[6]["error"] is not None
-    assert by_idx[0]["error"] is not None    # fake has no slot 0
+def test_REGRESSION_slot_names_match_the_stands_own_display():
+    """The element at position p is GetElement(p-1) — confirmed
+    2026-09-08 against the stand's display. Reading GetElement(p)
+    labelled every position with its neighbour's objective, silently
+    corrupting the magnification and hence the pixel pitch."""
+    by_pos = {s["index"]: s for s in _nosepiece().slots()}
+    assert by_pos[2]["magnification"] == pytest.approx(10.0)
+    assert by_pos[4]["magnification"] == pytest.approx(40.0)
+    for pos in (1, 3, 5, 6):
+        assert by_pos[pos]["empty"], f"position {pos} should be empty"
+
+
+def test_slots_marks_the_current_position():
+    current = [s for s in _nosepiece(position=4).slots()
+               if s["current"]]
+    assert len(current) == 1
+    assert current[0]["index"] == 4
+    assert current[0]["magnification"] == pytest.approx(40.0)
 
 
 def test_slots_identifies_the_installed_objectives():
@@ -812,14 +848,6 @@ def test_slots_marks_empty_positions():
     for idx in (1, 3, 5):
         assert by_idx[idx]["empty"], f"slot {idx} should read empty"
         assert by_idx[idx]["magnification"] is None
-
-
-def test_slots_tolerates_the_out_of_bounds_index():
-    """GetElementCount() says 6 but GetElement(6) raises; that must be
-    reported, not crash the listing."""
-    by_idx = {s["index"]: s for s in _nosepiece().slots()}
-    assert by_idx[6]["error"] is not None
-    assert by_idx[6]["empty"]
 
 
 def test_is_empty_true_when_parked_on_an_empty_slot():
@@ -934,12 +962,12 @@ class FakeLightChanger:
         self.set_calls = []
 
     def GetElement(self, n):
-        # Real changers raise at MaxPosition — keep that behaviour so
-        # the 0-vs-1-based ambiguity stays visible in tests.
-        if not (1 <= n < self.MaxPosition + 1) or n > len(self._names):
+        # 0-BASED array index; position = n + 1. Confirmed against the
+        # stand's display: the sideport reports position 2 = "Sideport
+        # 100% Left" while GetElement(1) returns '100% L'.
+        if n < 0 or n >= len(self._names):
             raise RuntimeError("Index was outside the bounds")
-        el = type("El", (), {"Name": self._names[n - 1]})()
-        return el
+        return type("El", (), {"Name": self._names[n]})()
 
     def SetPosition(self, position, mode, timeout):
         self.set_calls.append((position, mode, timeout))
