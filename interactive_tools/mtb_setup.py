@@ -112,6 +112,11 @@ Z_STEPS = [0.1, 0.5, 1.0, 5.0, 10.0, 50.0]
 DEFAULT_EXPOSURE_MS = 5.0     # 5-20 ms is the good range; 50 saturates
 
 
+def _led_label(wavelength, on: bool) -> str:
+    """Unambiguous LED label: filled dot ON, hollow dot OFF."""
+    return f"{'●' if on else '○'} {wavelength} nm {'ON' if on else 'OFF'}"
+
+
 def _stretch(img: np.ndarray, lo_pct=1.0, hi_pct=99.5) -> np.ndarray:
     """Percentile-stretch to float 0..1, max-projecting a stack.
 
@@ -218,6 +223,10 @@ class MTBSetupPanel:
         self.btn_live = pn.widgets.Toggle(
             name="● Start live", button_type="warning", width=130,
             value=False,
+        )
+        self.preview_px = pn.widgets.Select(
+            name="Preview size", options=[300, 450, 600, 900, 1200],
+            value=600, width=120,
         )
         self.live_fps = pn.widgets.FloatInput(
             name="Live rate (fps)", value=2.0, start=0.2, end=20.0,
@@ -770,9 +779,22 @@ class MTBSetupPanel:
         self._render(img)
 
     def _render(self, img: np.ndarray) -> None:
-        """Push a frame into the existing glyph — no <img> swap."""
+        """Push a frame into the existing glyph — no <img> swap.
+
+        Decimates to the chosen preview size first. A full 1200x1200
+        float frame is ~5.8 MB over the websocket per update, which at
+        a few fps dominates the link and shows up as lag; at 600x600 it
+        is a quarter of that, and for framing and focusing the
+        difference is invisible. Panel/Bokeh serialise every frame to
+        the browser, so this is the single biggest lever on live-view
+        responsiveness.
+        """
         try:
             a = _stretch(img)
+            target = int(self.preview_px.value)
+            step = max(1, int(min(a.shape) // target))
+            if step > 1:
+                a = a[::step, ::step]
             h, w = a.shape
             self._img_fig.x_range.end = float(w)
             self._img_fig.y_range.end = float(h)
@@ -1056,9 +1078,10 @@ class MTBSetupPanel:
         for led in leds:
             lo, hi = led.intensity_limits
             toggle = pn.widgets.Toggle(
-                name=f"{led.wavelength} nm",
-                value=bool(led.is_on), width=110,
-                button_type="success",
+                name=_led_label(led.wavelength, bool(led.is_on)),
+                value=bool(led.is_on), width=140,
+                button_type=("danger" if led.is_on else "light"),
+                button_style=("solid" if led.is_on else "outline"),
             )
             slider = pn.widgets.FloatSlider(
                 name=f"{led.unit}", start=lo, end=hi,
@@ -1066,14 +1089,26 @@ class MTBSetupPanel:
                 step=1.0, width=330,
             )
 
-            def on_toggle(event, _led=led):
+            def on_toggle(event, _led=led, _tgl=toggle):
+                # Repaint the control so ON/OFF is unmistakable: a
+                # filled red button with a solid dot versus an outlined
+                # grey one with a hollow dot. Colour alone is not
+                # enough — the glyph reads correctly in either theme
+                # and for colour-blind users.
                 try:
                     _led.set_on(bool(event.new))
+                    _tgl.name = _led_label(_led.wavelength,
+                                           bool(event.new))
+                    _tgl.button_type = ("danger" if event.new
+                                        else "light")
+                    _tgl.button_style = ("solid" if event.new
+                                         else "outline")
                     self._say(
                         f"LED {_led.wavelength} nm "
                         f"{'ON' if event.new else 'OFF'}.", "ok",
                     )
                 except Exception as exc:
+                    _tgl.value = not bool(event.new)   # revert
                     self._say(
                         f"LED {_led.wavelength} nm would not switch: "
                         f"{exc}", "err",
@@ -1814,7 +1849,7 @@ class MTBSetupPanel:
         camera_column = pn.Column(
             "### Camera",
             pn.Row(self.exposure, self.btn_snap),
-            pn.Row(self.btn_live, self.live_fps),
+            pn.Row(self.btn_live, self.live_fps, self.preview_px),
             self.img_stats,
             self.preview,
             pn.layout.Divider(),

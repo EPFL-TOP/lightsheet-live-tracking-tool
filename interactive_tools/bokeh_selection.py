@@ -46,7 +46,23 @@ def make_layout():
     # is where the ROIs are configured: the preview shows exactly what
     # the tracker will see, and the flag travels in tracking_RoIs.json.
     checkbox_invert = CheckboxGroup(
-        labels=["Invert contrast (brightfield)"], active=[]
+        labels=["Invert contrast (brightfield preview)"], active=[]
+    )
+    # How the mask that FILTERS GRID POINTS is built. 'otsu' keeps
+    # whatever is brighter than the threshold — correct for
+    # fluorescence, but in transmitted light that is the BACKGROUND, so
+    # CoTracker ends up tracking background points. Measured on
+    # t0000_BF.tif for the points a tracker would actually keep:
+    #     otsu       44% on the embryo, 49% of its points recovered
+    #     invert    100% on the embryo, 52% recovered  (patchy mask)
+    #     texture    95% on the embryo, 91% recovered
+    threshold_types = ["otsu", "texture", "invert"]
+    dropdown_threshold = Select(
+        value="otsu", title="Grid mask (BF: use texture)",
+        options=threshold_types, width=200,
+    )
+    checkbox_showmask = CheckboxGroup(
+        labels=["Show grid mask"], active=[]
     )
     
     # Dropdowns
@@ -295,6 +311,31 @@ def make_layout():
             lo, hi = float(np.min(working)), float(np.max(working))
             if hi > lo :
                 working = (hi + lo) - working
+        # Optionally show the mask that will FILTER GRID POINTS, so a
+        # bad choice is visible here rather than discovered mid-run.
+        if 0 in checkbox_showmask.active :
+            try :
+                from tracking_tools.utils.tracking_utils import (
+                    filter_and_threshold,
+                )
+                mask = filter_and_threshold(
+                    working,
+                    gaussian_kernel=int(dropdown_blur_factor.value) or 11,
+                    threshold_type=dropdown_threshold.value,
+                )
+                lo, hi = float(np.min(working)), float(np.max(working))
+                # Dim everything the grid would reject.
+                working = np.where(
+                    np.asarray(mask).astype(bool), working,
+                    lo + (working - lo) * 0.25,
+                )
+                kept = float(np.mean(np.asarray(mask).astype(bool)))
+                status.text = (
+                    f"Grid mask '{dropdown_threshold.value}' keeps "
+                    f"{kept*100:.1f}% of the frame"
+                )
+            except Exception as exc :
+                status.text = f"Could not build the grid mask: {exc}"
         # Update data source
         working_source.data = dict(
             image=[working], x=[0], y=[0], dw=[working.shape[1]], dh=[working.shape[0]]
@@ -621,6 +662,10 @@ def make_layout():
             # positions_config — so the preprocessing chosen here is
             # what the tracker actually receives.
             'invert': 0 in checkbox_invert.active, 
+            # Selects how the grid-filtering mask is built. Read back
+            # by TrackingRunner.initialize_tracker and passed to the
+            # tracker in roi_tracker_params.
+            'threshold_type': dropdown_threshold.value, 
             'scaling_factor':int(dropdown_downscale.value),
             'blur_factor':int(dropdown_blur_factor.value),
             'mask_kernel_size':sigma_size_slider.value,
@@ -784,6 +829,8 @@ def make_layout():
     slice_slider.on_change("value", update_working)
     checkbox_maxproj.on_change("active", update_working)
     checkbox_invert.on_change("active", update_working)
+    dropdown_threshold.on_change("value", update_working)
+    checkbox_showmask.on_change("active", update_working)
     mask_alpha_slider.on_change("value", update_mask_alpha)
     points_alpha_slider.on_change("value", update_points_alpha)
     sigma_size_slider.on_change("value_throttled", update_mask, update_points)
@@ -813,7 +860,9 @@ def make_layout():
             p,mk_div(),column(mk_div(),
                      row(dropdown_downscale,dropdown_blur_factor),dropdown_tracking_mode, 
                      grid_size_slider, sigma_size_slider,
-                     checkbox_invert, checkbox_detection,
+                     dropdown_threshold,
+                     checkbox_invert, checkbox_showmask,
+                     checkbox_detection,
                      mk_div(),mk_div(),
                      checkbox_maxproj, contrast_slider, 
                      dropdown_model,detect_button, mask_alpha_slider, 

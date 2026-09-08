@@ -127,6 +127,20 @@ class TrackingRunner() :
 
         # Initialize tracker
         rois = self.positions_config[PosSetting]['RoIs']
+        # Chosen in the ROI selection dashboard and carried in
+        # tracking_RoIs.json. 'otsu' keeps the brighter side (right for
+        # fluorescence, wrong for transmitted light); 'texture'
+        # segments by local variance and suits both.
+        # roi_tracker_params is the dict that flows all the way down to
+        # the tracker, so per-position overrides ride along in it rather
+        # than as extra keyword arguments the intermediate layers would
+        # have to know about.
+        roi_tracker_params = dict(self.roi_tracker_params)
+        roi_tracker_params["threshold_type"] = (
+            self.positions_config[PosSetting].get(
+                "threshold_type", "otsu"
+            )
+        )
         tracker = self.tracker_class(
             first_frame=image,
             rois=rois,
@@ -138,7 +152,7 @@ class TrackingRunner() :
             grid_size=grid_size,
             mask_kernel_size=mask_kernel_size,
             position_name=position_name,
-            roi_tracker_params=self.roi_tracker_params,
+            roi_tracker_params=roi_tracker_params,
             position_tracker_params=self.position_tracker_params,
         )
         self.trackers[position_name] = tracker

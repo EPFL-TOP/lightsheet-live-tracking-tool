@@ -28,6 +28,7 @@ class SingleRoIBaseTracker_v2 :
             size_ratio_threshold,
             score_threshold,
             model_path,
+            threshold_type="otsu",
     ) :
         """ROI Tracker class. Uses CoTracker and Faster-RCNN to track an ROI in a streaming video.
         The compute_new_position() updates the tracker.
@@ -57,6 +58,12 @@ class SingleRoIBaseTracker_v2 :
         self.window_length = window_length
         self.grid_size = grid_size
         self.kernel_size_xy = base_kernel_size_xy // (2**scaling_factor)
+        # How the grid-filtering mask is built. 'otsu' keeps whatever is
+        # BRIGHTER than the threshold, which is right for fluorescence
+        # but selects the BACKGROUND in transmitted light. 'texture'
+        # segments by local variance instead and works for both.
+        # Supplied per position from tracking_RoIs.json.
+        self.threshold_type = threshold_type or "otsu"
         self.kernel_size_z = kernel_size_z
         self.log = log
         self.use_detection = use_detection
@@ -111,6 +118,7 @@ class SingleRoIBaseTracker_v2 :
                 if not k.startswith('_') and k in ["scaling_factor", "window_length", "grid_size",
                                                     "shape", "kernel_size_xy", "kernel_size_z",
                                                     "use_detection", "serverkit", "k", "c0", "containment_threshold",
+                                                    "threshold_type",
                                                     "score_threshold", "size_ratio_threshold"]]
         param_block = "\n".join(param_lines)
         self.logger.info(f"Initialized a new ROI tracker: \nParameters:\n{param_block}")
@@ -370,7 +378,7 @@ class SingleRoIBaseTracker_v2 :
         center_point = roi.to_position2D().to_array(order='yx')
         hws = [roi.height / 2, roi.width / 2]
 
-        points = generate_uniform_grid_in_region(frame, center_point, hws, grid_size=self.grid_size, gaussian_kernel=self.kernel_size_xy)
+        points = generate_uniform_grid_in_region(frame, center_point, hws, grid_size=self.grid_size, gaussian_kernel=self.kernel_size_xy, threshold_type=getattr(self, "threshold_type", "otsu"))
 
         if len(points) == 0:
             self.logger.warning(f"No query points generated for RoI.")
@@ -519,6 +527,7 @@ class MultiRoIBaseTracker :
             size_ratio_threshold,
             score_threshold,
             model_path,
+            threshold_type="otsu",
     ) :
         # Takes raw frames as input, handle processing (norm, scaling, projection), manage the sliding window
         # and manage the computation of the RoI position across frames
@@ -871,7 +880,7 @@ class MultiRoIBaseTracker :
             center_points_list.append(roi.to_position2D().to_array(order='yx'))
             hws_list.append([roi.height / 2, roi.width / 2])
 
-        points, queries_lengths = generate_uniform_grid_in_region_list(frame, center_points_list, hws_list, grid_size=self.grid_size, gaussian_kernel=self.mask_kernel_size)
+        points, queries_lengths = generate_uniform_grid_in_region_list(frame, center_points_list, hws_list, grid_size=self.grid_size, gaussian_kernel=self.mask_kernel_size, threshold_type=getattr(self, "threshold_type", "otsu"))
 
         # Log warning for no points
         for i, roi in enumerate(rois) :

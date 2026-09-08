@@ -831,3 +831,82 @@ def test_lightpath_roles_cover_the_transmitted_path():
     assert LIGHT_PATH_ROLES == (
         "tl_shutter", "condenser", "objective", "reflector", "sideport",
     )
+
+
+# ------------------------------------------------- LED button state
+
+def test_led_label_is_unambiguous_in_both_states():
+    """Colour alone is not enough — the glyph and the word read
+    correctly in either theme and for colour-blind users."""
+    from interactive_tools.mtb_setup import _led_label
+
+    on = _led_label(475, True)
+    off = _led_label(475, False)
+    assert "475" in on and "475" in off
+    assert "ON" in on and "OFF" in off
+    assert on != off
+    assert "●" in on and "○" in off
+
+
+def test_led_label_covers_every_wavelength_on_this_colibri():
+    from interactive_tools.mtb_setup import _led_label
+
+    for wl in (385, 430, 475, 511, 567, 630):
+        assert str(wl) in _led_label(wl, True)
+
+
+# --------------------------------------------- preview performance
+
+def test_preview_size_defaults_to_something_smaller_than_the_sensor(
+        panel_obj):
+    """Panel serialises every live frame to the browser, so sending a
+    full 1200x1200 float array per update dominates the link."""
+    assert panel_obj.preview_px.value < 1200
+    assert 1200 in panel_obj.preview_px.options
+
+
+def test_render_decimates_to_the_requested_size(panel_obj):
+    """A frame far larger than the preview must be decimated, not sent
+    whole."""
+    img = np.random.default_rng(0).integers(
+        11000, 14800, size=(1200, 1200), dtype=np.uint16
+    )
+    panel_obj.preview_px.value = 300
+    panel_obj._render(img)
+    shown = panel_obj._img_source.data["image"][0]
+    assert max(shown.shape) <= 400, (
+        f"preview was {shown.shape}, expected ~300 px"
+    )
+
+
+def test_render_does_not_upscale_a_small_frame(panel_obj):
+    img = np.random.default_rng(0).integers(
+        0, 255, size=(64, 64), dtype=np.uint16
+    )
+    panel_obj.preview_px.value = 600
+    panel_obj._render(img)
+    shown = panel_obj._img_source.data["image"][0]
+    assert shown.shape == (64, 64)
+
+
+def test_render_updates_in_place_rather_than_replacing_the_pane(
+        panel_obj):
+    """Mutating the ColumnDataSource is what avoids the white flash
+    between live frames; swapping a PNG pane's bytes reloads the
+    <img> and blanks it."""
+    source = panel_obj._img_source
+    img = np.random.default_rng(0).integers(
+        0, 255, size=(32, 32), dtype=np.uint16
+    )
+    panel_obj._render(img)
+    assert panel_obj._img_source is source, (
+        "the data source was replaced instead of updated"
+    )
+
+
+def test_render_handles_a_zstack_by_projecting(panel_obj):
+    stack = np.zeros((5, 64, 64), dtype=np.uint16)
+    stack[2] = 5000
+    panel_obj._render(stack)
+    shown = panel_obj._img_source.data["image"][0]
+    assert shown.ndim == 2
