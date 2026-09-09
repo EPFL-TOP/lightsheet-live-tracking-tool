@@ -18,6 +18,12 @@
         NOT on a card
 #>
 
+# ASCII ONLY in this file. Windows PowerShell 5.1 reads a .ps1 with no
+# byte-order mark as ANSI, so a UTF-8 multi-byte character arrives as
+# several bytes of nonsense, terminates whatever string it sits in and
+# cascades into a wall of unrelated parse errors. An em dash on one
+# comment line was enough to break the whole script.
+
 $ErrorActionPreference = "Continue"
 
 function Section($title) {
@@ -82,7 +88,7 @@ if ($slots) {
                            MaxDataWidth, Tag |
         Format-Table -AutoSize
 } else {
-    "Win32_SystemSlot returned nothing (common on OEM boards) —"
+    "Win32_SystemSlot returned nothing (common on OEM boards) -"
     "use the LocationInfo in section 3 and a physical inspection."
 }
 
@@ -110,10 +116,14 @@ foreach ($d in ($pci | Sort-Object Class, FriendlyName)) {
                 -ErrorAction Stop).Data
     } catch {}
 
-    $flag = if ($d.Status -ne "OK") { "   <<< STATUS $($d.Status)" } else { "" }
-    "[$($d.Status)] $($d.FriendlyName)$flag"
-    "        class    : $($d.Class)"
-    "        VEN_$ven DEV_$dev $(if($sub){"SUBSYS_$sub"})"
+    $flag = ""
+    if ($d.Status -ne "OK") { $flag = "   *** STATUS " + $d.Status }
+    $subText = ""
+    if ($sub) { $subText = " SUBSYS_" + $sub }
+
+    "[" + $d.Status + "] " + $d.FriendlyName + $flag
+    "        class    : " + $d.Class
+    "        VEN_" + $ven + " DEV_" + $dev + $subText
     if ($vendorName) { "        vendor   : $vendorName" }
     if ($loc) { "        location : $loc" }
     if ($svc) { "        driver   : $svc" }
