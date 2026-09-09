@@ -138,6 +138,20 @@ class MicroscopeInterface_MTB:
             "z_stack": bool(p.get("z_stack")),
         }]
         self.apply_channel = p.get("apply_channel")
+        # Light is gated to the EXPOSURE ONLY. Leaving it on across the
+        # settle, the stage moves and the inter-timepoint interval
+        # illuminates a live sample continuously — for a 60 s interval
+        # with a 200 ms exposure that is ~300x the necessary dose, which
+        # bleaches and cooks the embryo. illuminate(channel, on) is
+        # supplied by the GUI so hardware details stay in one place.
+        self.illuminate = p.get("illuminate")
+        # A mechanical shutter has finite cycles, so a long z-stack can
+        # optionally hold it open for the whole stack instead of per
+        # plane. LEDs are solid state and always switch per exposure —
+        # that is where the phototoxicity is.
+        self.gate_light_per_plane = bool(
+            p.get("gate_light_per_plane", True)
+        )
         # An injected session belongs to the caller: we must not log it
         # out, because MTB cannot Login again in this process.
         self._injected_session = p.get("session")
@@ -436,7 +450,8 @@ class MicroscopeInterface_MTB:
 
             want_stack = bool(channel.get("z_stack")) and self.z_stack
             img = self._acquire(pos_name, x, y, z, stack=want_stack,
-                                exposure_ms=channel.get("exposure_ms"))
+                                exposure_ms=channel.get("exposure_ms"),
+                                channel=channel)
             path = self._save(img, pos_name, tp,
                               channel=str(channel.get("name", "BF")))
             logger.debug("t=%d %s [%s] -> %s",
@@ -455,7 +470,7 @@ class MicroscopeInterface_MTB:
                 )
 
     def _acquire(self, pos_name, x, y, z, stack=None,
-                 exposure_ms=None) -> np.ndarray:
+                 exposure_ms=None, channel=None) -> np.ndarray:
         """One frame, or one z-stack, for this position.
 
         The per-plane grabber is passed in so a z-stack works with the
@@ -470,23 +485,58 @@ class MicroscopeInterface_MTB:
                 )
         else:
             def grab(zz):
-                return self._snap(exposure_ms)
+                return self._snap(exposure_ms, channel=channel,
+                                  gate=self.gate_light_per_plane)
 
         want = self.z_stack if stack is None else (
             stack and self.z_stack
         )
-        if want:
-            return self._acquire_stack(z, grab)
-        return grab(z)
+        if not want:
+            return grab(z)
 
-    def _snap(self, exposure_ms=None) -> np.ndarray:
+        # Holding a mechanical shutter open across the stack trades a
+        # larger light dose for fewer shutter cycles.
+        if not self.gate_light_per_plane and self.illuminate is not None \
+                and channel is not None:
+            self.illuminate(channel, True)
+            try:
+                return self._acquire_stack(z, grab)
+            finally:
+                try:
+                    self.illuminate(channel, False)
+                except Exception:
+                    logger.exception(
+                        "could not switch the light off after a stack"
+                    )
+        return self._acquire_stack(z, grab)
+
+    def _snap(self, exposure_ms=None, channel=None,
+              gate: bool = True) -> np.ndarray:
+        """Acquire one frame, illuminated only while integrating.
+
+        The `finally` matters: if the snap raises, the light must still
+        go out. Otherwise a failed frame leaves the sample under
+        continuous excitation until someone notices.
+        """
         with self._config_lock:
             self.mmc.setExposure(
                 float(exposure_ms) if exposure_ms is not None
                 else self.exposure_ms
             )
-        self.mmc.snapImage()
-        return np.asarray(self.mmc.getImage())
+        if gate and self.illuminate is not None and channel is not None:
+            self.illuminate(channel, True)
+        try:
+            self.mmc.snapImage()
+            return np.asarray(self.mmc.getImage())
+        finally:
+            if gate and self.illuminate is not None \
+                    and channel is not None:
+                try:
+                    self.illuminate(channel, False)
+                except Exception:
+                    logger.exception(
+                        "could not switch the light off after a frame"
+                    )
 
     def plane_offsets(self) -> list[float]:
         """Z offsets of the stack planes, symmetric about the centre.

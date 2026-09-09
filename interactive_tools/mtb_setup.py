@@ -321,11 +321,9 @@ class MTBSetupPanel:
         self.led_note = pn.pane.Markdown(
             "", width=620, styles={"font-size": "0.8em"},
         )
-        self.btn_tl_on = pn.widgets.Button(
-            name="TL light ON", width=130
-        )
-        self.btn_tl_off = pn.widgets.Button(
-            name="TL light OFF", width=130
+        self.tgl_tl = pn.widgets.Toggle(
+            name="○ Transmitted light OFF", value=False, width=210,
+            button_type="light", button_style="outline",
         )
 
         # --- positions ---
@@ -433,6 +431,14 @@ class MTBSetupPanel:
         self.zstack_step = pn.widgets.FloatInput(
             name="Z step (µm)", value=1.0, start=0.01, end=50.0,
             width=120,
+        )
+        # Light is always gated to the exposure. For a z-stack the
+        # question is only whether to switch it per PLANE (least light
+        # dose) or hold it for the whole stack (fewer mechanical
+        # shutter cycles). LEDs are solid state, so per-plane is the
+        # right default.
+        self.gate_per_plane = pn.widgets.Checkbox(
+            name="Switch light per z-plane (lower dose)", value=True,
         )
         self.max_xy = pn.widgets.FloatInput(
             name="Max XY correction (µm)", value=50.0, start=0.1,
@@ -560,8 +566,9 @@ class MTBSetupPanel:
         self.btn_config_refresh.on_click(
             lambda e: self._refresh_config_list()
         )
-        self.btn_tl_on.on_click(lambda e: self._set_tl(True))
-        self.btn_tl_off.on_click(lambda e: self._set_tl(False))
+        self.tgl_tl.param.watch(
+            lambda ev: self._set_tl(bool(ev.new)), "value"
+        )
         self.btn_add_channel.on_click(self._on_add_channel)
         self.btn_capture_channel.on_click(self._on_capture_channel)
         self.btn_del_channel.on_click(self._on_del_channel)
@@ -1272,15 +1279,27 @@ class MTBSetupPanel:
         self._refresh_config_list()
         self.config_status.object = f"Deleted `{name}`"
 
+    def _sync_tl_label(self, on: bool) -> None:
+        self.tgl_tl.name = (
+            f"{'●' if on else '○'} Transmitted light "
+            f"{'ON' if on else 'OFF'}"
+        )
+        self.tgl_tl.button_type = "warning" if on else "light"
+        self.tgl_tl.button_style = "solid" if on else "outline"
+
     def _set_tl(self, open_it: bool) -> None:
         """Open or close the transmitted-light shutter."""
-        if not self._require_connection():
+        if not self.connected:
+            self._sync_tl_label(False)
+            self._say("Connect the hardware first.", "warn")
             return
         try:
             self.session.changer("tl_shutter").set_open(open_it)
         except Exception as e:
             self._say(f"Could not switch transmitted light: {e}", "err")
+            self._sync_tl_label(not open_it)
             return
+        self._sync_tl_label(open_it)
         self._say(
             f"Transmitted light {'ON' if open_it else 'OFF'}.", "ok"
         )
@@ -1386,38 +1405,22 @@ class MTBSetupPanel:
         self._say(f"Deleted {len(rows)} channel(s).", "ok")
 
     def _apply_channel(self, channel: dict) -> None:
-        """Put the hardware into a channel's configuration.
+        """Configure the optics for a channel, WITHOUT switching light on.
 
-        Order matters: switch the LED FIRST, then the cube, then the
-        exposure — so a bright LED is never shining through the wrong
-        filter, and the exposure is already correct when the frame is
-        taken.
+        Split deliberately from `_illuminate`: the reflector cube and
+        exposure can be set well ahead of the exposure, but the light
+        must only be on while the sensor integrates. Combining them
+        left a live sample illuminated through every settle, stage move
+        and inter-timepoint interval.
+
+        Also switches everything OFF first, so a channel change never
+        leaves the previous channel's LED burning.
         """
-        led_nm = int(channel.get("led_nm", 0) or 0)
         try:
-            colibri = self.session.colibri()
-            if led_nm:
-                colibri.select(
-                    led_nm, float(channel.get("led_percent", 0.0) or 0.0)
-                )
-            else:
-                # Brightfield: no excitation at all.
-                colibri.all_off()
+            self._illuminate(channel, False)
         except Exception as e:
-            logger.warning("LED setup failed for channel %s: %s",
-                           channel.get("name"), e)
-
-        # Transmitted light. Leaving it on during fluorescence is what
-        # makes a "fluo" frame come back with a BRIGHT background —
-        # brightfield simply swamps the emission.
-        want_tl = bool(channel.get("tl", not led_nm))
-        try:
-            self.session.changer("tl_shutter").set_open(want_tl)
-        except Exception as e:
-            logger.warning(
-                "could not %s the transmitted-light shutter: %s",
-                "open" if want_tl else "close", e,
-            )
+            logger.warning("could not darken before a channel change: "
+                           "%s", e)
 
         pos = channel.get("reflector_pos") or 0
         if pos:
@@ -1425,6 +1428,43 @@ class MTBSetupPanel:
             self.session.changer("reflector").set_position(int(pos))
         if self.mmc is not None:
             self.mmc.setExposure(float(channel["exposure_ms"]))
+
+    def _illuminate(self, channel: dict, on: bool) -> None:
+        """Switch this channel's light on or off.
+
+        Called immediately around each exposure. LEDs are solid state
+        so switching them per frame costs nothing and is where the
+        phototoxicity saving is; the transmitted-light shutter is
+        mechanical, so long z-stacks can hold it open instead (see
+        `gate_light_per_plane`).
+        """
+        if not self.connected:
+            return
+        led_nm = int(channel.get("led_nm", 0) or 0)
+
+        try:
+            colibri = self.session.colibri()
+            if on and led_nm:
+                colibri.select(
+                    led_nm,
+                    float(channel.get("led_percent", 0.0) or 0.0),
+                )
+            else:
+                colibri.all_off()
+        except Exception as e:
+            logger.warning("LED switching failed for channel %s: %s",
+                           channel.get("name"), e)
+
+        # Transmitted light. Off during fluorescence regardless, since
+        # brightfield would swamp the emission.
+        want_tl = bool(channel.get("tl", not led_nm)) and on
+        try:
+            self.session.changer("tl_shutter").set_open(want_tl)
+        except Exception as e:
+            logger.warning(
+                "could not %s the transmitted-light shutter: %s",
+                "open" if want_tl else "close", e,
+            )
 
     def _on_snap_channels(self, _event=None) -> None:
         """Snap every channel in turn and show them side by side.
@@ -1448,8 +1488,12 @@ class MTBSetupPanel:
         for ch in chans:
             try:
                 self._apply_channel(ch)
-                self.mmc.snapImage()
-                img = np.asarray(self.mmc.getImage())
+                self._illuminate(ch, True)
+                try:
+                    self.mmc.snapImage()
+                    img = np.asarray(self.mmc.getImage())
+                finally:
+                    self._illuminate(ch, False)
             except Exception as e:
                 self._say(f"Channel {ch['name']} failed: {e}", "err")
                 logger.exception("channel snap failed")
@@ -1763,6 +1807,9 @@ class MTBSetupPanel:
             # and whether it is a stack.
             "channels": chans,
             "apply_channel": self._apply_channel,
+            # Light on only while the sensor integrates.
+            "illuminate": self._illuminate,
+            "gate_light_per_plane": bool(self.gate_per_plane.value),
             "interval_s": float(self.interval_s.value),
             "settle_s": float(self.settle_s.value),
             "max_xy_um": float(self.max_xy.value),
@@ -2161,7 +2208,7 @@ class MTBSetupPanel:
             self.lightpath_note,
             pn.layout.Divider(),
             "### Illumination",
-            pn.Row(self.btn_read_leds, self.btn_tl_on, self.btn_tl_off),
+            pn.Row(self.btn_read_leds, self.tgl_tl),
             self.led_rows,
             self.led_note,
             pn.layout.Divider(),
@@ -2204,6 +2251,7 @@ class MTBSetupPanel:
             pn.layout.Divider(),
             "### Z-stack",
             pn.Row(self.zstack_on, self.zstack_range, self.zstack_step),
+            pn.Row(self.gate_per_plane),
             pn.pane.Markdown(
                 "Applies to channels with `z_stack` ticked. Keep the "
                 "step above the actuator's resolution (~0.06 µm for the "

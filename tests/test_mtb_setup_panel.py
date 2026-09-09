@@ -1047,3 +1047,142 @@ def test_apply_config_does_not_move_optics_unless_asked(panel_obj):
     cfg = {"widgets": {}, "optics": {"sideport": 2, "condenser": 4}}
     panel_obj.apply_config(cfg, move_optics=False)
     assert moved == [], "optics moved without being asked"
+
+
+# --------------------------------------------- transmitted light toggle
+
+def test_tl_is_a_single_toggle_not_two_buttons(panel_obj):
+    assert hasattr(panel_obj, "tgl_tl")
+    assert not hasattr(panel_obj, "btn_tl_on")
+    assert not hasattr(panel_obj, "btn_tl_off")
+
+
+def test_tl_label_states_are_unambiguous(panel_obj):
+    panel_obj._sync_tl_label(False)
+    off = panel_obj.tgl_tl.name
+    panel_obj._sync_tl_label(True)
+    on = panel_obj.tgl_tl.name
+    assert "OFF" in off and "ON" in on
+    assert "○" in off and "●" in on
+    assert panel_obj.tgl_tl.button_type != "light"
+
+
+def test_tl_toggle_without_connection_reverts_and_warns(panel_obj):
+    panel_obj._set_tl(True)
+    assert "Connect the hardware" in panel_obj.status.object
+    assert "OFF" in panel_obj.tgl_tl.name
+
+
+# ------------------------------------------------- light gating in the UI
+
+def test_apply_channel_does_not_switch_light_on(panel_obj):
+    """Configuring optics and illuminating are separate: combining them
+    left a live sample lit through every settle and stage move."""
+    calls = []
+
+    class FakeChanger:
+        def set_position(self, p):
+            return p
+
+        def set_open(self, on):
+            calls.append(("tl", on))
+            return 1
+
+    class FakeColibri:
+        def select(self, nm, pct):
+            calls.append(("led_on", nm))
+
+        def all_off(self):
+            calls.append(("led_off", None))
+
+    class FakeSession:
+        def changer(self, role):
+            return FakeChanger()
+
+        def colibri(self):
+            return FakeColibri()
+
+    panel_obj.session = FakeSession()
+    panel_obj.motion = FakeMotion()
+    panel_obj.mmc = None
+
+    panel_obj._apply_channel(
+        {"name": "GFP", "reflector_pos": 3, "led_nm": 475,
+         "led_percent": 20.0, "exposure_ms": 200.0, "tl": False}
+    )
+    assert ("led_on", 475) not in calls, (
+        "applying a channel switched the LED on"
+    )
+    assert ("led_off", None) in calls, (
+        "applying a channel should darken first"
+    )
+
+
+def test_illuminate_switches_the_requested_led(panel_obj):
+    calls = []
+
+    class FakeChanger:
+        def set_open(self, on):
+            calls.append(("tl", on))
+            return 1
+
+    class FakeColibri:
+        def select(self, nm, pct):
+            calls.append(("led_on", nm, pct))
+
+        def all_off(self):
+            calls.append(("led_off",))
+
+    class FakeSession:
+        def changer(self, role):
+            return FakeChanger()
+
+        def colibri(self):
+            return FakeColibri()
+
+    panel_obj.session = FakeSession()
+    panel_obj.motion = FakeMotion()
+
+    ch = {"name": "GFP", "led_nm": 475, "led_percent": 20.0,
+          "tl": False, "exposure_ms": 200.0}
+    panel_obj._illuminate(ch, True)
+    assert ("led_on", 475, 20.0) in calls
+    calls.clear()
+    panel_obj._illuminate(ch, False)
+    assert ("led_off",) in calls
+
+
+def test_illuminate_keeps_tl_closed_for_a_fluorescence_channel(
+        panel_obj):
+    """Transmitted light would swamp the emission."""
+    states = []
+
+    class FakeChanger:
+        def set_open(self, on):
+            states.append(on)
+            return 1
+
+    class FakeColibri:
+        def select(self, nm, pct):
+            pass
+
+        def all_off(self):
+            pass
+
+    class FakeSession:
+        def changer(self, role):
+            return FakeChanger()
+
+        def colibri(self):
+            return FakeColibri()
+
+    panel_obj.session = FakeSession()
+    panel_obj.motion = FakeMotion()
+    panel_obj._illuminate(
+        {"name": "GFP", "led_nm": 475, "tl": False}, True
+    )
+    assert states == [False]
+
+
+def test_gate_per_plane_defaults_on(panel_obj):
+    assert panel_obj.gate_per_plane.value is True

@@ -1127,3 +1127,168 @@ def test_refresh_filename_without_invert_key_leaves_the_default(patched):
     iface.positions_config["scene_000"].pop("invert", None)
     iface.refresh_filename("scene_000")
     assert iface.wants_invert("scene_000", {"invert": True}) is True
+
+
+# ====================================================================
+# Illumination is gated to the exposure
+#
+# Leaving the light on across the settle, the stage moves and the
+# inter-timepoint interval illuminates a live sample continuously. For
+# a 60 s interval with a 200 ms exposure that is roughly 300x the
+# necessary dose — it bleaches and cooks the embryo. Reported
+# 2026-09-09.
+# ====================================================================
+
+class LightLog:
+    """Records every illuminate() call, and snap timing against it."""
+
+    def __init__(self):
+        self.events = []          # ('on'|'off', channel name)
+        self.snaps_while_lit = 0
+        self.snaps_while_dark = 0
+        self.lit = False
+
+    def illuminate(self, channel, on):
+        self.events.append(("on" if on else "off",
+                            channel.get("name")))
+        self.lit = bool(on)
+
+    def note_snap(self):
+        if self.lit:
+            self.snaps_while_lit += 1
+        else:
+            self.snaps_while_dark += 1
+
+
+class LoggingCore(FakeCore):
+    def __init__(self, light):
+        super().__init__()
+        self._light = light
+
+    def snapImage(self):
+        self._light.note_snap()
+
+
+def _run(iface, seconds=5.0):
+    iface.connect()
+    try:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            image, _, _ = iface.wait_for_image(timeout_ms=200)
+            if image is None and iface.stop_requested:
+                break
+    finally:
+        iface.disconnect()
+
+
+def test_REGRESSION_light_is_on_only_during_the_exposure(patched):
+    make, _, _ = patched
+    light = LightLog()
+    core = LoggingCore(light)
+    iface = make(
+        synthetic_source=None, mmc=core, camera_label="Cam",
+        stop_after_tp=2, illuminate=light.illuminate,
+        channels=[{"name": "GFP", "reflector_pos": 3, "led_nm": 475,
+                   "led_percent": 20.0, "exposure_ms": 200.0}],
+    )
+    _run(iface)
+
+    assert light.snaps_while_lit > 0, "no frame was taken with light on"
+    assert light.snaps_while_dark == 0, (
+        f"{light.snaps_while_dark} frame(s) taken in the dark"
+    )
+    # And the light must not be left on at the end.
+    assert light.events[-1][0] == "off", (
+        f"run ended with the light {light.events[-1][0]}"
+    )
+
+
+def test_light_is_switched_off_even_if_the_snap_fails(patched):
+    """A raised snap must not leave the sample under continuous
+    excitation until somebody notices."""
+    make, _, _ = patched
+    light = LightLog()
+
+    class Exploding(LoggingCore):
+        def snapImage(self):
+            raise RuntimeError("camera hiccup")
+
+    iface = make(
+        synthetic_source=None, mmc=Exploding(light),
+        camera_label="Cam", stop_after_tp=1,
+        illuminate=light.illuminate,
+        channels=[{"name": "GFP", "led_nm": 475, "exposure_ms": 200.0}],
+    )
+    _run(iface, seconds=3.0)
+
+    ons = [e for e in light.events if e[0] == "on"]
+    offs = [e for e in light.events if e[0] == "off"]
+    assert ons, "light never came on"
+    assert len(offs) >= len(ons), (
+        "light was switched on more often than off — it was left lit"
+    )
+
+
+def test_each_channel_switches_its_own_light(patched):
+    make, _, _ = patched
+    light = LightLog()
+    iface = make(
+        synthetic_source=None, mmc=LoggingCore(light),
+        camera_label="Cam", stop_after_tp=1,
+        illuminate=light.illuminate,
+        channels=[
+            {"name": "BF", "led_nm": 0, "exposure_ms": 5.0},
+            {"name": "GFP", "led_nm": 475, "exposure_ms": 200.0},
+        ],
+    )
+    _run(iface)
+    lit = [name for state, name in light.events if state == "on"]
+    assert "BF" in lit and "GFP" in lit
+
+
+def test_zstack_switches_light_per_plane_by_default(patched):
+    """Per-plane switching is the lower-dose option: holding the light
+    through the settle between planes multiplies the exposure."""
+    make, _, _ = patched
+    light = LightLog()
+    iface = make(
+        synthetic_source=None, mmc=LoggingCore(light),
+        camera_label="Cam", stop_after_tp=1,
+        illuminate=light.illuminate,
+        z_stack={"range_um": 4.0, "step_um": 1.0},
+        gate_light_per_plane=True,
+        channels=[{"name": "GFP", "led_nm": 475, "exposure_ms": 200.0,
+                   "z_stack": True}],
+    )
+    _run(iface)
+    ons = len([e for e in light.events if e[0] == "on"])
+    # 5 planes x 2 positions.
+    assert ons >= 10, f"expected per-plane switching, saw {ons} on-events"
+
+
+def test_zstack_can_hold_the_light_for_the_whole_stack(patched):
+    """Fewer mechanical shutter cycles, at the cost of a larger dose."""
+    make, _, _ = patched
+    light = LightLog()
+    iface = make(
+        synthetic_source=None, mmc=LoggingCore(light),
+        camera_label="Cam", stop_after_tp=1,
+        illuminate=light.illuminate,
+        z_stack={"range_um": 4.0, "step_um": 1.0},
+        gate_light_per_plane=False,
+        channels=[{"name": "GFP", "led_nm": 475, "exposure_ms": 200.0,
+                   "z_stack": True}],
+    )
+    _run(iface)
+    ons = len([e for e in light.events if e[0] == "on"])
+    # One per stack per position, not one per plane.
+    assert ons <= 4, f"expected per-stack switching, saw {ons} on-events"
+
+
+def test_no_illuminate_callback_still_acquires(patched):
+    """The backend must work standalone, without a GUI supplying the
+    light callback."""
+    make, _, tmp_path = patched
+    iface = make(stop_after_tp=1)      # synthetic source, no illuminate
+    _run(iface)
+    assert (tmp_path / "scene_000" / "t0000_BF.tif").exists()
