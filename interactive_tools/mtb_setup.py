@@ -30,6 +30,7 @@ import io
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -171,6 +172,10 @@ class MTBSetupPanel:
 
         self._build_widgets()
         self._wire()
+        try:
+            self._refresh_config_list()
+        except Exception as e:      # pragma: no cover - fs dependent
+            logger.info("could not list configurations: %s", e)
 
     # ------------------------------------------------------- widgets
 
@@ -275,6 +280,36 @@ class MTBSetupPanel:
             "", width=620, styles={"font-size": "0.8em"},
         )
         self._lightpath_widgets = {}
+
+        # --- configuration presets ---
+        # A whole setup — channels, timing, z-stack, drift parameters,
+        # optics — saved under a name and reloaded, so a repeat
+        # experiment does not mean rebuilding it from scratch.
+        self.config_dir = pn.widgets.TextInput(
+            name="Config folder", value="configs", width=300,
+        )
+        self.config_name = pn.widgets.TextInput(
+            name="Name", value="", width=220,
+            placeholder="e.g. embryo_BF_GFP_40x",
+        )
+        self.config_list = pn.widgets.Select(
+            name="Saved configurations", options=[], width=300,
+        )
+        self.btn_config_save = pn.widgets.Button(
+            name="Save", button_type="primary", width=90,
+        )
+        self.btn_config_load = pn.widgets.Button(
+            name="Load", button_type="success", width=90,
+        )
+        self.btn_config_refresh = pn.widgets.Button(
+            name="↻", width=45,
+        )
+        self.btn_config_delete = pn.widgets.Button(
+            name="Delete", button_type="danger", width=90,
+        )
+        self.config_status = pn.pane.Markdown(
+            "", width=600, styles={"font-size": "0.85em"},
+        )
 
         # --- LED live control (Optics tab) ---
         # Interactive tuning: pick an LED, slide the intensity, watch
@@ -519,6 +554,12 @@ class MTBSetupPanel:
         self.btn_read_objective.on_click(self._on_read_objective)
         self.btn_read_lightpath.on_click(self._on_read_lightpath)
         self.btn_read_leds.on_click(self._on_read_leds)
+        self.btn_config_save.on_click(self._on_config_save)
+        self.btn_config_load.on_click(self._on_config_load)
+        self.btn_config_delete.on_click(self._on_config_delete)
+        self.btn_config_refresh.on_click(
+            lambda e: self._refresh_config_list()
+        )
         self.btn_tl_on.on_click(lambda e: self._set_tl(True))
         self.btn_tl_off.on_click(lambda e: self._set_tl(False))
         self.btn_add_channel.on_click(self._on_add_channel)
@@ -1048,6 +1089,188 @@ class MTBSetupPanel:
             f"{f' @ {led_pct:g}%' if led_nm else ''}, "
             f"{self.exposure.value:g} ms.", "ok",
         )
+
+    # ------------------------------------------- configuration presets
+
+    #: Widgets captured by a saved configuration. Deliberately excludes
+    #: the experiment root and the position list: positions are stage
+    #: coordinates for one specific dish and must not be replayed onto
+    #: another, and the output folder must be fresh each run.
+    CONFIG_FIELDS = (
+        "exposure", "live_fps", "preview_px", "z_axis",
+        "camera_pixel_um", "adapter_mag", "pixel_xy", "pixel_z",
+        "tracking_2d", "serverkit", "max_xy", "max_z",
+        "interval_s", "n_timepoints", "settle_s",
+        "zstack_on", "zstack_range", "zstack_step",
+        "auto_track", "require_all_rois", "roi_poll_s",
+    )
+
+    def _config_folder(self) -> str:
+        folder = (self.config_dir.value or "configs").strip()
+        os.makedirs(folder, exist_ok=True)
+        return folder
+
+    def _refresh_config_list(self) -> None:
+        try:
+            folder = self._config_folder()
+            names = sorted(
+                f[:-5] for f in os.listdir(folder)
+                if f.endswith(".json")
+            )
+        except Exception as e:
+            self.config_status.object = f"❌ {e}"
+            return
+        self.config_list.options = names
+        if names and self.config_list.value not in names:
+            self.config_list.value = names[0]
+        self.config_status.object = (
+            f"{len(names)} configuration(s) in `{folder}`"
+            if names else f"No configurations yet in `{folder}`"
+        )
+
+    def current_config(self) -> dict:
+        """Everything needed to reproduce this setup, minus positions."""
+        cfg = {"_format": 1, "widgets": {}}
+        for name in self.CONFIG_FIELDS:
+            widget = getattr(self, name, None)
+            if widget is not None:
+                cfg["widgets"][name] = widget.value
+        cfg["channels"] = self.channels()
+        # Record the optics too, so a reload can restore the light path
+        # rather than leaving the operator to remember it.
+        optics = {}
+        try:
+            if self.connected:
+                for role in LIGHT_PATH_ROLES:
+                    try:
+                        optics[role] = self.session.changer(
+                            role
+                        ).position
+                    except Exception:
+                        pass
+                leds = []
+                for led in self.session.colibri().leds():
+                    leds.append({
+                        "wavelength": led.wavelength,
+                        "on": led.is_on,
+                        "intensity": led.intensity,
+                    })
+                optics["leds"] = leds
+        except Exception as e:
+            logger.info("optics not captured into the config: %s", e)
+        cfg["optics"] = optics
+        return cfg
+
+    def apply_config(self, cfg: dict, move_optics: bool = False) -> list:
+        """Restore a saved configuration. Returns any problems."""
+        problems = []
+        for name, value in (cfg.get("widgets") or {}).items():
+            widget = getattr(self, name, None)
+            if widget is None:
+                problems.append(f"unknown setting {name!r} — skipped")
+                continue
+            try:
+                widget.value = value
+            except Exception as e:
+                problems.append(f"{name}: {e}")
+
+        chans = cfg.get("channels")
+        if chans:
+            try:
+                import pandas as pd
+                self.chan_table.value = pd.DataFrame(chans)
+            except Exception as e:
+                problems.append(f"channels: {e}")
+
+        # Moving hardware is opt-in: loading a configuration to read it
+        # should not swing the turrets on a loaded sample.
+        if move_optics and self.connected:
+            optics = cfg.get("optics") or {}
+            for role in LIGHT_PATH_ROLES:
+                pos = optics.get(role)
+                if not pos:
+                    continue
+                try:
+                    self.session.changer(role).set_position(int(pos))
+                except Exception as e:
+                    problems.append(f"{role}: {e}")
+            for entry in optics.get("leds") or []:
+                if not entry.get("on"):
+                    continue
+                try:
+                    self.session.colibri().select(
+                        int(entry["wavelength"]),
+                        float(entry.get("intensity") or 0.0),
+                    )
+                except Exception as e:
+                    problems.append(f"LED {entry.get('wavelength')}: {e}")
+        return problems
+
+    def _on_config_save(self, _event=None) -> None:
+        name = (self.config_name.value or "").strip()
+        if not name:
+            self.config_status.object = "⚠️ Give the configuration a name."
+            return
+        # The name becomes a filename, so strip anything that could
+        # walk out of the folder. Dropping separators already prevents
+        # traversal, but runs of dots would still leave names like
+        # '....etcpasswd', so collapse them and never lead with one.
+        safe = "".join(c for c in name
+                       if c.isalnum() or c in "-_ ").strip()
+        safe = re.sub(r"\s+", "_", safe)
+        if not safe:
+            self.config_status.object = (
+                "⚠️ Name has no usable characters — use letters, "
+                "digits, hyphens or underscores."
+            )
+            return
+        path = os.path.join(self._config_folder(), f"{safe}.json")
+        try:
+            with open(path, "w") as fh:
+                json.dump(self.current_config(), fh, indent=2)
+        except Exception as e:
+            self.config_status.object = f"❌ Could not save: {e}"
+            return
+        self._refresh_config_list()
+        self.config_list.value = safe
+        self.config_status.object = f"✅ Saved `{safe}`"
+
+    def _on_config_load(self, _event=None) -> None:
+        name = self.config_list.value
+        if not name:
+            self.config_status.object = "⚠️ Nothing selected."
+            return
+        path = os.path.join(self._config_folder(), f"{name}.json")
+        try:
+            with open(path) as fh:
+                cfg = json.load(fh)
+        except Exception as e:
+            self.config_status.object = f"❌ Could not load: {e}"
+            return
+        problems = self.apply_config(cfg, move_optics=True)
+        self.config_name.value = name
+        note = f"✅ Loaded `{name}`"
+        if problems:
+            note += "\n\nProblems: " + "; ".join(problems[:6])
+        optics = cfg.get("optics") or {}
+        if not optics:
+            note += ("\n\n_No optics recorded in this configuration "
+                     "— set the light path by hand._")
+        self.config_status.object = note
+
+    def _on_config_delete(self, _event=None) -> None:
+        name = self.config_list.value
+        if not name:
+            self.config_status.object = "⚠️ Nothing selected."
+            return
+        try:
+            os.remove(os.path.join(self._config_folder(),
+                                   f"{name}.json"))
+        except Exception as e:
+            self.config_status.object = f"❌ Could not delete: {e}"
+            return
+        self._refresh_config_list()
+        self.config_status.object = f"Deleted `{name}`"
 
     def _set_tl(self, open_it: bool) -> None:
         """Open or close the transmitted-light shutter."""
@@ -1779,6 +2002,42 @@ class MTBSetupPanel:
                         break
                 return
 
+            # Discard frames acquired during the open-loop phase: they
+            # were queued BEFORE refresh_filename() applied the ROI
+            # preprocessing, so the tracker would start on raw frames
+            # and measure drift against a mask built the wrong way.
+            dropped = 0
+            while True:
+                img, _, _ = iface.wait_for_image(timeout_ms=50)
+                if img is None:
+                    break
+                dropped += 1
+            if dropped:
+                self._push_log(
+                    f"discarded {dropped} pre-tracking frame(s) "
+                    f"acquired before the ROI preprocessing applied"
+                )
+
+            # Say out loud what the tracker will actually do, so a
+            # mismatched configuration is visible in the log instead of
+            # showing up as points on the background.
+            for name in sorted(self._runner.positions_config):
+                cfg = self._runner.positions_config[name]
+                self._push_log(
+                    f"{name}: invert="
+                    f"{self._runner.wants_invert(name)} "
+                    f"grid_mask={cfg.get('threshold_type', 'otsu')} "
+                    f"blur={cfg.get('blur_factor', '?')}"
+                )
+                if cfg.get("threshold_type", "otsu") == "otsu" \
+                        and not self._runner.wants_invert(name):
+                    self._push_log(
+                        f"WARNING {name}: grid_mask=otsu with no invert "
+                        f"selects the BACKGROUND in brightfield — set "
+                        f"the grid mask to 'texture' in the ROI "
+                        f"dashboard"
+                    )
+
             self._push_status("▶ Closed-loop tracking active")
             self._push_log("closed-loop tracking via TrackingRunner")
             self._tracker.run_zeiss()
@@ -1980,6 +2239,30 @@ class MTBSetupPanel:
             width=620,
         )
 
+        tab_config = pn.Column(
+            "### Saved configurations",
+            pn.pane.Markdown(
+                "Stores channels, timing, z-stack, drift-correction "
+                "settings and the current optics under a name, so a "
+                "repeat experiment does not mean rebuilding it.\n\n"
+                "**Positions and the experiment root are deliberately "
+                "NOT saved.** Positions are stage coordinates for one "
+                "particular dish — replaying them onto another would "
+                "image the wrong places — and the output folder must be "
+                "fresh each run. Save positions separately on the "
+                "*Stage* tab.\n\n"
+                "Loading **does** move the turrets and LEDs to the "
+                "recorded optics, so check clearance first.",
+                width=600, styles={"font-size": "0.85em"},
+            ),
+            pn.Row(self.config_dir, self.btn_config_refresh),
+            pn.Row(self.config_name, self.btn_config_save),
+            pn.Row(self.config_list, self.btn_config_load,
+                   self.btn_config_delete),
+            self.config_status,
+            width=620,
+        )
+
         left = pn.Column(
             "# Axio Observer 7",
             pn.Row(self.btn_connect, self.z_axis),
@@ -1990,6 +2273,7 @@ class MTBSetupPanel:
                 ("Channels", tab_channels),
                 ("Acquisition", tab_acquire),
                 ("Run", tab_run),
+                ("Configs", tab_config),
                 dynamic=False,
             ),
             width=640,

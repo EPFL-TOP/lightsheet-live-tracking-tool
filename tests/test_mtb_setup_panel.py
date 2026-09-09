@@ -744,7 +744,7 @@ def test_layout_is_tabbed_in_workflow_order(panel_obj):
     walk(lay)
     assert tabs, "layout is not tabbed"
     assert tabs[0] == [
-        "Stage", "Optics", "Channels", "Acquisition", "Run",
+        "Stage", "Optics", "Channels", "Acquisition", "Run", "Configs",
     ]
 
 
@@ -910,3 +910,140 @@ def test_render_handles_a_zstack_by_projecting(panel_obj):
     panel_obj._render(stack)
     shown = panel_obj._img_source.data["image"][0]
     assert shown.ndim == 2
+
+
+# ====================================================================
+# Configuration presets
+#
+# A whole setup saved under a name so a repeat experiment does not mean
+# rebuilding it. Positions and the output folder are deliberately
+# excluded — see the test below for why.
+# ====================================================================
+
+def _in_tmp(tmp_path, panel_obj):
+    panel_obj.config_dir.value = str(tmp_path / "configs")
+    return panel_obj
+
+
+def test_config_round_trips_settings(panel_obj, tmp_path):
+    _in_tmp(tmp_path, panel_obj)
+    panel_obj.interval_s.value = 123.0
+    panel_obj.pixel_xy.value = 0.275
+    panel_obj.zstack_on.value = True
+    panel_obj.max_xy.value = 33.0
+    panel_obj.config_name.value = "embryo_40x"
+    panel_obj._on_config_save()
+    assert "Saved" in panel_obj.config_status.object
+
+    fresh = MTBSetupPanel()
+    _in_tmp(tmp_path, fresh)
+    fresh._refresh_config_list()
+    assert "embryo_40x" in fresh.config_list.options
+    fresh.config_list.value = "embryo_40x"
+    fresh._on_config_load()
+
+    assert fresh.interval_s.value == pytest.approx(123.0)
+    assert fresh.pixel_xy.value == pytest.approx(0.275)
+    assert fresh.zstack_on.value is True
+    assert fresh.max_xy.value == pytest.approx(33.0)
+
+
+def test_config_round_trips_channels(panel_obj, tmp_path):
+    _in_tmp(tmp_path, panel_obj)
+    panel_obj._on_add_channel()
+    names = [c["name"] for c in panel_obj.channels()]
+    panel_obj.config_name.value = "two_channels"
+    panel_obj._on_config_save()
+
+    fresh = MTBSetupPanel()
+    _in_tmp(tmp_path, fresh)
+    fresh._refresh_config_list()
+    fresh.config_list.value = "two_channels"
+    fresh._on_config_load()
+    assert [c["name"] for c in fresh.channels()] == names
+
+
+def test_config_excludes_positions_and_output_folder(panel_obj,
+                                                     tmp_path):
+    """Positions are stage coordinates for ONE dish — replaying them
+    onto another would image the wrong places. And the output folder
+    must be fresh each run, or frames collide."""
+    _in_tmp(tmp_path, panel_obj)
+    panel_obj.motion = FakeMotion(xyz=(111.0, 222.0, 250.0))
+    panel_obj._on_capture()
+    panel_obj.outdir.value = str(tmp_path / "experiment_A")
+
+    cfg = panel_obj.current_config()
+    blob = json.dumps(cfg)
+    assert "111" not in blob, "a stage coordinate leaked into the config"
+    assert "experiment_A" not in blob, "the output folder was saved"
+    assert "outdir" not in cfg["widgets"]
+    assert "pos_table" not in cfg["widgets"]
+
+
+def test_loading_does_not_clear_captured_positions(panel_obj,
+                                                   tmp_path):
+    _in_tmp(tmp_path, panel_obj)
+    panel_obj.config_name.value = "settings_only"
+    panel_obj._on_config_save()
+
+    panel_obj.motion = FakeMotion()
+    panel_obj._on_capture()
+    before = len(panel_obj.pos_table.value)
+
+    panel_obj.config_list.value = "settings_only"
+    panel_obj._on_config_load()
+    assert len(panel_obj.pos_table.value) == before
+
+
+def test_save_refuses_an_empty_name(panel_obj, tmp_path):
+    _in_tmp(tmp_path, panel_obj)
+    panel_obj.config_name.value = "   "
+    panel_obj._on_config_save()
+    assert "name" in panel_obj.config_status.object.lower()
+
+
+def test_save_sanitises_the_filename(panel_obj, tmp_path):
+    _in_tmp(tmp_path, panel_obj)
+    panel_obj.config_name.value = "../../etc/passwd"
+    panel_obj._on_config_save()
+    written = list((tmp_path / "configs").glob("*.json"))
+    assert all(".." not in f.name for f in written), written
+
+
+def test_delete_removes_a_configuration(panel_obj, tmp_path):
+    _in_tmp(tmp_path, panel_obj)
+    panel_obj.config_name.value = "throwaway"
+    panel_obj._on_config_save()
+    panel_obj.config_list.value = "throwaway"
+    panel_obj._on_config_delete()
+    panel_obj._refresh_config_list()
+    assert "throwaway" not in panel_obj.config_list.options
+
+
+def test_apply_config_reports_unknown_settings(panel_obj):
+    problems = panel_obj.apply_config(
+        {"widgets": {"no_such_widget": 1}}
+    )
+    assert any("no_such_widget" in p for p in problems)
+
+
+def test_apply_config_does_not_move_optics_unless_asked(panel_obj):
+    """Loading a configuration to inspect it must not swing the
+    turrets on a loaded sample."""
+    moved = []
+
+    class FakeChanger:
+        def set_position(self, p):
+            moved.append(p)
+            return p
+
+    class FakeSession:
+        def changer(self, role):
+            return FakeChanger()
+
+    panel_obj.session = FakeSession()
+    panel_obj.motion = FakeMotion()
+    cfg = {"widgets": {}, "optics": {"sideport": 2, "condenser": 4}}
+    panel_obj.apply_config(cfg, move_optics=False)
+    assert moved == [], "optics moved without being asked"
