@@ -109,6 +109,9 @@ logger = logging.getLogger(__name__)
 # on XY; the piezo resolves far finer.
 XY_STEPS = [1.0, 5.0, 10.0, 50.0, 100.0, 500.0]
 Z_STEPS = [0.1, 0.5, 1.0, 5.0, 10.0, 50.0]
+# The motorized focus spans +/-14 mm, so it needs coarser steps than
+# the piezo for finding a sample.
+FOCUS_STEPS = [1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0]
 
 DEFAULT_EXPOSURE_MS = 5.0     # 5-20 ms is the good range; 50 saturates
 
@@ -202,8 +205,23 @@ class MTBSetupPanel:
         self.xy_step = pn.widgets.Select(
             name="XY step (µm)", options=XY_STEPS, value=10.0, width=130
         )
+        # TWO Z axes, both always available. They are not
+        # interchangeable: the piezo is 0..500 um so it CANNOT go
+        # negative, which is why a single "Z" control pinned at 0 and
+        # gave no clue why. Coarse focusing needs the motorized drive
+        # (-14000..+14000 um); tracking wants the piezo.
         self.z_step = pn.widgets.Select(
-            name="Z step (µm)", options=Z_STEPS, value=1.0, width=130
+            name="Piezo step (µm)", options=Z_STEPS, value=1.0,
+            width=130,
+        )
+        self.focus_step = pn.widgets.Select(
+            name="Focus step (µm)", options=FOCUS_STEPS, value=10.0,
+            width=130,
+        )
+        self.btn_fm = pn.widgets.Button(name="− Focus", width=90)
+        self.btn_fp = pn.widgets.Button(name="+ Focus", width=90)
+        self.z_limits = pn.pane.Markdown(
+            "", width=380, styles={"font-size": "0.8em"},
         )
         self.btn_xm = pn.widgets.Button(name="← X", width=70)
         self.btn_xp = pn.widgets.Button(name="X →", width=70)
@@ -586,6 +604,12 @@ class MTBSetupPanel:
         self.btn_yp.on_click(lambda e: self._jog(dy=+self.xy_step.value))
         self.btn_zm.on_click(lambda e: self._jog(dz=-self.z_step.value))
         self.btn_zp.on_click(lambda e: self._jog(dz=+self.z_step.value))
+        self.btn_fm.on_click(
+            lambda e: self._jog_focus(-self.focus_step.value)
+        )
+        self.btn_fp.on_click(
+            lambda e: self._jog_focus(+self.focus_step.value)
+        )
 
     # -------------------------------------------------------- helpers
 
@@ -708,25 +732,117 @@ class MTBSetupPanel:
     def _update_position(self) -> None:
         if not self.connected:
             self.pos_readout.object = "`x — y — z —`"
+            self.z_limits.object = ""
             return
         try:
             x, y, z = self.motion.get_xyz()
-            self.pos_readout.object = (
-                f"`x {x:10.2f}   y {y:10.2f}   "
-                f"z {z:8.2f}  µm`"
-            )
+            parts = [f"`x {x:10.2f}   y {y:10.2f}   "
+                     f"{self.z_axis.value} {z:8.2f}  µm`"]
+            try:
+                focus = self.session.axis("focus").position
+                parts.append(f"`focus {focus:10.2f} µm`")
+            except Exception:
+                pass
+            self.pos_readout.object = "  ".join(parts)
         except Exception as e:
             self.pos_readout.object = f"`read failed: {e}`"
+            return
+
+        # Show the ranges: "why can't I go negative" should be
+        # answerable from the panel rather than by experiment.
+        rows = []
+        for label, role in (("piezo", "piezo"), ("focus", "focus")):
+            try:
+                axis = self.session.axis(role)
+                lo, hi = axis.limits
+                rows.append(f"{label} {lo:.0f} … {hi:.0f} µm")
+            except Exception:
+                pass
+        self.z_limits.object = (
+            "Ranges: " + " · ".join(rows) if rows else ""
+        )
 
     def _jog(self, dx=0.0, dy=0.0, dz=0.0) -> None:
+        """Jog the tracking axes. Reports when a limit stops a move.
+
+        Silent clamping is confusing: the piezo bottoms out at 0 um, so
+        pressing "- Z" simply did nothing and gave no reason.
+        """
         if not self._require_connection():
             return
+        before = self.motion.get_xyz()
         try:
             self.motion.move_by(dx=dx, dy=dy, dz=dz)
         except Exception as e:
             self._say(f"Move failed: {e}", "err")
             return
+        after = self.motion.get_xyz()
         self._update_position()
+        self._report_clamp(before, after, (dx, dy, dz))
+
+    def _report_clamp(self, before, after, wanted) -> None:
+        """Say so when an axis limit swallowed part of a move.
+
+        Wrapped defensively: this only explains what happened, so a
+        failure here must never surface as a failed jog.
+        """
+        labels = ("X", "Y", self.z_axis.value)
+        for i, (b, a, want) in enumerate(zip(before, after, wanted)):
+            if not want:
+                continue
+            moved = a - b
+            if abs(moved - want) <= max(0.05 * abs(want), 0.2):
+                continue
+            lo = hi = None
+            try:
+                axis = [self.motion.x, self.motion.y,
+                        self.motion.z][i]
+                lo, hi = axis.limits
+            except Exception:
+                pass
+            if lo is None:
+                self._say(
+                    f"{labels[i]} did not move as far as asked "
+                    f"({a:.2f} µm) — probably an axis limit.", "warn",
+                )
+                return
+            edge = "lower" if want < 0 else "upper"
+            self._say(
+                f"{labels[i]} stopped at its {edge} limit "
+                f"({a:.2f} µm; range {lo:.1f} … {hi:.1f}). "
+                + ("The piezo cannot go below 0 — use **Focus** for "
+                   "coarse movement." if self.z_axis.value == "piezo"
+                      and i == 2 and want < 0 else ""),
+                "warn",
+            )
+            return
+
+    def _jog_focus(self, delta: float) -> None:
+        """Jog the MOTORIZED focus, whatever the tracking Z axis is.
+
+        Always available: the piezo's 0..500 um range cannot reach a
+        sample that needs coarse focusing, and the motorized drive
+        spans +/-14 mm.
+        """
+        if not self._require_connection():
+            return
+        try:
+            axis = self.session.axis("focus")
+            before = axis.position
+            axis.move_by(delta)
+            after = axis.position
+        except Exception as e:
+            self._say(f"Focus move failed: {e}", "err")
+            return
+        self._update_position()
+        if abs((after - before) - delta) > max(0.05 * abs(delta), 0.2):
+            lo, hi = axis.limits
+            self._say(
+                f"Focus stopped at its limit ({after:.2f} µm; "
+                f"range {lo:.1f} … {hi:.1f}).", "warn",
+            )
+        else:
+            self._say(f"Focus at {after:.2f} µm.", "ok")
 
     # --------------------------------------------------------- camera
 
@@ -2165,15 +2281,26 @@ class MTBSetupPanel:
 
         tab_stage = pn.Column(
             "### Stage",
-            pn.Row(self.xy_step, self.z_step, self.btn_refresh),
+            pn.Row(self.xy_step, self.z_step, self.focus_step,
+                   self.btn_refresh),
             pn.Row(
                 pn.Column(
                     pn.Row(pn.Spacer(width=70), self.btn_yp),
                     pn.Row(self.btn_xm, self.btn_xp),
                     pn.Row(pn.Spacer(width=70), self.btn_ym),
                 ),
-                pn.Spacer(width=30),
+                pn.Spacer(width=20),
                 pn.Column(self.btn_zp, self.btn_zm),
+                pn.Spacer(width=20),
+                pn.Column(self.btn_fp, self.btn_fm),
+            ),
+            self.z_limits,
+            pn.pane.Markdown(
+                "**Z** drives the tracking actuator (piezo by default, "
+                "0…500 µm — it cannot go negative). **Focus** always "
+                "drives the motorized drive (±14 mm) and is what you "
+                "want for coarse focusing.",
+                width=600, styles={"font-size": "0.8em"},
             ),
             pn.layout.Divider(),
             "### Positions",

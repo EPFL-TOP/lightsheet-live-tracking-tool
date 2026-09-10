@@ -27,22 +27,71 @@ def panel_obj():
     return MTBSetupPanel()
 
 
+class FakeAxis:
+    """Mirrors MTBAxis closely enough for the panel's use."""
+
+    def __init__(self, position=0.0, lo=-1e6, hi=1e6):
+        self.position = position
+        self.limits = (lo, hi)
+        self.arrival_tolerance = 0.01
+        self.step = 0.01
+        self.typical_deviation = 0.0
+        self.max_deviation = 0.0
+        self.label = "fake"
+        self.moves = []
+
+    def move_to(self, target, **kw):
+        self.moves.append(target)
+        self.position = target
+        return target
+
+    def move_by(self, delta, **kw):
+        return self.move_to(self.position + delta)
+
+
 class FakeMotion:
+    """Stands in for MTBMotion.
+
+    Exposes .x/.y/.z because the real class does and the panel reads
+    them to report axis limits — a double that lags the real class
+    turns a diagnostic into an AttributeError.
+    """
+
     def __init__(self, xyz=(1.0, 2.0, 3.0)):
         self._xyz = xyz
+        self.z_role = "piezo"
+        self.x = FakeAxis(xyz[0])
+        self.y = FakeAxis(xyz[1])
+        # The piezo's real range: 0..500, so it cannot go negative.
+        self.z = FakeAxis(xyz[2], lo=0.0, hi=500.0)
         self.moved_to = []
         self.moved_by = []
 
     def get_xyz(self):
-        return self._xyz
+        # Read the axes, as MTBMotion does — a double that returns a
+        # frozen tuple makes every move look clamped.
+        return (self.x.position, self.y.position, self.z.position)
 
     def move_to(self, x=None, y=None, z=None):
         self.moved_to.append((x, y, z))
-        return self._xyz
+        if x is not None:
+            self.x.move_to(x)
+        if y is not None:
+            self.y.move_to(y)
+        if z is not None:
+            self.z.move_to(z)
+        return self.get_xyz()
 
     def move_by(self, dx=0.0, dy=0.0, dz=0.0):
         self.moved_by.append((dx, dy, dz))
-        return self._xyz
+        # Clamp to the axis limits, as the real one does: that is what
+        # makes the piezo floor at 0 observable in a test.
+        for axis, delta in ((self.x, dx), (self.y, dy), (self.z, dz)):
+            if not delta:
+                continue
+            lo, hi = axis.limits
+            axis.move_to(max(lo, min(hi, axis.position + delta)))
+        return self.get_xyz()
 
     def describe(self):
         return "fake"
@@ -1186,3 +1235,90 @@ def test_illuminate_keeps_tl_closed_for_a_fluorescence_channel(
 
 def test_gate_per_plane_defaults_on(panel_obj):
     assert panel_obj.gate_per_plane.value is True
+
+
+# ====================================================================
+# Two Z axes
+#
+# The piezo spans 0..500 um and CANNOT go negative; the motorized
+# focus spans +/-14 mm. A single "Z" control therefore pinned at 0
+# with no explanation when coarse focusing was needed. Reported
+# 2026-09-10.
+# ====================================================================
+
+def test_coarse_focus_controls_exist_alongside_the_piezo(panel_obj):
+    for name in ("btn_zp", "btn_zm", "btn_fp", "btn_fm",
+                 "z_step", "focus_step"):
+        assert hasattr(panel_obj, name), f"missing {name}"
+
+
+def test_focus_steps_are_coarser_than_piezo_steps():
+    from interactive_tools.mtb_setup import FOCUS_STEPS, Z_STEPS
+
+    assert max(FOCUS_STEPS) > max(Z_STEPS), (
+        "the motorized focus spans +/-14 mm and needs coarser steps"
+    )
+
+
+def test_focus_jog_uses_the_focus_axis_not_the_tracking_axis(panel_obj):
+    """Coarse focusing must work even when tracking is on the piezo."""
+    focus = FakeAxis(0.0, lo=-14000.0, hi=14000.0)
+
+    class FakeSession:
+        def axis(self, role):
+            assert role == "focus", f"asked for {role!r}, not focus"
+            return focus
+
+    panel_obj.motion = FakeMotion()
+    panel_obj.session = FakeSession()
+    panel_obj.z_axis.value = "piezo"
+
+    panel_obj._jog_focus(-500.0)
+    assert focus.position == pytest.approx(-500.0), (
+        "focus should reach negative values"
+    )
+
+
+def test_focus_jog_without_connection_is_a_no_op(panel_obj):
+    panel_obj._jog_focus(10.0)
+    assert "Connect the hardware" in panel_obj.status.object
+
+
+def test_REGRESSION_hitting_the_piezo_floor_is_explained(panel_obj):
+    """Silent clamping is what made this confusing: pressing '- Z' at
+    0 um simply did nothing."""
+    motion = FakeMotion(xyz=(0.0, 0.0, 0.0))
+    motion.z = FakeAxis(0.0, lo=0.0, hi=500.0)
+    panel_obj.motion = motion
+    panel_obj.z_axis.value = "piezo"
+
+    panel_obj._jog(dz=-10.0)
+    msg = panel_obj.status.object or ""
+    assert "limit" in msg.lower(), f"no explanation given: {msg!r}"
+    assert "Focus" in msg, (
+        "should point the operator at the coarse focus drive"
+    )
+
+
+def test_a_move_within_range_is_not_reported_as_clamped(panel_obj):
+    motion = FakeMotion(xyz=(0.0, 0.0, 250.0))
+    panel_obj.motion = motion
+    panel_obj._say("baseline")
+    panel_obj._jog(dz=-10.0)
+    assert "limit" not in (panel_obj.status.object or "").lower()
+
+
+def test_clamp_report_survives_a_motion_double_without_axes(panel_obj):
+    """The report only explains what happened — it must never turn a
+    successful jog into an error."""
+    class Bare:
+        def get_xyz(self):
+            return (0.0, 0.0, 0.0)
+
+        def move_by(self, **kw):
+            return (0.0, 0.0, 0.0)
+
+    panel_obj.motion = Bare()
+    panel_obj._jog(dz=-10.0)          # must not raise
+    # It should still say something useful about the short move.
+    assert "did not move" in (panel_obj.status.object or "").lower()
