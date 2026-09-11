@@ -1322,3 +1322,205 @@ def test_clamp_report_survives_a_motion_double_without_axes(panel_obj):
     panel_obj._jog(dz=-10.0)          # must not raise
     # It should still say something useful about the short move.
     assert "did not move" in (panel_obj.status.object or "").lower()
+
+
+# ====================================================================
+# Z-stack expressed as planes x step
+#
+# A range has to be divided by the step and rounded, so "10 um in 3 um
+# steps" silently yields 4 planes spanning 9 um. Plane count x step
+# says exactly what you get.
+# ====================================================================
+
+def test_zstack_config_is_planes_times_step(panel_obj):
+    panel_obj.zstack_on.value = True
+    panel_obj.zstack_planes.value = 7
+    panel_obj.zstack_step.value = 2.0
+    assert panel_obj.zstack_config() == {"n_planes": 7,
+                                         "step_um": 2.0}
+
+
+def test_zstack_config_is_none_when_disabled(panel_obj):
+    panel_obj.zstack_on.value = False
+    assert panel_obj.zstack_config() is None
+
+
+def test_stack_offsets_are_symmetric_and_match_the_backend(panel_obj):
+    from tracking_tools.microscope_interface.mtb_backend import (
+        MicroscopeInterface_MTB,
+    )
+
+    panel_obj.zstack_on.value = True
+    panel_obj.zstack_planes.value = 9
+    panel_obj.zstack_step.value = 1.5
+    ui = panel_obj.stack_offsets()
+
+    backend = MicroscopeInterface_MTB(
+        {"p": {"xyz_um": (0.0, 0.0, 0.0)}}, "/tmp",
+        {"z_stack": panel_obj.zstack_config()},
+    )
+    assert ui == pytest.approx(backend.plane_offsets()), (
+        "the panel preview and the backend must agree on the planes"
+    )
+    assert sum(ui) == pytest.approx(0.0)
+
+
+def test_zstack_info_states_the_derived_range(panel_obj):
+    panel_obj.zstack_on.value = True
+    panel_obj.zstack_planes.value = 11
+    panel_obj.zstack_step.value = 1.0
+    panel_obj._update_zstack_info()
+    text = panel_obj.zstack_info.object
+    assert "11 planes" in text
+    assert "10" in text, "the derived total range should be shown"
+
+
+def test_zstack_info_warns_when_the_step_is_unresolvable(panel_obj):
+    """Below the actuator's resolution, planes duplicate silently."""
+    panel_obj.motion = FakeMotion()
+    axis = FakeAxis(250.0, lo=0.0, hi=500.0)
+    axis.arrival_tolerance = 0.5
+
+    class FakeSession:
+        def axis(self, role):
+            return axis
+
+    panel_obj.session = FakeSession()
+    panel_obj.zstack_on.value = True
+    panel_obj.zstack_planes.value = 5
+    panel_obj.zstack_step.value = 0.05
+    panel_obj._update_zstack_info()
+    assert "resolution" in panel_obj.zstack_info.object
+
+
+def test_zstack_info_warns_when_the_stack_exceeds_the_range(panel_obj):
+    panel_obj.motion = FakeMotion()
+    axis = FakeAxis(250.0, lo=0.0, hi=500.0)
+
+    class FakeSession:
+        def axis(self, role):
+            return axis
+
+    panel_obj.session = FakeSession()
+    panel_obj.zstack_on.value = True
+    panel_obj.zstack_planes.value = 101
+    panel_obj.zstack_step.value = 10.0
+    panel_obj._update_zstack_info()
+    assert "clamped" in panel_obj.zstack_info.object
+
+
+def test_stack_edge_buttons_move_to_the_planned_extremes(panel_obj):
+    motion = FakeMotion(xyz=(0.0, 0.0, 250.0))
+    axis = FakeAxis(250.0, lo=0.0, hi=500.0)
+
+    class FakeSession:
+        def axis(self, role):
+            return axis
+
+    panel_obj.motion = motion
+    panel_obj.session = FakeSession()
+    panel_obj.zstack_on.value = True
+    panel_obj.zstack_planes.value = 11
+    panel_obj.zstack_step.value = 1.0     # +/- 5 um
+
+    panel_obj._goto_stack_edge(0)
+    assert motion.z.moves[-1] == pytest.approx(250.0)
+    panel_obj._goto_stack_edge(-1)
+    assert motion.z.moves[-1] == pytest.approx(245.0)
+    panel_obj._goto_stack_edge(+1)
+    assert motion.z.moves[-1] == pytest.approx(255.0)
+
+
+def test_stack_edges_are_relative_to_a_fixed_centre(panel_obj):
+    """Bottom then top must span the stack, not drift away from it."""
+    motion = FakeMotion(xyz=(0.0, 0.0, 250.0))
+    axis = FakeAxis(250.0, lo=0.0, hi=500.0)
+
+    class FakeSession:
+        def axis(self, role):
+            return axis
+
+    panel_obj.motion = motion
+    panel_obj.session = FakeSession()
+    panel_obj.zstack_on.value = True
+    panel_obj.zstack_planes.value = 11
+    panel_obj.zstack_step.value = 1.0
+
+    panel_obj._goto_stack_edge(0)
+    panel_obj._goto_stack_edge(-1)
+    axis.position = motion.z.position        # hardware follows
+    panel_obj._goto_stack_edge(+1)
+    assert motion.z.moves[-1] == pytest.approx(255.0), (
+        "top drifted because centre was re-read after moving"
+    )
+
+
+# ------------------------------------------- run banner and live view
+
+def test_banner_is_empty_when_idle(panel_obj):
+    assert not (panel_obj.run_banner.object or "")
+
+
+def test_banner_names_the_position_and_channel(panel_obj):
+    img = np.full((8, 8), 100, dtype=np.uint16)
+    panel_obj._on_backend_frame("scene_002", "GFP", 7, img)
+    banner = panel_obj.run_banner.object
+    assert "scene_002" in banner
+    assert "GFP" in banner
+    assert "t=7" in banner
+    assert "ACQUIRING" in banner
+
+
+def test_frames_populate_the_view_selectors(panel_obj):
+    panel_obj._on_backend_frame(
+        "scene_000", "BF", 0, np.full((8, 8), 1, dtype=np.uint16))
+    panel_obj._on_backend_frame(
+        "scene_000", "GFP", 0, np.zeros((4, 8, 8), dtype=np.uint16))
+    panel_obj._on_backend_frame(
+        "scene_001", "BF", 0, np.full((8, 8), 2, dtype=np.uint16))
+    assert list(panel_obj.view_position.options) == ["scene_000",
+                                                     "scene_001"]
+    assert set(panel_obj.view_channels.options) == {"BF", "GFP"}
+
+
+def test_plane_slider_follows_the_stack_depth(panel_obj):
+    panel_obj._on_backend_frame(
+        "scene_000", "GFP", 0, np.zeros((9, 16, 16), dtype=np.uint16))
+    panel_obj.view_position.value = "scene_000"
+    panel_obj.view_channels.value = ["GFP"]
+    panel_obj.view_maxproj.value = False
+    panel_obj._render_view()
+    assert panel_obj.view_plane.end == 8, (
+        f"slider ends at {panel_obj.view_plane.end}, expected 8"
+    )
+
+
+def test_single_channel_renders_greyscale(panel_obj):
+    img = np.random.default_rng(0).integers(
+        0, 4000, size=(16, 16), dtype=np.uint16)
+    panel_obj._on_backend_frame("scene_000", "BF", 0, img)
+    panel_obj.view_position.value = "scene_000"
+    panel_obj.view_channels.value = ["BF"]
+    panel_obj._render_view()
+    assert "BF" in panel_obj.view_info.object
+
+
+def test_two_channels_render_as_a_composite(panel_obj):
+    rng = np.random.default_rng(0)
+    for ch in ("BF", "GFP"):
+        panel_obj._on_backend_frame(
+            "scene_000", ch, 0,
+            rng.integers(0, 4000, size=(16, 16), dtype=np.uint16))
+    panel_obj.view_position.value = "scene_000"
+    panel_obj.view_channels.value = ["BF", "GFP"]
+    panel_obj._render_view()
+    shown = panel_obj._rgb_source.data["image"][0]
+    assert shown.dtype == np.uint32, "composite needs packed RGBA"
+    assert shown.shape[0] > 2, "composite was not drawn"
+    assert "+" in panel_obj.view_info.object
+
+
+def test_render_view_is_a_no_op_without_a_selection(panel_obj):
+    panel_obj.view_position.value = None
+    panel_obj.view_channels.value = []
+    panel_obj._render_view()          # must not raise

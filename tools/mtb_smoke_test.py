@@ -105,6 +105,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--objective", action="store_true",
                    help="Dump everything readable about the nosepiece, "
                         "so the magnification API can be identified.")
+    p.add_argument("--df2", action="store_true",
+                   help="Dump the Definite Focus 2 interface so "
+                        "autofocus can be wired up.")
     p.add_argument("--colibri", action="store_true",
                    help="Dump the Colibri LED controller exhaustively "
                         "— which interfaces it and each LED cast to, "
@@ -429,6 +432,107 @@ _LIGHTPATH_IDS = [
     "MTBOptovar", "MTBTLAperture", "MTBTLFieldStop",
     "MTBObservationChanger", "MTBCamera",
 ]
+
+
+def _dump_df2(root, asm, comp) -> None:
+    """Dump everything about the Definite Focus 2.
+
+    DF2 holds focus against thermal drift in hardware, which over a
+    multi-hour run beats correcting Z from images. The MM wiki
+    describes a 'Focus Method' with 'Measure' (learn the current
+    plane) and 'Apply' (return to it), and warns the Core timeout must
+    be raised to ~25 s because Measure is slow — so expect long calls.
+
+    Enumerate rather than assume: the same reflection scan settled the
+    objective and the Colibri.
+    """
+    import ZEISS.MTB.Api as api
+
+    if comp is None:
+        _log("  MTBFocusStabilizer2 absent")
+        return
+
+    try:
+        _log(f"  component: {comp.Name!r}")
+    except Exception:
+        pass
+
+    try:
+        types = [t for t in asm.GetTypes() if t is not None]
+    except Exception as e:
+        types = [t for t in (getattr(e, "Types", None) or []) if t]
+    ifaces = [t for t in types
+              if t.IsInterface and t.IsPublic
+              and (t.Name or "").startswith("IMTB")]
+
+    _log(f"  scanning {len(ifaces)} IMTB* interfaces")
+    hits = []
+    for t in sorted(ifaces, key=lambda x: x.Name):
+        try:
+            cast = getattr(api, t.Name)(comp)
+        except Exception:
+            continue
+        if cast is None:
+            continue
+        members = sorted(
+            a for a in dir(cast)
+            if not a.startswith(("_", "get_", "set_", "add_",
+                                 "remove_"))
+            and a not in ("Equals", "GetHashCode", "GetType",
+                          "ToString")
+        )
+        hits.append(t.Name)
+        _log(f"    {t.Name}:")
+        _log(f"        {members}")
+        # Read anything that looks like state; skip callables.
+        for a in members:
+            if not any(k in a.lower() for k in
+                       ("focus", "state", "mode", "offset", "stab",
+                        "period", "active", "busy", "method",
+                        "result", "surface")):
+                continue
+            try:
+                v = getattr(cast, a)
+                if not callable(v):
+                    _log(f"            {a} = {v!r}")
+            except Exception:
+                pass
+    _log(f"  castable to ({len(hits)}): {hits}")
+
+    _log()
+    _log("  Relevant enums:")
+    from System import Enum
+    for t in types:
+        nm = t.Name or ""
+        if t.IsEnum and any(k in nm for k in
+                            ("AutoFocus", "FocusStabilizer",
+                             "Focus")):
+            try:
+                _log(f"    {nm}: {list(Enum.GetNames(t))}")
+            except Exception:
+                pass
+
+    _log()
+    _log("  Method signatures on the stabilizer interfaces:")
+    for t in sorted(ifaces, key=lambda x: x.Name):
+        if "FocusStabilizer" not in (t.Name or "") and \
+                "AutoFocus" not in (t.Name or ""):
+            continue
+        try:
+            for m in sorted(t.GetMethods(), key=lambda x: x.Name):
+                params = ", ".join(
+                    f"{p.ParameterType.Name} {p.Name}"
+                    for p in m.GetParameters()
+                )
+                _log(f"    {t.Name}.{m.Name}({params}) "
+                     f"-> {m.ReturnType.Name}")
+        except Exception:
+            pass
+
+    _log()
+    _log("  What we need: a call to LEARN the current plane and one to")
+    _log("  RETURN to it, plus a way to read whether it is holding.")
+    _log("  Expect Measure to take seconds — raise any timeout.")
 
 
 def _dump_colibri(root, asm, comp) -> None:
@@ -1010,6 +1114,10 @@ def main() -> int:
         if args.objective:
             _hdr("OBJECTIVE / NOSEPIECE")
             _dump_objective(root, comps.get("objective"))
+
+        if args.df2:
+            _hdr("DEFINITE FOCUS 2")
+            _dump_df2(root, asm, comps.get("df2"))
 
         if args.colibri:
             _hdr("COLIBRI / FLUORESCENCE LEDS")

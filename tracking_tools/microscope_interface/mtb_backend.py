@@ -145,6 +145,11 @@ class MicroscopeInterface_MTB:
         # bleaches and cooks the embryo. illuminate(channel, on) is
         # supplied by the GUI so hardware details stay in one place.
         self.illuminate = p.get("illuminate")
+        # Called for EVERY channel, unlike wait_for_image() which
+        # yields only the first (the one drift is measured on). Lets a
+        # GUI show the newest frame of each channel and name what is
+        # being acquired.
+        self.on_frame = p.get("on_frame")
         # A mechanical shutter has finite cycles, so a long z-stack can
         # optionally hold it open for the whole stack instead of per
         # plane. LEDs are solid state and always switch per exposure —
@@ -457,6 +462,15 @@ class MicroscopeInterface_MTB:
             logger.debug("t=%d %s [%s] -> %s",
                          tp, pos_name, channel.get("name"), path)
 
+            if self.on_frame is not None:
+                try:
+                    self.on_frame(pos_name,
+                                  str(channel.get("name", "BF")),
+                                  tp, img)
+                except Exception:
+                    # A display callback must never break acquisition.
+                    logger.exception("on_frame callback failed")
+
             if idx == 0:
                 # Invert what the TRACKER sees; the file on disk stays
                 # raw. The ROI dashboard is authoritative because that
@@ -541,23 +555,35 @@ class MicroscopeInterface_MTB:
     def plane_offsets(self) -> list[float]:
         """Z offsets of the stack planes, symmetric about the centre.
 
-        Derived from range and step. The plane count follows the step,
-        and the offsets are then centred on zero so the stack is
-        symmetric even when the range is not an exact multiple of the
-        step — computing them as `-range/2 + i*step` left the last
-        plane short and the stack lopsided.
+        Specify either `n_planes` (preferred) or `range_um`. Plane
+        count is the honest parameter: a range has to be divided by the
+        step and rounded, so asking for 10 um in 3 um steps silently
+        gives 4 planes spanning 9 um. n_planes x step says exactly what
+        you get, and the range follows from it.
         """
-        rng = abs(float(self.z_stack.get("range_um", 10.0)))
         step = float(self.z_stack.get("step_um", 1.0))
         if step <= 0:
             raise ValueError(
                 f"z_stack step_um must be positive, got {step}"
             )
-        n = max(1, int(round(rng / step)) + 1)
+
+        n = self.z_stack.get("n_planes")
+        if n is None:
+            rng = abs(float(self.z_stack.get("range_um", 10.0)))
+            n = int(round(rng / step)) + 1
+        n = max(1, int(n))
         if n == 1:
             return [0.0]
         span = (n - 1) * step
         return [-span / 2.0 + i * step for i in range(n)]
+
+    @property
+    def stack_range_um(self) -> float:
+        """Total span of the stack, derived from planes and step."""
+        if not self.z_stack:
+            return 0.0
+        offsets = self.plane_offsets()
+        return offsets[-1] - offsets[0]
 
     def check_z_stack(self) -> list[str]:
         """Problems that would silently corrupt a stack. Empty if fine.

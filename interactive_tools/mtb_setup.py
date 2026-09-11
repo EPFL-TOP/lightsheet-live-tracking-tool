@@ -172,10 +172,12 @@ class MTBSetupPanel:
         self._run_thread = None
         self._stop_flag = threading.Event()
         self._live_cb = None         # Panel periodic callback handle
+        self._stack_centre = None    # remembered by the stack buttons
 
         self._build_widgets()
         self._wire()
         try:
+            self._update_zstack_info()
             self._refresh_config_list()
         except Exception as e:      # pragma: no cover - fs dependent
             logger.info("could not list configurations: %s", e)
@@ -278,7 +280,36 @@ class MTBSetupPanel:
             color_mapper=LinearColorMapper(palette="Greys256",
                                            low=0.0, high=1.0),
         )
+        # A second glyph for channel composites: image_rgba needs
+        # packed uint32, which the greyscale mapper cannot express.
+        self._rgb_source = ColumnDataSource(
+            data={"image": [np.zeros((2, 2), dtype=np.uint32)]}
+        )
+        self._img_fig.image_rgba(
+            image="image", x=0, y=0, dw=1, dh=1,
+            source=self._rgb_source,
+        )
         self.preview = pn.pane.Bokeh(self._img_fig)
+        # Navigation over the most recent acquisition: which position,
+        # which channels (overlaid as RGB), and which z-plane.
+        self.view_position = pn.widgets.Select(
+            name="Showing position", options=[], width=200,
+        )
+        self.view_channels = pn.widgets.MultiChoice(
+            name="Channels (overlay)", options=[], value=[],
+            width=300, max_items=3,
+        )
+        self.view_plane = pn.widgets.IntSlider(
+            name="Z plane", start=0, end=0, value=0, width=320,
+        )
+        self.view_maxproj = pn.widgets.Checkbox(
+            name="Max projection", value=True,
+        )
+        self.view_info = pn.pane.Markdown(
+            "", width=600, styles={"font-size": "0.8em"},
+        )
+        #: (position, channel) -> most recent frame
+        self._last_frames = {}
         self.img_stats = pn.pane.Markdown(
             "", width=600, styles={"font-size": "0.8em",
                                    "font-family": "monospace"},
@@ -442,9 +473,29 @@ class MTBSetupPanel:
         self.zstack_on = pn.widgets.Checkbox(
             name="Acquire Z-stack", value=False
         )
+        # Planes x step rather than range: a range must be divided by
+        # the step and rounded, so "10 um in 3 um steps" silently gives
+        # 4 planes spanning 9 um. Plane count says exactly what you get.
+        self.zstack_planes = pn.widgets.IntInput(
+            name="Planes", value=11, start=1, end=501, width=100,
+        )
         self.zstack_range = pn.widgets.FloatInput(
-            name="Z range (µm)", value=10.0, start=0.1, end=400.0,
-            width=120,
+            name="Z range (µm) [legacy]", value=10.0, start=0.1,
+            end=400.0, width=150, visible=False,
+        )
+        self.zstack_info = pn.pane.Markdown(
+            "", width=560, styles={"font-size": "0.85em"},
+        )
+        # Jump to the extremes of the planned stack, to check the whole
+        # range is actually in focus before committing to a run.
+        self.btn_z_bottom = pn.widgets.Button(
+            name="↧ Stack bottom", width=140
+        )
+        self.btn_z_centre = pn.widgets.Button(
+            name="◉ Stack centre", button_type="primary", width=140
+        )
+        self.btn_z_top = pn.widgets.Button(
+            name="↥ Stack top", width=140
         )
         self.zstack_step = pn.widgets.FloatInput(
             name="Z step (µm)", value=1.0, start=0.01, end=50.0,
@@ -554,6 +605,13 @@ class MTBSetupPanel:
             disabled=True,
         )
         self.run_status = pn.pane.Markdown("_Idle._", width=560)
+        # A prominent banner: a run moves the stage and illuminates the
+        # sample, so it must be obvious from any tab that one is live.
+        self.run_banner = pn.pane.Markdown(
+            "", width=1280,
+            styles={"font-size": "1.05em", "padding": "8px 14px",
+                    "border-radius": "6px"},
+        )
         self.run_log = pn.pane.Markdown(
             "", width=560,
             styles={"font-size": "0.8em", "font-family": "monospace",
@@ -578,6 +636,16 @@ class MTBSetupPanel:
         self.btn_read_objective.on_click(self._on_read_objective)
         self.btn_read_lightpath.on_click(self._on_read_lightpath)
         self.btn_read_leds.on_click(self._on_read_leds)
+        self.btn_z_bottom.on_click(lambda e: self._goto_stack_edge(-1))
+        self.btn_z_centre.on_click(lambda e: self._goto_stack_edge(0))
+        self.btn_z_top.on_click(lambda e: self._goto_stack_edge(+1))
+        for w in (self.zstack_planes, self.zstack_step,
+                  self.zstack_on):
+            w.param.watch(lambda ev: self._update_zstack_info(),
+                          "value")
+        for w in (self.view_position, self.view_channels,
+                  self.view_plane, self.view_maxproj):
+            w.param.watch(lambda ev: self._render_view(), "value")
         self.btn_config_save.on_click(self._on_config_save)
         self.btn_config_load.on_click(self._on_config_load)
         self.btn_config_delete.on_click(self._on_config_delete)
@@ -964,6 +1032,13 @@ class MTBSetupPanel:
             self._img_fig.y_range.end = float(h)
             # Bokeh draws bottom-up; flip so the image is not mirrored.
             self._img_source.data = {"image": [a[::-1]]}
+            # Blank the RGBA glyph or a previous composite shows through.
+            try:
+                self._rgb_source.data = {
+                    "image": [np.zeros((2, 2), dtype=np.uint32)]
+                }
+            except Exception:
+                pass
             for r in self._img_fig.renderers:
                 for attr in ("dw", "dh"):
                     try:
@@ -1402,6 +1477,93 @@ class MTBSetupPanel:
         )
         self.tgl_tl.button_type = "warning" if on else "light"
         self.tgl_tl.button_style = "solid" if on else "outline"
+
+    # ------------------------------------------------------- z-stack
+
+    def zstack_config(self) -> dict | None:
+        """The z-stack in planes x step form, or None if disabled."""
+        if not self.zstack_on.value:
+            return None
+        return {
+            "n_planes": int(self.zstack_planes.value),
+            "step_um": float(self.zstack_step.value),
+        }
+
+    def stack_offsets(self) -> list[float]:
+        """Plane offsets about the centre, same maths as the backend."""
+        n = max(1, int(self.zstack_planes.value))
+        step = float(self.zstack_step.value)
+        if n == 1 or step <= 0:
+            return [0.0]
+        span = (n - 1) * step
+        return [-span / 2.0 + i * step for i in range(n)]
+
+    def _update_zstack_info(self) -> None:
+        """Show the derived range, and whether the axis can reach it."""
+        if not self.zstack_on.value:
+            self.zstack_info.object = "_Z-stack off._"
+            return
+        offsets = self.stack_offsets()
+        span = offsets[-1] - offsets[0]
+        note = (f"**{len(offsets)} planes x "
+                f"{self.zstack_step.value:g} µm = {span:g} µm total** "
+                f"({offsets[0]:+g} … {offsets[-1]:+g} µm about the "
+                f"current focus)")
+
+        # Warn early rather than at run time: both of these produce
+        # duplicate planes rather than an error.
+        try:
+            if self.connected:
+                axis = self.session.axis(self.z_axis.value)
+                lo, hi = axis.limits
+                here = axis.position
+                if here + offsets[0] < lo or here + offsets[-1] > hi:
+                    note += (f"\n\n⚠️ At Z={here:.2f} this stack needs "
+                             f"{here + offsets[0]:.2f} … "
+                             f"{here + offsets[-1]:.2f} µm, outside the "
+                             f"{self.z_axis.value}'s {lo:.1f} … "
+                             f"{hi:.1f} µm range — outer planes would "
+                             f"be clamped and duplicated.")
+                tol = axis.arrival_tolerance
+                if float(self.zstack_step.value) < tol:
+                    note += (f"\n\n⚠️ Step {self.zstack_step.value:g} µm "
+                             f"is below the {self.z_axis.value}'s "
+                             f"{tol:g} µm resolution — planes would not "
+                             f"move and would duplicate.")
+        except Exception:
+            pass
+        self.zstack_info.object = note
+
+    def _goto_stack_edge(self, where: int) -> None:
+        """Move Z to the bottom (-1), centre (0) or top (+1) plane.
+
+        Centre is remembered on the first jump so bottom/top are
+        relative to the stack you set up, not to wherever the last
+        press left the focus.
+        """
+        if not self._require_connection():
+            return
+        offsets = self.stack_offsets()
+        if getattr(self, "_stack_centre", None) is None or where == 0:
+            try:
+                self._stack_centre = self.session.axis(
+                    self.z_axis.value
+                ).position
+            except Exception as e:
+                self._say(f"Could not read Z: {e}", "err")
+                return
+        target = self._stack_centre + (
+            offsets[0] if where < 0 else
+            offsets[-1] if where > 0 else 0.0
+        )
+        try:
+            self.motion.z.move_to(target)
+        except Exception as e:
+            self._say(f"Z move failed: {e}", "err")
+            return
+        self._update_position()
+        label = {-1: "bottom", 0: "centre", 1: "top"}[where]
+        self._say(f"Z at stack {label}: {target:.2f} µm.", "ok")
 
     def _set_tl(self, open_it: bool) -> None:
         """Open or close the transmitted-light shutter."""
@@ -1925,6 +2087,9 @@ class MTBSetupPanel:
             "apply_channel": self._apply_channel,
             # Light on only while the sensor integrates.
             "illuminate": self._illuminate,
+            # So the banner can name what is being acquired, and the
+            # preview can show the newest frame of every channel.
+            "on_frame": self._on_backend_frame,
             "gate_light_per_plane": bool(self.gate_per_plane.value),
             "interval_s": float(self.interval_s.value),
             "settle_s": float(self.settle_s.value),
@@ -1938,11 +2103,9 @@ class MTBSetupPanel:
             "mmc": self.mmc,
             "camera_label": self._cam_label,
         }
-        if self.zstack_on.value:
-            params["z_stack"] = {
-                "range_um": float(self.zstack_range.value),
-                "step_um": float(self.zstack_step.value),
-            }
+        zs = self.zstack_config()
+        if zs:
+            params["z_stack"] = zs
 
         try:
             self._runner = MicroscopeInterface_MTB(
@@ -1981,6 +2144,10 @@ class MTBSetupPanel:
         self.run_status.object = (
             f"▶ Tracking {len(self.positions_config())} position(s) "
             f"into `{root}`"
+        )
+        self._set_banner(
+            f"**● ACQUIRING** — {len(self.positions_config())} "
+            f"position(s) into `{root}`", running=True,
         )
         self._append_log("run started")
 
@@ -2222,6 +2389,165 @@ class MTBSetupPanel:
         except Exception:
             self._append_log(msg)
 
+    # -------------------------------------- run banner and last frame
+
+    def _set_banner(self, text: str = "", running: bool = False) -> None:
+        """Prominent, always-visible run indicator.
+
+        A run moves the stage and illuminates the sample, so it must be
+        obvious from any tab that one is live — the small status line
+        was easy to miss.
+        """
+        if not text:
+            self.run_banner.object = ""
+            self.run_banner.styles = dict(self.run_banner.styles or {},
+                                          background="")
+            return
+        self.run_banner.object = text
+        self.run_banner.styles = dict(
+            self.run_banner.styles or {},
+            background=("#7f1d1d" if running else "#1f2937"),
+            color="#ffffff",
+        )
+
+    def _push_banner(self, text: str, running: bool = True) -> None:
+        try:
+            pn.state.execute(
+                lambda: self._set_banner(text, running)
+            )
+        except Exception:
+            self._set_banner(text, running)
+
+    def _note_frame(self, pos_name: str, channel: str,
+                    img: np.ndarray) -> None:
+        """Remember the newest frame and refresh the view options."""
+        self._last_frames[(pos_name, channel)] = img
+
+        def apply():
+            positions = sorted({p for p, _ in self._last_frames})
+            if list(self.view_position.options) != positions:
+                self.view_position.options = positions
+            if not self.view_position.value and positions:
+                self.view_position.value = positions[0]
+
+            shown = self.view_position.value or pos_name
+            channels = sorted({c for p, c in self._last_frames
+                               if p == shown})
+            if list(self.view_channels.options) != channels:
+                self.view_channels.options = channels
+            if not self.view_channels.value and channels:
+                self.view_channels.value = channels[:1]
+            self._render_view()
+
+        try:
+            pn.state.execute(apply)
+        except Exception:
+            apply()
+
+    def _render_view(self) -> None:
+        """Draw the selected position/channels/plane into the preview.
+
+        Several channels are composited as RGB so they can be compared
+        directly; one channel renders as greyscale.
+        """
+        pos = self.view_position.value
+        chans = list(self.view_channels.value or [])
+        if not pos or not chans:
+            return
+
+        frames = []
+        for ch in chans:
+            img = self._last_frames.get((pos, ch))
+            if img is not None:
+                frames.append((ch, np.asarray(img)))
+        if not frames:
+            return
+
+        depth = max((f.shape[0] if f.ndim == 3 else 1)
+                    for _, f in frames)
+        if depth > 1 and not self.view_maxproj.value:
+            if self.view_plane.end != depth - 1:
+                self.view_plane.end = depth - 1
+                self.view_plane.value = min(self.view_plane.value,
+                                            depth - 1)
+        else:
+            self.view_plane.end = max(0, depth - 1)
+
+        planes = []
+        for ch, img in frames:
+            if img.ndim == 3:
+                if self.view_maxproj.value:
+                    planes.append((ch, img.max(axis=0)))
+                else:
+                    idx = min(int(self.view_plane.value),
+                              img.shape[0] - 1)
+                    planes.append((ch, img[idx]))
+            else:
+                planes.append((ch, img))
+
+        if len(planes) == 1:
+            self._render(planes[0][1])
+            label = planes[0][0]
+        else:
+            # Composite: first three channels into R, G, B.
+            base = _stretch(planes[0][1])
+            rgb = np.zeros(base.shape + (3,), dtype=np.float32)
+            for i, (_, arr) in enumerate(planes[:3]):
+                st = _stretch(arr)
+                if st.shape != base.shape:
+                    continue
+                rgb[..., i] = st
+            self._render_rgb(rgb)
+            label = " + ".join(c for c, _ in planes[:3])
+
+        note = f"**{pos}** · {label}"
+        if depth > 1:
+            note += (" · max projection" if self.view_maxproj.value
+                     else f" · plane {int(self.view_plane.value)}"
+                           f"/{depth - 1}")
+        self.view_info.object = note
+
+    def _render_rgb(self, rgb: np.ndarray) -> None:
+        """Show a channel composite. Bokeh needs packed uint32 RGBA."""
+        try:
+            target = int(self.preview_px.value)
+            step = max(1, int(min(rgb.shape[:2]) // target))
+            if step > 1:
+                rgb = rgb[::step, ::step]
+            h, w = rgb.shape[:2]
+            out = np.empty((h, w), dtype=np.uint32)
+            view = out.view(dtype=np.uint8).reshape((h, w, 4))
+            view[..., 0] = (rgb[..., 0] * 255).astype(np.uint8)
+            view[..., 1] = (rgb[..., 1] * 255).astype(np.uint8)
+            view[..., 2] = (rgb[..., 2] * 255).astype(np.uint8)
+            view[..., 3] = 255
+            self._img_fig.x_range.end = float(w)
+            self._img_fig.y_range.end = float(h)
+            self._rgb_source.data = {"image": [out[::-1]]}
+            self._img_source.data = {
+                "image": [np.zeros((2, 2), dtype=np.float32)]
+            }
+        except Exception as e:
+            self._say(f"Could not render the composite: {e}", "warn")
+
+    def _on_backend_frame(self, pos_name: str, channel: str, tp: int,
+                          img) -> None:
+        """Called by the backend for EVERY channel it acquires.
+
+        Distinct from wait_for_image(), which yields only the first
+        channel (the one the tracker measures drift on). The preview
+        wants them all.
+        """
+        try:
+            self._note_frame(pos_name, str(channel), img)
+            self._push_banner(
+                f"**● ACQUIRING** — t={tp} · position "
+                f"**{pos_name}** · channel **{channel}**",
+                running=True,
+            )
+        except Exception:
+            logger.exception("could not record a frame for the view")
+
     def _push_status(self, msg: str) -> None:
         """Update the run status from a worker thread."""
         def apply():
@@ -2236,6 +2562,7 @@ class MTBSetupPanel:
             self.btn_run.disabled = False
             self.btn_stop.disabled = True
             self.run_status.object = "_Idle._"
+            self._set_banner("")
             self._append_log("run finished")
             self._update_position()
         try:
@@ -2274,6 +2601,10 @@ class MTBSetupPanel:
             pn.Row(self.btn_live, self.live_fps, self.preview_px),
             self.img_stats,
             self.preview,
+            pn.Row(self.view_position, self.view_maxproj),
+            self.view_channels,
+            self.view_plane,
+            self.view_info,
             pn.layout.Divider(),
             self.pos_readout,
             width=620,
@@ -2377,7 +2708,17 @@ class MTBSetupPanel:
             pn.Row(self.interval_s, self.n_timepoints, self.settle_s),
             pn.layout.Divider(),
             "### Z-stack",
-            pn.Row(self.zstack_on, self.zstack_range, self.zstack_step),
+            pn.Row(self.zstack_on, self.zstack_planes,
+                   self.zstack_step),
+            self.zstack_info,
+            pn.Row(self.btn_z_bottom, self.btn_z_centre,
+                   self.btn_z_top),
+            pn.pane.Markdown(
+                "_Jump to the edges of the planned stack to check the "
+                "whole range is in focus before committing. Centre is "
+                "taken from the current Z the first time you press it._",
+                width=600, styles={"font-size": "0.8em"},
+            ),
             pn.Row(self.gate_per_plane),
             pn.pane.Markdown(
                 "Applies to channels with `z_stack` ticked. Keep the "
@@ -2454,8 +2795,11 @@ class MTBSetupPanel:
             width=640,
         )
 
-        return pn.Row(left, pn.Spacer(width=20), camera_column,
-                      width=1300)
+        return pn.Column(
+            self.run_banner,
+            pn.Row(left, pn.Spacer(width=20), camera_column),
+            width=1300,
+        )
 
 
 def app() -> pn.Column:
