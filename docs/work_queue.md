@@ -60,12 +60,28 @@ focal plane over a few hours. If the specimen genuinely sinks or rises,
 untick *DF2 owns Z* and the tracked offset rides on top of the
 stabilized plane.
 
-**Also unverified**: whether `InitOnCurrentFocusPosition` returns the
-`Byte[]` blob on this build. `MTBDefiniteFocus.learn()` falls back to
-`GetStabilizerData()` and then to the mode-only overload; if no blob
-comes back at all, DF2 can hold only ONE plane and per-position focus
-is unavailable. `tools/df2_test.py` says which case you are in, in the
-LEARN section.
+**Answered 2026-09-11**: `InitOnCurrentFocusPosition` DOES return the
+blob on this build — 9 bytes, learned in 0.4 s, with the objective
+(Fluar 10x/0.50, order 420140-9901-000) reported *Suitable*. So
+per-position references are available.
+
+**Still open — does DF2 actually hold?** The first hardware run looked
+like a failure, but the test watched only the piezo while DF2 may
+correct through the motorized focus drive. `df2_test.py` now measures
+the total focus and reports `GetPiezoFocusUsage()`, so re-run it. Note
+`signal quality` read 0; the reading that matters is the one *after*
+`learn()`, which the test now prints. Zero there means DF2 has no
+surface to lock onto and the mechanical setup needs fixing first.
+
+**Worth adopting if it works**:
+`SetFocusPositionOffset(Byte[] data, Double offset, String unit,
+Byte[]& newData)` derives a new reference a given distance from an
+existing one — Zeiss's own answer to multi-position focus. The
+coverslip is COMMON to every position, so one good measurement plus a
+per-position offset beats N independent measurements, each of which
+can fail on its own. Wrapped as `MTBDefiniteFocus.offset_reference()`
+and exercised by `df2_test.py --offset-test`; if that passes, change
+*Learn at every position* to learn once and offset.
 
 ### 2026-09-02 · Interactive checkout GUI — build vs reuse decision
 

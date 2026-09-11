@@ -892,6 +892,67 @@ class MTBDefiniteFocus:
                 continue
         return False
 
+    # --- which actuator DF2 drives -----------------------------
+    #
+    # THE trap: DF2 can correct through the motorized focus drive OR
+    # the piezo, and GetPiezoFocusUsage says which. Disturb one and
+    # watch the other, and a working DF2 looks completely inert.
+
+    def piezo_focus_usage(self) -> bool | None:
+        """True if DF2 corrects through the piezo, False via the focus
+        drive, None if it will not say."""
+        try:
+            return "on" in str(self._c.GetPiezoFocusUsage()).lower()
+        except Exception:
+            return None
+
+    def set_piezo_focus_usage(self, on: bool) -> bool:
+        try:
+            from ZEISS.MTB.Api import MTBOnOff
+            flag = MTBOnOff.On if on else MTBOnOff.Off
+        except Exception:
+            flag = bool(on)
+        try:
+            return self._c.SetPiezoFocusUsage(flag) is not False
+        except Exception:
+            return False
+
+    def reference_mode_usage(self) -> bool | None:
+        try:
+            return "on" in str(self._c.GetReferenceModeUsage()).lower()
+        except Exception:
+            return None
+
+    def offset_reference(self, data: bytes, offset_um: float):
+        """Derive a NEW reference `offset_um` above/below an existing one.
+
+            SetFocusPositionOffset(Byte[] data, Double offset,
+                                   String unit, Byte[]& newData)
+
+        This is Zeiss's own answer to multi-position focus, and it is
+        better than learning independently at each position: the
+        coverslip is COMMON to every position, so one good measurement
+        plus a per-position offset beats N separate measurements, each
+        of which can fail on its own.
+        """
+        if not data:
+            raise MTBError("no reference to offset from")
+        payload = bytearray(data)
+        for unit in ("um", "µm", "microns"):
+            for args in ((payload, float(offset_um), unit,
+                          self.timeout_ms),
+                         (payload, float(offset_um), unit)):
+                try:
+                    result = self._c.SetFocusPositionOffset(*args)
+                except Exception:
+                    continue
+                new = self._extract_bytes(result)
+                if new is not None:
+                    return new
+        raise MTBError(
+            f"DF2 would not offset the reference by {offset_um} um"
+        )
+
     def objective_suitable(self, order_number: str):
         """Whether DF2 can stabilise with a given objective.
 
@@ -1023,11 +1084,16 @@ class MTBDefiniteFocus:
         return False
 
     def describe(self) -> str:
+        piezo = self.piezo_focus_usage()
+        drive = ("the PIEZO" if piezo else
+                 "the FOCUS DRIVE" if piezo is False else "?")
         return (
             f"Definite Focus 2 via {self.interface}\n"
             f"    mode={self.operation_mode()}  busy={self.is_busy}\n"
             f"    signal quality={self.signal_quality}  "
-            f"period={self.period}"
+            f"period={self.period}\n"
+            f"    corrects through {drive}  "
+            f"(reference mode={self.reference_mode_usage()})"
         )
 
 

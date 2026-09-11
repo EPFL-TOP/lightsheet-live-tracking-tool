@@ -157,6 +157,16 @@ re-saving ROIs mid-run re-initialises that position.
       logs.json
 ```
 
+One file per **position, timepoint and channel**. A z-stack is written
+into that same file as a real ImageJ stack — `axes=ZYX`, one page per
+plane, with the z-step as `spacing` and the XY pixel size in the
+resolution tags, so ImageJ and Fiji open it as a calibrated stack.
+
+This was previously written as a bare array, which tifffile turned
+into a single RGB page whenever the stack had **exactly 3 planes** —
+so a 3-plane stack became a colour snapshot. At other plane counts the
+axes came out as `Q` (unknown) with no z-step.
+
 ---
 
 ## Definite Focus 2
@@ -208,6 +218,21 @@ before the first exposure, so every channel and every plane of a stack
 references the same plane. A z-stack centres on the Z **DF2 actually
 reached**, read back rather than assumed.
 
+### Which actuator does DF2 drive?
+
+**The trap.** DF2 corrects through *either* the motorized focus drive
+*or* the piezo — `GetPiezoFocusUsage()` says which. Disturb one and
+measure the other, and a perfectly working DF2 looks completely inert.
+The first hardware run of `df2_test.py` reported a failure for exactly
+this reason. Everything now measures the **total** focus, focus +
+piezo, and `describe()` reports which actuator is in use.
+
+**Signal quality** read *before* arming DF2 is meaningless. The
+reading that matters is the one after `learn()`. Zero there means DF2
+has no surface to lock onto — it will run, return success, and do
+nothing. Usual causes: no coverslip-to-medium interface within range,
+the wrong immersion or objective, or the DF2 light path not engaged.
+
 ### If it is absent or fails
 
 Nothing is fatal. A stand without DF2, a DF2 that will not cast, a
@@ -222,6 +247,8 @@ Verify on hardware before trusting it:
 python tools\df2_test.py                       :: learn, defocus 5 um, recover
 python tools\df2_test.py --offset 20 --mode Exact --tol 0.5
 python tools\df2_test.py --repeat 5            :: does the error accumulate?
+python tools\df2_test.py --use-piezo on        :: force the actuator
+python tools\df2_test.py --offset-test         :: derive one plane from another
 python tools\df2_test.py --report-only         :: nothing moves
 ```
 
@@ -318,6 +345,8 @@ thresholding knobs (`containment_threshold`, `score_threshold`, `k`,
 | `.restore(blob)` | re-arm DF2 on a previously learned plane |
 | `.stabilize_now()` | one correction back to that plane |
 | `.set_operation_mode(name)` | `Exact` / `Balanced` / `Fast` |
+| `.piezo_focus_usage()` | True if DF2 corrects via the piezo, False via the focus drive |
+| `.offset_reference(blob, um)` | derive a new plane `um` from an existing one |
 | `.objective_suitable(order_no)` | whether DF2 can work with an objective |
 | `MTBObjective.order_number` | the Zeiss order number DF2 wants |
 | `sample_pixel_size_um(cam, mag, adapter)` | `11 / (mag × adapter)` for the Prime 95B |

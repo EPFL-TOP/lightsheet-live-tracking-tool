@@ -2441,6 +2441,9 @@ class MTBSetupPanel:
             # Hardware focus stabilisation. df2_owns_z decides whether
             # DF2 or the image-based tracker aims the Z axis; they must
             # not both, or they fight every timepoint.
+            # Recorded in every TIFF, so analysis downstream inherits
+            # the calibration rather than re-deriving it.
+            "pixel_size_um": float(self.pixel_xy.value or 0) or None,
             "use_definite_focus": bool(self.df2_on.value),
             "df2_owns_z": bool(self.df2_owns_z.value),
         }

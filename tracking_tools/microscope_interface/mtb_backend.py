@@ -160,6 +160,9 @@ class MicroscopeInterface_MTB:
         self.max_xy_um = float(p.get("max_xy_um", 50.0))
         self.max_z_um = float(p.get("max_z_um", 20.0))
         self.z_stack = p.get("z_stack")
+        # Written into the TIFF so downstream analysis inherits the
+        # calibration instead of re-deriving it from the objective.
+        self.pixel_size_um = p.get("pixel_size_um")
         self.stop_after_tp = p.get("stop_after_tp")
         self.buffer_mb = int(p.get("buffer_mb", 512))
         self.synthetic_source = p.get("synthetic_source")
@@ -866,11 +869,24 @@ class MicroscopeInterface_MTB:
 
     def _save(self, img: np.ndarray, pos_name: str, tp: int,
               channel: str | None = None) -> str:
-        """Write a frame using the convention every backend shares.
+        """Write a frame or a z-stack using the shared convention.
 
         t{tp:04d}_{channel}.tif — the ROI selection dashboard matches
         t{NNNN}<suffix>.tif, so per-channel files sit side by side and
         the suffix picks which one the tracker reads.
+
+        A STACK IS WRITTEN AS A REAL Z-STACK. Handing tifffile a bare
+        (planes, H, W) array is not enough: with exactly 3 planes it
+        guesses RGB and writes ONE page with three colour components,
+
+            data with shape (3, 8, 8) ... stored as RGB with separate
+            component planes
+
+        so a 3-plane stack silently became a colour snapshot. Even at
+        other plane counts the axes came out as 'Q' — unknown — with no
+        z-step, so nothing downstream could tell a stack from a time
+        series. Writing ImageJ metadata fixes both: ImageJ, Fiji and
+        tifffile all then read it as slices with a real spacing.
         """
         folder = os.path.join(self.dirpath, pos_name)
         os.makedirs(folder, exist_ok=True)
@@ -878,11 +894,36 @@ class MicroscopeInterface_MTB:
         path = os.path.join(folder, f"t{tp:04d}_{label}.tif")
         try:
             import tifffile
-            tifffile.imwrite(path, img)
         except ImportError:
             np.save(path.replace(".tif", ".npy"), img)
             logger.warning("tifffile missing — wrote .npy instead")
+            return path
+
+        kwargs = self._tiff_kwargs(img)
+        try:
+            tifffile.imwrite(path, img, **kwargs)
+        except Exception:
+            # Never lose data to a metadata problem.
+            logger.exception(
+                "writing %s with metadata failed — falling back", path
+            )
+            tifffile.imwrite(path, img, photometric="minisblack")
         return path
+
+    def _tiff_kwargs(self, img: np.ndarray) -> dict:
+        """ImageJ metadata describing what the array actually is."""
+        meta = {"axes": "ZYX" if img.ndim == 3 else "YX"}
+        if img.ndim == 3:
+            meta["spacing"] = float(self.z_stack.get("step_um", 1.0)) \
+                if isinstance(self.z_stack, dict) else 1.0
+            meta["unit"] = "um"
+        kwargs = {"imagej": True, "metadata": meta}
+        if self.pixel_size_um:
+            # ImageJ reads XY calibration from the TIFF resolution
+            # tags, in pixels per unit.
+            r = 1.0 / float(self.pixel_size_um)
+            kwargs["resolution"] = (r, r)
+        return kwargs
 
     # ---------------------------------------------- tracker contract
 

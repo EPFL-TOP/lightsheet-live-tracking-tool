@@ -1550,3 +1550,104 @@ def test_visit_centres_the_stack_on_the_stabilized_plane(patched):
     assert grabbed == pytest.approx([251.0, 253.0, 255.0]), (
         "the stack centred on the commanded Z, not the stabilized one"
     )
+
+
+# ====================================================================
+# SAVING A Z-STACK
+#
+# Handing tifffile a bare (planes, H, W) array is NOT enough. With
+# exactly 3 planes it guesses RGB and writes ONE page carrying three
+# colour components, so a 3-plane stack silently became a colour
+# snapshot. At other plane counts the axes came out 'Q' (unknown) with
+# no z-step, so nothing downstream could tell a stack from a series.
+# ====================================================================
+
+def _read_tif(path):
+    tifffile = pytest.importorskip("tifffile")
+    with tifffile.TiffFile(path) as tf:
+        return {
+            "pages": len(tf.pages),
+            "shape": tf.series[0].shape,
+            "axes": tf.series[0].axes,
+            "photometric": tf.pages[0].photometric.name,
+            "imagej": tf.is_imagej,
+            "meta": tf.imagej_metadata or {},
+            "data": tf.asarray(),
+        }
+
+
+def test_REGRESSION_a_three_plane_stack_is_not_written_as_rgb(patched):
+    """The exact case tifffile mis-guesses: 3 planes look like RGB."""
+    make, _, tmp_path = patched
+    iface = make(z_stack={"n_planes": 3, "step_um": 2.0})
+    stack = np.arange(3 * 8 * 8, dtype=np.uint16).reshape(3, 8, 8)
+    path = iface._save(stack, "scene_000", 0, channel="BF")
+
+    info = _read_tif(path)
+    assert info["pages"] == 3, (
+        f"3 planes were written as {info['pages']} page(s) — tifffile "
+        f"collapsed the stack into an RGB image"
+    )
+    assert info["photometric"] == "MINISBLACK"
+    assert np.array_equal(info["data"], stack)
+
+
+def test_a_saved_stack_is_labelled_as_z_not_unknown(patched):
+    make, _, tmp_path = patched
+    iface = make(z_stack={"n_planes": 5, "step_um": 1.5})
+    stack = np.zeros((5, 8, 8), dtype=np.uint16)
+    info = _read_tif(iface._save(stack, "scene_000", 0, channel="BF"))
+
+    assert info["axes"] == "ZYX", (
+        f"axes are {info['axes']!r} — downstream cannot tell a z-stack "
+        f"from a time series"
+    )
+    assert info["imagej"] is True
+    assert info["meta"].get("spacing") == pytest.approx(1.5), (
+        "the z-step is not recorded, so the stack has no real depth"
+    )
+    assert info["meta"].get("unit") == "um"
+
+
+def test_a_single_plane_is_still_a_plain_2d_image(patched):
+    make, _, tmp_path = patched
+    iface = make()
+    frame = np.full((8, 8), 7, dtype=np.uint16)
+    info = _read_tif(iface._save(frame, "scene_000", 0, channel="BF"))
+    assert info["shape"] == (8, 8)
+    assert info["axes"] == "YX"
+    assert np.array_equal(info["data"], frame)
+
+
+def test_pixel_size_is_recorded_in_the_tiff(patched):
+    """So analysis inherits the calibration instead of re-deriving it
+    from the objective, which is where scale errors come from."""
+    tifffile = pytest.importorskip("tifffile")
+    make, _, tmp_path = patched
+    iface = make(pixel_size_um=0.65)
+    path = iface._save(np.zeros((8, 8), dtype=np.uint16),
+                       "scene_000", 0, channel="BF")
+    with tifffile.TiffFile(path) as tf:
+        tags = tf.pages[0].tags
+        xres = tags["XResolution"].value
+    assert xres[0] / xres[1] == pytest.approx(1 / 0.65, rel=1e-3)
+
+
+def test_stack_planes_keep_their_order(patched):
+    """Plane i of the file must be plane i of the stack, or every
+    depth measurement downstream is mirrored."""
+    make, _, tmp_path = patched
+    iface = make(z_stack={"n_planes": 4, "step_um": 1.0})
+    stack = np.stack([
+        np.full((8, 8), v, dtype=np.uint16) for v in (10, 20, 30, 40)
+    ])
+    info = _read_tif(iface._save(stack, "scene_000", 0, channel="BF"))
+    assert [int(p.flat[0]) for p in info["data"]] == [10, 20, 30, 40]
+
+
+def test_saving_still_works_without_a_z_step_configured(patched):
+    make, _, tmp_path = patched
+    iface = make()                      # z_stack is None
+    stack = np.zeros((3, 8, 8), dtype=np.uint16)
+    info = _read_tif(iface._save(stack, "scene_000", 0, channel="BF"))
+    assert info["pages"] == 3
