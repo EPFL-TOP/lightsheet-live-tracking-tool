@@ -127,7 +127,10 @@ class MicroscopeInterface_MTB:
                       95B saturates by ~100 ms at current light)
       channel         label used in frame filenames (default 'BF')
       interval_s      seconds between timepoints (default 60)
-      settle_s        pause after a move before snapping (default 0.3)
+      settle_s        pause after an XY move, before snapping (0.3)
+      plane_settle_s  pause between Z PLANES (default min(settle_s,
+                      0.02)) - a piezo step settles in milliseconds,
+                      so the stage figure here is pure waste
       max_xy_um       per-correction XY clamp (default 50)
       max_z_um        per-correction Z clamp  (default 20)
       z_stack         {'range_um': float, 'step_um': float} or None
@@ -157,6 +160,17 @@ class MicroscopeInterface_MTB:
         self.channel = p.get("channel", "BF")
         self.interval_s = float(p.get("interval_s", 60.0))
         self.settle_s = float(p.get("settle_s", 0.3))
+        # A SEPARATE settle for z-planes, and the difference matters
+        # enormously. settle_s is sized for the XY stage between
+        # positions, where a heavy stage genuinely rings. A 1 um piezo
+        # step settles in milliseconds. Using the stage figure per
+        # plane made a 100-plane stack sleep for 30 s — about 75% of
+        # the minute it took — for no benefit whatsoever.
+        plane_settle = p.get("plane_settle_s")
+        self.plane_settle_s = (
+            float(plane_settle) if plane_settle is not None
+            else min(self.settle_s, 0.02)
+        )
         self.max_xy_um = float(p.get("max_xy_um", 50.0))
         self.max_z_um = float(p.get("max_z_um", 20.0))
         self.z_stack = p.get("z_stack")
@@ -701,9 +715,17 @@ class MicroscopeInterface_MTB:
                     self.synthetic_source(x, y, zz, pos_name)
                 )
         else:
+            # Set the exposure ONCE per stack rather than per plane: it
+            # can reconfigure the camera, and 100 planes meant 100
+            # needless round trips.
+            first = {"pending": True}
+
             def grab(zz):
+                once = first["pending"]
+                first["pending"] = False
                 return self._snap(exposure_ms, channel=channel,
-                                  gate=self.gate_light_per_plane)
+                                  gate=self.gate_light_per_plane,
+                                  set_exposure=once)
 
         want = self.z_stack if stack is None else (
             stack and self.z_stack
@@ -728,18 +750,24 @@ class MicroscopeInterface_MTB:
         return self._acquire_stack(z, grab)
 
     def _snap(self, exposure_ms=None, channel=None,
-              gate: bool = True) -> np.ndarray:
+              gate: bool = True, set_exposure: bool = True) -> np.ndarray:
         """Acquire one frame, illuminated only while integrating.
 
         The `finally` matters: if the snap raises, the light must still
         go out. Otherwise a failed frame leaves the sample under
         continuous excitation until someone notices.
+
+        set_exposure=False skips the camera round trip, for planes
+        within a z-stack where it was already set once for the whole
+        stack. Acquisition is serialised on one thread, so nothing can
+        change it underneath us mid-stack.
         """
-        with self._config_lock:
-            self.mmc.setExposure(
-                float(exposure_ms) if exposure_ms is not None
-                else self.exposure_ms
-            )
+        if set_exposure:
+            with self._config_lock:
+                self.mmc.setExposure(
+                    float(exposure_ms) if exposure_ms is not None
+                    else self.exposure_ms
+                )
         if gate and self.illuminate is not None and channel is not None:
             self.illuminate(channel, True)
         try:
@@ -846,7 +874,9 @@ class MicroscopeInterface_MTB:
             pass
 
         # 3. Settling dominates long stacks; warn if it will not fit.
-        est = len(offsets) * (self.settle_s + self.exposure_ms / 1000.0)
+        est = len(offsets) * (
+            self.plane_settle_s + self.exposure_ms / 1000.0
+        )
         total = est * len(self.pos_names)
         if total > self.interval_s:
             warnings.append(
@@ -867,11 +897,12 @@ class MicroscopeInterface_MTB:
         """
         offsets = self.plane_offsets()
         planes = []
+        started = time.monotonic()
         try:
             for off in offsets:
                 self.motion.z.move_to(z_centre + off)
-                if self.settle_s:
-                    time.sleep(self.settle_s)
+                if self.plane_settle_s:
+                    time.sleep(self.plane_settle_s)
                 planes.append(grab(z_centre + off))
         finally:
             try:
@@ -881,6 +912,14 @@ class MicroscopeInterface_MTB:
                     "could not restore Z to %.3f after the stack: %s",
                     z_centre, e,
                 )
+        took = time.monotonic() - started
+        if planes:
+            logger.info(
+                "z-stack: %d planes in %.2fs (%.0f ms/plane, "
+                "%.0f ms of that settling)",
+                len(planes), took, 1000 * took / len(planes),
+                1000 * self.plane_settle_s,
+            )
         return np.stack(planes)
 
     def _save(self, img: np.ndarray, pos_name: str, tp: int,

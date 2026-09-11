@@ -1487,12 +1487,27 @@ def test_set_position_z_reanchors_the_stack(panel_obj):
     assert motion.z.moves[-1] == pytest.approx(262.0)
 
 
-def test_set_position_z_needs_exactly_one_selection(panel_obj):
+def test_set_position_z_uses_the_anchor_not_the_row_selection(
+        panel_obj):
+    """An ambiguous multi-row selection is no longer a refusal: the
+    stack's anchor Select says unambiguously which position the stack
+    belongs to, so use it."""
     _stack_panel(panel_obj)
     panel_obj._on_capture()
+    panel_obj.stack_position.value = "scene_001"
     panel_obj.pos_table.selection = [0, 1]
     panel_obj._on_set_position_z()
-    assert "exactly one" in panel_obj.status.object
+    assert "scene_001" in panel_obj.status.object
+
+
+def test_set_position_z_refuses_when_no_anchor_can_be_resolved(
+        panel_obj):
+    _stack_panel(panel_obj)
+    panel_obj._on_capture()
+    panel_obj.stack_position.options = []
+    panel_obj.stack_position.value = None
+    panel_obj._on_set_position_z()
+    assert "position this stack belongs to" in panel_obj.status.object
 
 
 def test_stack_centre_is_per_position(panel_obj):
@@ -2002,3 +2017,142 @@ def test_hold_info_tells_you_what_is_missing(panel_obj):
     panel_obj._df2_refs["scene_000"] = b"A"
     panel_obj._update_df2_hold_info()
     assert "learned" in panel_obj.df2_hold_info.object
+
+
+# ====================================================================
+# REACHABILITY
+#
+# Configuring a stack and choosing what it is centred on are one task.
+# Splitting them across two tabs — the table on Stage, the buttons on
+# Acquisition — made the centre buttons effectively unreachable.
+# ====================================================================
+
+def test_capturing_a_position_offers_it_as_the_stack_anchor(panel_obj):
+    _stack_panel(panel_obj)
+    assert list(panel_obj.stack_position.options) == ["scene_000"]
+    assert panel_obj.stack_position.value == "scene_000"
+
+
+def test_selecting_a_row_retargets_the_stack(panel_obj):
+    """Clicking a row on the Stage tab must still work — the Select
+    exists to make the choice reachable, not to override it."""
+    motion, axis = _stack_panel(panel_obj, centre=250.0)
+    axis.position = 400.0
+    panel_obj._on_capture()
+    panel_obj.pos_table.selection = [1]
+    assert panel_obj.stack_position.value == "scene_001"
+    assert panel_obj.stack_centre_um() == pytest.approx(400.0)
+
+
+def test_choosing_the_anchor_directly_moves_the_stack_centre(panel_obj):
+    motion, axis = _stack_panel(panel_obj, centre=250.0)
+    axis.position = 400.0
+    panel_obj._on_capture()
+    panel_obj.stack_position.value = "scene_000"
+    assert panel_obj.stack_centre_um() == pytest.approx(250.0)
+    panel_obj.stack_position.value = "scene_001"
+    assert panel_obj.stack_centre_um() == pytest.approx(400.0)
+
+
+def test_removing_the_anchor_position_falls_back_cleanly(panel_obj):
+    motion, axis = _stack_panel(panel_obj, centre=250.0)
+    axis.position = 400.0
+    panel_obj._on_capture()
+    panel_obj.stack_position.value = "scene_001"
+    panel_obj.pos_table.selection = [1]
+    panel_obj._on_remove()
+    assert panel_obj.stack_position.value == "scene_000"
+    assert panel_obj.stack_centre_um() == pytest.approx(250.0)
+
+
+def test_the_anchor_survives_adding_another_position(panel_obj):
+    motion, axis = _stack_panel(panel_obj, centre=250.0)
+    panel_obj.stack_position.value = "scene_000"
+    axis.position = 400.0
+    panel_obj._on_capture()
+    assert panel_obj.stack_position.value == "scene_000", (
+        "capturing a position silently moved the stack anchor"
+    )
+
+
+# --- connecting ----------------------------------------------------
+
+def test_connect_reads_every_component_it_can(panel_obj, monkeypatch):
+    """Each of these used to need its own button press, and a
+    forgotten objective leaves the pixel size wrong, which mis-scales
+    every drift correction."""
+    called = []
+    for name in ("_on_read_objective", "_on_read_lightpath",
+                 "_on_read_leds"):
+        monkeypatch.setattr(panel_obj, name,
+                            lambda n=name: called.append(n))
+    panel_obj._read_all_components()
+    assert called == ["_on_read_objective", "_on_read_lightpath",
+                      "_on_read_leds"]
+
+
+def test_one_unreadable_component_does_not_block_the_others(
+        panel_obj, monkeypatch):
+    """A stand without a Colibri must still get its objective read."""
+    called = []
+
+    def boom():
+        raise RuntimeError("no Colibri fitted")
+
+    monkeypatch.setattr(panel_obj, "_on_read_objective",
+                        lambda: called.append("objective"))
+    monkeypatch.setattr(panel_obj, "_on_read_lightpath", boom)
+    monkeypatch.setattr(panel_obj, "_on_read_leds",
+                        lambda: called.append("leds"))
+    panel_obj._read_all_components()
+    assert called == ["objective", "leds"]
+
+
+def test_connecting_twice_is_a_no_op(panel_obj):
+    panel_obj.motion = FakeMotion()
+    panel_obj._on_connect()
+    assert "Already connected" in panel_obj.status.object
+
+
+def test_auto_connect_does_not_run_during_construction():
+    """It must happen after the page is served, or a stand that is off
+    would block the dashboard from rendering at all."""
+    fresh = MTBSetupPanel()
+    assert not fresh.connected
+
+
+def test_auto_connect_survives_a_failure(panel_obj, monkeypatch):
+    def boom(_event=None):
+        raise RuntimeError("stand is off")
+
+    monkeypatch.setattr(panel_obj, "_on_connect", boom)
+    panel_obj.schedule_auto_connect()          # no server context
+    assert "Auto-connect failed" in panel_obj.status.object
+
+
+# --- z-stack cost --------------------------------------------------
+
+def test_zstack_info_predicts_how_long_the_stack_takes(panel_obj):
+    """A 100-plane stack surprised us by taking over a minute."""
+    _stack_panel(panel_obj)
+    panel_obj.zstack_planes.value = 100
+    panel_obj.zstack_step.value = 0.5
+    panel_obj.plane_settle.value = 0.02
+    panel_obj._update_zstack_info()
+    assert "per position" in panel_obj.zstack_info.object
+
+
+def test_zstack_info_warns_when_the_stack_outlasts_the_interval(
+        panel_obj):
+    _stack_panel(panel_obj)
+    panel_obj.zstack_planes.value = 200
+    panel_obj.zstack_step.value = 0.5
+    panel_obj.interval_s.value = 10.0
+    panel_obj._update_zstack_info()
+    assert "back to back" in panel_obj.zstack_info.object
+
+
+def test_plane_settle_reaches_the_backend_params(panel_obj):
+    assert "plane_settle" in panel_obj.CONFIG_FIELDS
+    panel_obj.plane_settle.value = 0.005
+    assert panel_obj.current_config()["widgets"]["plane_settle"] == 0.005

@@ -1692,3 +1692,109 @@ def test_check_z_stack_works_before_motion_exists(patched):
     )
     iface.motion = None
     assert any("NO channel" in w for w in iface.check_z_stack())
+
+
+# ====================================================================
+# Z-STACK SPEED
+#
+# A 100-plane stack took over a minute on hardware. ~75% of that was
+# time.sleep: _acquire_stack used settle_s, which is sized for the XY
+# STAGE between positions, for every PIEZO step. A 1 um piezo step
+# settles in milliseconds.
+# ====================================================================
+
+def test_REGRESSION_plane_settle_is_not_the_stage_settle(patched):
+    make, _, _ = patched
+    iface = make(settle_s=0.3)
+    assert iface.plane_settle_s < iface.settle_s, (
+        "z-planes are waiting for the XY stage to stop ringing"
+    )
+    assert iface.plane_settle_s <= 0.02
+
+
+def test_plane_settle_can_be_set_explicitly(patched):
+    make, _, _ = patched
+    assert make(settle_s=0.3, plane_settle_s=0.1).plane_settle_s == 0.1
+    # Explicitly zero must stay zero, not fall back to the default.
+    assert make(settle_s=0.3, plane_settle_s=0.0).plane_settle_s == 0.0
+
+
+def test_plane_settle_never_exceeds_the_stage_settle(patched):
+    """A tiny stage settle means a fast rig; do not slow the stack."""
+    make, _, _ = patched
+    assert make(settle_s=0.005).plane_settle_s == 0.005
+
+
+def test_a_hundred_plane_stack_does_not_sleep_for_thirty_seconds(
+        patched):
+    """The actual complaint, as a number."""
+    make, motion, _ = patched
+    iface = make(settle_s=0.3, z_stack={"n_planes": 100,
+                                        "step_um": 0.5})
+    iface.motion = motion
+    slept = []
+    import tracking_tools.microscope_interface.mtb_backend as mod
+    real_sleep = mod.time.sleep
+    mod.time.sleep = lambda s: slept.append(s)
+    try:
+        iface._acquire_stack(250.0, lambda z: np.zeros((4, 4), np.uint16))
+    finally:
+        mod.time.sleep = real_sleep
+    assert sum(slept) <= 2.5, (
+        f"slept {sum(slept):.1f}s across 100 planes"
+    )
+
+
+def test_exposure_is_set_once_per_stack_not_once_per_plane(patched):
+    """setExposure can reconfigure the camera; 100 planes meant 100
+    needless round trips."""
+    make, motion, _ = patched
+    iface = make(z_stack={"n_planes": 20, "step_um": 1.0},
+                 synthetic_source=None)
+    iface.motion = motion
+    iface.plane_settle_s = 0.0
+
+    class CountingCore:
+        def __init__(self):
+            self.exposures = 0
+
+        def setExposure(self, ms):
+            self.exposures += 1
+
+        def snapImage(self):
+            pass
+
+        def getImage(self):
+            return np.zeros((4, 4), dtype=np.uint16)
+
+    iface.mmc = CountingCore()
+    iface._acquire("scene_000", 0.0, 0.0, 250.0, stack=True,
+                   exposure_ms=5.0,
+                   channel={"name": "BF", "z_stack": True})
+    assert iface.mmc.exposures == 1, (
+        f"camera exposure set {iface.mmc.exposures} times for 20 planes"
+    )
+
+
+def test_a_single_frame_still_sets_its_exposure(patched):
+    make, motion, _ = patched
+    iface = make(synthetic_source=None)
+    iface.motion = motion
+
+    class CountingCore:
+        def __init__(self):
+            self.exposures = 0
+
+        def setExposure(self, ms):
+            self.exposures += 1
+
+        def snapImage(self):
+            pass
+
+        def getImage(self):
+            return np.zeros((4, 4), dtype=np.uint16)
+
+    iface.mmc = CountingCore()
+    iface._acquire("scene_000", 0.0, 0.0, 250.0, stack=False,
+                   exposure_ms=5.0, channel={"name": "BF"})
+    assert iface.mmc.exposures == 1

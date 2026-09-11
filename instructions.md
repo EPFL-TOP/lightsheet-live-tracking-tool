@@ -46,6 +46,15 @@ camera.
 
 ### 2. Connect
 
+The dashboard **connects by itself** once the page loads, and reads
+back the objective, light path and LEDs at the same time — each of
+those used to need its own button press, and a forgotten objective
+leaves the pixel size at its default, which mis-scales every drift
+correction. *Connect hardware* is still there if the stand was not
+ready. Set `MTB_AUTOCONNECT=0` to disable it, e.g. when someone else
+has the microscope.
+
+
 Press **Connect hardware**. The status line reports what came up, and
 the hardware panel prints every axis with its range, deviation and
 arrival tolerance, plus the LED table.
@@ -127,6 +136,11 @@ Channels are acquired **sequentially** — one camera, one cube.
   the focus happens to be, so touching the focus never moves it. Use
   *Stack bottom / centre / top* to check the whole range is in focus,
   and *Set position Z = current focus* to re-anchor.
+- **Settle per plane** — sized for the **piezo**, not the stage.
+  *Settle after move* waits for a heavy XY stage to stop ringing
+  between positions; a 1 µm piezo step settles in milliseconds. These
+  were once the same number, which made a 100-plane stack sleep for
+  30 s. Default 0.02 s.
 - **Definite Focus 2** — see below
 
 > **A z-stack needs BOTH switches.** *Acquire Z-stack* here sets the
@@ -174,6 +188,39 @@ This was previously written as a bare array, which tifffile turned
 into a single RGB page whenever the stack had **exactly 3 planes** —
 so a 3-plane stack became a colour snapshot. At other plane counts the
 axes came out as `Q` (unknown) with no z-step.
+
+---
+
+## How long a z-stack takes
+
+A 100-plane stack took over a minute, which was ~75 % pure
+`time.sleep`. Rough per-plane budget:
+
+| Cost | Per plane | Notes |
+|---|---|---|
+| Settle | **0.02 s** | was 0.3 s — the XY stage figure |
+| MTB move + readback | ~0.05 s | synchronous `SetPosition` |
+| Snap | ~0.02 s | `snapImage` + `getImage` |
+| Exposure | your setting | |
+| LED gating | ~0.02 s | only if *Switch light per z-plane* is on |
+
+The Acquisition tab now **predicts the total** from your actual
+settings and warns when a stack would outlast the timepoint interval.
+
+If a stack is still too slow:
+
+1. **Fewer planes, or a coarser step.** 100 planes is a lot; the piezo
+   resolves ~0.06 µm but your objective's depth of field is the real
+   limit.
+2. **Untick *Switch light per z-plane*** — holds the shutter open for
+   the whole stack. Fewer calls, but more light dose, so this is a
+   phototoxicity trade, not a free win.
+3. **Drop *Settle per plane* to 0** if the piezo can keep up; watch
+   for plane-to-plane blur.
+
+The camera exposure is now set **once per stack** rather than once per
+plane — `setExposure` can reconfigure the camera, so 100 planes meant
+100 needless round trips.
 
 ---
 

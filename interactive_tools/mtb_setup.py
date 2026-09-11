@@ -513,6 +513,13 @@ class MTBSetupPanel:
             name="Z range (µm) [legacy]", value=10.0, start=0.1,
             end=400.0, width=150, visible=False,
         )
+        # The stack's anchor position, RIGHT HERE rather than only via
+        # the table on the Stage tab. Configuring a stack and choosing
+        # what it is centred on are one task; splitting them across two
+        # tabs made the centre buttons effectively unreachable.
+        self.stack_position = pn.widgets.Select(
+            name="Stack centred on", options=[], width=200,
+        )
         self.zstack_info = pn.pane.Markdown(
             "", width=560, styles={"font-size": "0.85em"},
         )
@@ -593,6 +600,14 @@ class MTBSetupPanel:
         # dose) or hold it for the whole stack (fewer mechanical
         # shutter cycles). LEDs are solid state, so per-plane is the
         # right default.
+        # Sized for the PIEZO, not the stage. settle_s waits for a
+        # heavy XY stage to stop ringing; a 1 um piezo step settles in
+        # milliseconds, and using the stage figure made a 100-plane
+        # stack sleep for 30 s.
+        self.plane_settle = pn.widgets.FloatInput(
+            name="Settle per plane (s)", value=0.02, start=0.0,
+            end=2.0, step=0.01, width=170,
+        )
         self.gate_per_plane = pn.widgets.Checkbox(
             name="Switch light per z-plane (lower dose)", value=True,
         )
@@ -727,6 +742,12 @@ class MTBSetupPanel:
         self.btn_z_centre.on_click(lambda e: self._goto_stack_edge(0))
         self.btn_z_top.on_click(lambda e: self._goto_stack_edge(+1))
         self.btn_set_pos_z.on_click(self._on_set_position_z)
+        self.pos_table.param.watch(self._sync_stack_positions, "value")
+        self.pos_table.param.watch(self._on_position_selected,
+                                   "selection")
+        self.stack_position.param.watch(
+            lambda ev: self._update_zstack_info(), "value"
+        )
         self.btn_df2_learn.on_click(self._on_df2_learn)
         self.btn_df2_learn_all.on_click(self._on_df2_learn_all)
         self.btn_df2_stabilize.on_click(self._on_df2_stabilize)
@@ -734,7 +755,8 @@ class MTBSetupPanel:
         self.btn_df2_find.on_click(self._on_df2_find)
         self.tgl_df2_hold.param.watch(self._on_df2_hold, "value")
         for w in (self.zstack_planes, self.zstack_step,
-                  self.zstack_on):
+                  self.zstack_on, self.plane_settle, self.exposure,
+                  self.interval_s):
             w.param.watch(lambda ev: self._update_zstack_info(),
                           "value")
         for w in (self.view_position, self.view_channels,
@@ -799,7 +821,37 @@ class MTBSetupPanel:
 
     # ----------------------------------------------------- connection
 
+    def schedule_auto_connect(self) -> None:
+        """Connect once the page is up, never during construction.
+
+        Doing it in __init__ would block the page on hardware that may
+        be off, and would make the panel untestable without a
+        microscope.
+        """
+        def go():
+            if self.connected:
+                return
+            self._say("Connecting to the microscope…", "info")
+            try:
+                self._on_connect()
+            except Exception as e:
+                # Auto-connect must never take the dashboard down.
+                logger.exception("auto-connect failed")
+                self._say(
+                    f"Auto-connect failed: {e}. Use *Connect "
+                    f"hardware* once the stand is ready.", "err",
+                )
+
+        try:
+            pn.state.onload(go)
+        except Exception:
+            logger.info("no server context — connecting inline")
+            go()
+
     def _on_connect(self, _event=None) -> None:
+        if self.connected:
+            self._say("Already connected.", "info")
+            return
         if MTBSession is None:
             # Resolved at import time, not here — see the note at the
             # top about Bokeh restoring sys.path.
@@ -846,6 +898,38 @@ class MTBSetupPanel:
         self._update_df2_info()
         self._update_df2_hold_info()
         self.btn_connect.disabled = True
+        self._read_all_components()
+
+    def _read_all_components(self) -> None:
+        """Read back everything the stand can tell us about itself.
+
+        Each of these used to need its own button press, and forgetting
+        one is not harmless: an unread objective leaves the pixel size
+        at its default, which mis-scales every drift correction. They
+        are all read-only, so there is no reason not to do them on
+        connect.
+
+        Each is guarded separately — a stand without a Colibri should
+        still get its objective read.
+        """
+        done, failed = [], []
+        for label, fn in (
+            ("objective", self._on_read_objective),
+            ("light path", self._on_read_lightpath),
+            ("LEDs", self._on_read_leds),
+        ):
+            try:
+                fn()
+                done.append(label)
+            except Exception as e:
+                failed.append(f"{label} ({e})")
+                logger.info("could not read %s on connect: %s",
+                            label, e)
+        msg = f"Read {', '.join(done)}." if done else ""
+        if failed:
+            msg += f" Could not read {', '.join(failed)}."
+        if msg:
+            self._append_log(msg)
 
     def _open_camera(self) -> None:
         from pymmcore_plus import CMMCorePlus
@@ -1150,6 +1234,7 @@ class MTBSetupPanel:
 
     def _set_positions_df(self, df) -> None:
         self.pos_table.value = df.reset_index(drop=True)
+        self._sync_stack_positions()
 
     def _on_capture(self, _event=None) -> None:
         if not self._require_connection():
@@ -1408,6 +1493,7 @@ class MTBSetupPanel:
         "camera_pixel_um", "adapter_mag", "pixel_xy", "pixel_z",
         "tracking_2d", "serverkit", "max_xy", "max_z",
         "interval_s", "n_timepoints", "settle_s",
+        "plane_settle",
         "zstack_on", "zstack_planes", "zstack_range", "zstack_step",
         "df2_on", "df2_owns_z", "df2_mode",
         "auto_track", "require_all_rois", "roi_poll_s",
@@ -1618,7 +1704,22 @@ class MTBSetupPanel:
         note = (f"**{len(offsets)} planes x "
                 f"{self.zstack_step.value:g} µm = {span:g} µm total** "
                 f"({offsets[0]:+g} … {offsets[-1]:+g} µm about the "
-                f"current focus)")
+                f"position's Z)")
+
+        # Predict the cost. A 100-plane stack surprised us once by
+        # taking over a minute, almost all of it settling.
+        per_plane = (float(self.plane_settle.value or 0)
+                     + float(self.exposure.value or 0) / 1000.0
+                     + 0.05)          # measured MTB move + snap floor
+        est = len(offsets) * per_plane
+        n_pos = max(1, len(self.pos_table.value))
+        note += (f"\n\nAbout **{est:.1f} s per position** "
+                 f"({1000 * per_plane:.0f} ms/plane), "
+                 f"{est * n_pos:.1f} s for {n_pos} position(s).")
+        interval = float(self.interval_s.value or 0)
+        if interval and est * n_pos > interval:
+            note += (f" ⚠️ That exceeds the {interval:g} s interval — "
+                     f"timepoints would run back to back.")
 
         # Warn early rather than at run time: both of these produce
         # duplicate planes rather than an error.
@@ -1644,23 +1745,58 @@ class MTBSetupPanel:
             pass
         self.zstack_info.object = note
 
+    def stack_anchor_name(self) -> str | None:
+        """Which position the stack is centred on.
+
+        ONE source of truth: the Select. Selecting a single row in the
+        position table pushes its name into the Select rather than
+        competing with it — two independent notions of "the current
+        position" is exactly the confusion this is meant to remove.
+        """
+        names = [str(n) for n in self.pos_table.value.get("name", [])]
+        name = self.stack_position.value
+        if name and name in names:
+            return name
+        return names[0] if len(names) == 1 else None
+
+    def _on_position_selected(self, _event=None) -> None:
+        """Clicking one row on the Stage tab retargets the stack."""
+        rows = self.pos_table.selection or []
+        df = self.pos_table.value
+        if len(rows) != 1 or rows[0] >= len(df):
+            return
+        name = str(df.iloc[rows[0]]["name"])
+        if name in (self.stack_position.options or []):
+            self.stack_position.value = name
+
+    def _sync_stack_positions(self, _event=None) -> None:
+        """Keep the anchor Select in step with the position table."""
+        df = self.pos_table.value
+        names = [str(n) for n in df.get("name", [])]
+        if list(self.stack_position.options) != names:
+            current = self.stack_position.value
+            self.stack_position.options = names
+            self.stack_position.value = (
+                current if current in names
+                else (names[0] if names else None)
+            )
+        self._update_zstack_info()
+
     def stack_centre_um(self) -> float | None:
         """Z that the stack is centred on.
 
-        A z-stack BELONGS TO A POSITION, so the centre is the selected
+        A z-stack BELONGS TO A POSITION, so the centre is that
         position's stored Z — not wherever the focus happens to be.
         Reading the live focus made the stack shift every time it was
         touched. Falls back to the current Z only when no position is
-        selected.
+        resolvable at all.
         """
-        rows = self.pos_table.selection or []
         df = self.pos_table.value
-        if len(rows) == 1 and rows[0] < len(df):
-            return float(df.iloc[rows[0]]["z_um"])
-        if not df.empty and len(rows) == 0:
-            # Unambiguous single-position case.
-            if len(df) == 1:
-                return float(df.iloc[0]["z_um"])
+        name = self.stack_anchor_name()
+        if name is not None:
+            match = df.index[df["name"].astype(str) == name]
+            if len(match):
+                return float(df.loc[match[0], "z_um"])
         if not self.connected:
             return None
         try:
@@ -1708,23 +1844,27 @@ class MTBSetupPanel:
         """
         if not self._require_connection():
             return
-        rows = self.pos_table.selection or []
-        df = self.pos_table.value
-        if len(rows) != 1:
-            self._say("Select exactly one position to update.", "warn")
+        name = self.stack_anchor_name()
+        if name is None:
+            self._say("Pick the position this stack belongs to first.",
+                      "warn")
             return
         try:
             z = float(self.session.axis(self.z_axis.value).position)
         except Exception as e:
             self._say(f"Could not read Z: {e}", "err")
             return
-        df = df.copy()
-        df.iloc[rows[0], df.columns.get_loc("z_um")] = round(z, 3)
+        df = self.pos_table.value.copy()
+        match = df.index[df["name"].astype(str) == name]
+        if not len(match):
+            self._say(f"No position called {name!r}.", "warn")
+            return
+        df.loc[match[0], "z_um"] = round(z, 3)
         self.pos_table.value = df
         self._update_zstack_info()
         self._say(
-            f"{df.iloc[rows[0]]['name']} Z set to {z:.2f} µm — the "
-            f"stack is centred here.", "ok",
+            f"{name} Z set to {z:.2f} µm — the stack is centred here.",
+            "ok",
         )
 
     # -------------------------------------------- definite focus 2
@@ -2608,6 +2748,7 @@ class MTBSetupPanel:
             "gate_light_per_plane": bool(self.gate_per_plane.value),
             "interval_s": float(self.interval_s.value),
             "settle_s": float(self.settle_s.value),
+            "plane_settle_s": float(self.plane_settle.value),
             "max_xy_um": float(self.max_xy.value),
             "max_z_um": float(self.max_z.value),
             "stop_after_tp": (int(self.n_timepoints.value)
@@ -3252,10 +3393,10 @@ class MTBSetupPanel:
             "### Z-stack",
             pn.Row(self.zstack_on, self.zstack_planes,
                    self.zstack_step),
+            pn.Row(self.stack_position, self.btn_set_pos_z),
             self.zstack_info,
             pn.Row(self.btn_z_bottom, self.btn_z_centre,
                    self.btn_z_top),
-            pn.Row(self.btn_set_pos_z),
             pn.pane.Markdown(
                 "_A z-stack belongs to a **position**: it is centred on "
                 "that position's stored Z, so it does not drift when "
@@ -3265,7 +3406,7 @@ class MTBSetupPanel:
                 "and press **Set position Z**._",
                 width=600, styles={"font-size": "0.8em"},
             ),
-            pn.Row(self.gate_per_plane),
+            pn.Row(self.plane_settle, self.gate_per_plane),
             pn.pane.Markdown(
                 "Applies to channels with `z_stack` ticked. Keep the "
                 "step above the actuator's resolution (~0.06 µm for the "
@@ -3371,8 +3512,25 @@ class MTBSetupPanel:
         )
 
 
-def app() -> pn.Column:
-    return MTBSetupPanel().layout()
+def app(auto_connect: bool | None = None) -> pn.Column:
+    """Build the panel, and connect to the microscope by itself.
+
+    Connecting is read-only and idempotent, so there is no reason to
+    make it the operator's first chore. It runs AFTER the page is
+    served rather than during construction, so a stand that is off or
+    busy leaves you with a working dashboard and an error message
+    instead of a blank page.
+
+    Set MTB_AUTOCONNECT=0 to disable, e.g. when someone else has the
+    hardware.
+    """
+    panel_obj = MTBSetupPanel()
+    layout = panel_obj.layout()
+    if auto_connect is None:
+        auto_connect = os.environ.get("MTB_AUTOCONNECT", "1") != "0"
+    if auto_connect:
+        panel_obj.schedule_auto_connect()
+    return layout
 
 
 if __name__.startswith("bokeh") or __name__ == "__main__":
