@@ -1651,3 +1651,44 @@ def test_saving_still_works_without_a_z_step_configured(patched):
     stack = np.zeros((3, 8, 8), dtype=np.uint16)
     info = _read_tif(iface._save(stack, "scene_000", 0, channel="BF"))
     assert info["pages"] == 3
+
+
+def test_REGRESSION_z_stack_with_no_channel_asking_for_one_is_flagged(
+        patched):
+    """The failure mode that produces NO stack at all rather than a
+    corrupt one: the master switch is on, every channel says no, so
+    every frame is a single plane and the setting looks ignored."""
+    make, motion, _ = patched
+    iface = make(
+        z_stack={"n_planes": 5, "step_um": 1.0},
+        channels=[{"name": "BF", "reflector_pos": 0,
+                   "exposure_ms": 5.0, "z_stack": False}],
+    )
+    iface.motion = motion
+    problems = " ".join(iface.check_z_stack())
+    assert "NO channel" in problems, (
+        "a z-stack that can never be acquired went unreported"
+    )
+
+
+def test_no_complaint_when_a_channel_does_ask_for_the_stack(patched):
+    make, motion, _ = patched
+    iface = make(
+        z_stack={"n_planes": 5, "step_um": 1.0},
+        channels=[{"name": "BF", "reflector_pos": 0,
+                   "exposure_ms": 5.0, "z_stack": True}],
+    )
+    iface.motion = motion
+    assert not any("NO channel" in w for w in iface.check_z_stack())
+
+
+def test_check_z_stack_works_before_motion_exists(patched):
+    """It runs at connect(), and the mismatch check needs no hardware."""
+    make, _, _ = patched
+    iface = make(
+        z_stack={"n_planes": 5, "step_um": 1.0},
+        channels=[{"name": "BF", "reflector_pos": 0,
+                   "exposure_ms": 5.0, "z_stack": False}],
+    )
+    iface.motion = None
+    assert any("NO channel" in w for w in iface.check_z_stack())

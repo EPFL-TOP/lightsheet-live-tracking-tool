@@ -199,6 +199,8 @@ class MTBSetupPanel:
         self._build_widgets()
         self._wire()
         self._update_df2_info()
+        self._df2_hold_guard = False
+        self._sync_df2_hold_label(False)
         try:
             self._update_zstack_info()
             self._refresh_config_list()
@@ -430,9 +432,14 @@ class MTBSetupPanel:
         # what brightfield wants.
         self.chan_table = pn.widgets.Tabulator(
             pd.DataFrame([
+                # z_stack True, matching _on_add_channel. It was
+                # False here and True there, so the DEFAULT channel
+                # was the one channel that ignored the Acquisition
+                # tab's "Acquire Z-stack" switch — ticking it appeared
+                # to do nothing at all.
                 {"name": "BF", "reflector_pos": 0, "led_nm": 0,
                  "led_percent": 0.0, "tl": True, "invert": True,
-                 "exposure_ms": DEFAULT_EXPOSURE_MS, "z_stack": False},
+                 "exposure_ms": DEFAULT_EXPOSURE_MS, "z_stack": True},
             ]),
             height=200, width=620, show_index=False,
         )
@@ -542,6 +549,20 @@ class MTBSetupPanel:
             name="Precision", options=["Exact", "Balanced", "Fast"],
             value="Balanced", width=140,
         )
+        # --- searching for embryos ---
+        # DF2 holds a fixed distance from the COVERSLIP, and every
+        # embryo on that coverslip sits at roughly the same height. So
+        # focus one embryo, turn this on, and every field you drive to
+        # afterwards arrives in focus. This is the single biggest time
+        # saver when hunting, and it lives on the Stage tab because
+        # that is where hunting happens.
+        self.tgl_df2_hold = pn.widgets.Toggle(
+            name="🔓 Hold focus while searching — OFF",
+            value=False, width=260,
+        )
+        self.btn_df2_find = pn.widgets.Button(
+            name="Find coverslip", width=140,
+        )
         self.btn_df2_learn = pn.widgets.Button(
             name="Learn focus → selected position",
             button_type="primary", width=250,
@@ -554,6 +575,9 @@ class MTBSetupPanel:
         )
         self.btn_df2_clear = pn.widgets.Button(
             name="Clear reference", width=150,
+        )
+        self.df2_hold_info = pn.pane.Markdown(
+            "", width=600, styles={"font-size": "0.85em"},
         )
         self.df2_info = pn.pane.Markdown(
             "", width=600, styles={"font-size": "0.85em"},
@@ -707,6 +731,8 @@ class MTBSetupPanel:
         self.btn_df2_learn_all.on_click(self._on_df2_learn_all)
         self.btn_df2_stabilize.on_click(self._on_df2_stabilize)
         self.btn_df2_clear.on_click(self._on_df2_clear)
+        self.btn_df2_find.on_click(self._on_df2_find)
+        self.tgl_df2_hold.param.watch(self._on_df2_hold, "value")
         for w in (self.zstack_planes, self.zstack_step,
                   self.zstack_on):
             w.param.watch(lambda ev: self._update_zstack_info(),
@@ -818,6 +844,7 @@ class MTBSetupPanel:
         self._show_hw_info()
         self._update_position()
         self._update_df2_info()
+        self._update_df2_hold_info()
         self.btn_connect.disabled = True
 
     def _open_camera(self) -> None:
@@ -1762,6 +1789,7 @@ class MTBSetupPanel:
                       "err")
             return False
         self._store_df2_ref(name, ref)
+        self._update_df2_hold_info()
         # The position's Z and its DF2 plane must agree, or "go to
         # position" and "stabilize" would disagree about where focus is.
         try:
@@ -1867,6 +1895,145 @@ class MTBSetupPanel:
         self._store_df2_ref(name, None)
         self._update_df2_info()
         self._say(f"{name}: focus reference cleared.", "ok")
+
+    def _set_hold_toggle(self, on: bool) -> None:
+        """Move the toggle without re-entering its own handler.
+
+        Setting .value inside the watcher fires it again, so reverting
+        a refused toggle sent a redundant stabilize_periodically(False)
+        to hardware — to a DF2 that, in the refused case, may not even
+        be there.
+        """
+        self._df2_hold_guard = True
+        try:
+            self.tgl_df2_hold.value = bool(on)
+        finally:
+            self._df2_hold_guard = False
+        self._sync_df2_hold_label(bool(on))
+
+    def _sync_df2_hold_label(self, on: bool) -> None:
+        self.tgl_df2_hold.name = (
+            f"{'🔒' if on else '🔓'} Hold focus while searching — "
+            f"{'ON' if on else 'OFF'}"
+        )
+        self.tgl_df2_hold.button_type = "warning" if on else "light"
+        self.tgl_df2_hold.button_style = "solid" if on else "outline"
+
+    def _on_df2_hold(self, event=None) -> None:
+        """Turn continuous stabilisation on or off.
+
+        Requires a learned plane: DF2 can only hold something it has
+        been taught, and turning this on beforehand would silently do
+        nothing.
+        """
+        if getattr(self, "_df2_hold_guard", False):
+            return
+        want = bool(self.tgl_df2_hold.value)
+        df2 = self._df2() if want else None
+        if want and df2 is None:
+            self._set_hold_toggle(False)
+            return
+        if df2 is None:
+            # Switching OFF: try, but never block on a missing DF2.
+            try:
+                self.session.definite_focus().stabilize_periodically(
+                    False
+                )
+            except Exception:
+                pass
+            self._sync_df2_hold_label(False)
+            self._update_df2_hold_info()
+            return
+
+        if not self._df2_learned_anything():
+            self._set_hold_toggle(False)
+            self._say(
+                "Focus an embryo first, then press *Learn focus* on "
+                "the Acquisition tab. DF2 can only hold a plane it "
+                "has been taught.", "warn",
+            )
+            return
+
+        try:
+            df2.stabilize_periodically(True)
+        except Exception as e:
+            self._set_hold_toggle(False)
+            self._say(f"Could not start continuous focus: {e}", "err")
+            return
+        self._sync_df2_hold_label(True)
+        self._update_df2_hold_info()
+        self._say(
+            "Holding focus. Drive around — every field should arrive "
+            "in focus. Switch off before starting a run.", "ok",
+        )
+
+    def _df2_learned_anything(self) -> bool:
+        """Whether DF2 has a plane to hold, from us or from ZEN."""
+        if self._df2_refs:
+            return True
+        try:
+            return bool(self.session.definite_focus().stabilizer_data())
+        except Exception:
+            return False
+
+    def _release_df2_hold(self, why: str = "") -> None:
+        """Force continuous stabilisation off.
+
+        Called when a run starts: DF2 holding ONE plane while the stage
+        visits positions at different heights would fight the run at
+        every position.
+        """
+        if not self.tgl_df2_hold.value:
+            return
+        try:
+            self.session.definite_focus().stabilize_periodically(False)
+        except Exception:
+            logger.info("could not stop continuous DF2%s", why)
+        self._set_hold_toggle(False)
+        self._update_df2_hold_info()
+
+    def _on_df2_find(self, _event=None) -> None:
+        """Search for the coverslip — for when you are lost in Z."""
+        df2 = self._df2()
+        if df2 is None:
+            return
+        self._say("Searching for the coverslip…", "info")
+        try:
+            df2.find_focus()
+        except Exception as e:
+            self._say(f"Could not find the surface: {e}", "err")
+            return
+        self._update_position()
+        self._say(
+            "Found the coverslip. This is the GLASS, not the embryo — "
+            "focus up from here, then learn the plane.", "ok",
+        )
+
+    def _update_df2_hold_info(self) -> None:
+        if not self.connected:
+            self.df2_hold_info.object = ""
+            return
+        try:
+            df2 = self.session.definite_focus()
+        except Exception:
+            self.df2_hold_info.object = (
+                "_No Definite Focus 2 on this stand._"
+            )
+            return
+        if self.tgl_df2_hold.value:
+            self.df2_hold_info.object = (
+                "🔒 **Holding.** Every field you drive to should "
+                "arrive in focus."
+            )
+        elif self._df2_learned_anything():
+            self.df2_hold_info.object = (
+                "A plane is learned — switch Hold on and drive around."
+            )
+        else:
+            self.df2_hold_info.object = (
+                "_No plane learned yet. Focus an embryo, then "
+                "**Learn focus** on the Acquisition tab._"
+            )
 
     def _update_df2_info(self) -> None:
         """Status line: is DF2 there, and which positions are taught."""
@@ -2384,6 +2551,12 @@ class MTBSetupPanel:
         if not self.pos_table.value.shape[0]:
             return ("No positions defined. Jog to each embryo and use "
                     "*Capture current position*.")
+        if self.zstack_on.value and not any(
+                c["z_stack"] for c in self.channels()):
+            return ("Z-stack is on, but no channel has z_stack ticked "
+                    "— every frame would be a single plane. Tick it in "
+                    "the Channels tab for the channel(s) you want "
+                    "stacked.")
         root = self.outdir.value.strip()
         if not root:
             return "Set an experiment root directory."
@@ -2405,6 +2578,12 @@ class MTBSetupPanel:
 
         root = self.outdir.value.strip()
         os.makedirs(root, exist_ok=True)
+
+        # Continuous DF2 holds ONE plane. A run visits positions at
+        # different heights, so leaving it on would fight the run at
+        # every position. The per-visit stabilize_now() is what a run
+        # uses instead.
+        self._release_df2_hold(" before the run")
 
         chans = self.channels()
         if not chans:
@@ -2975,6 +3154,25 @@ class MTBSetupPanel:
                 "0…500 µm — it cannot go negative). **Focus** always "
                 "drives the motorized drive (±14 mm) and is what you "
                 "want for coarse focusing.",
+                width=600, styles={"font-size": "0.8em"},
+            ),
+            pn.layout.Divider(),
+            "### Searching for embryos",
+            pn.Row(self.tgl_df2_hold, self.btn_df2_find),
+            self.df2_hold_info,
+            pn.pane.Markdown(
+                "_Definite Focus 2 is **not** an autofocus — it locks "
+                "onto the **coverslip**, never the embryo. But every "
+                "embryo on that coverslip sits at about the same "
+                "height, so: focus one embryo by hand, turn **Hold "
+                "focus** on, and every field you drive to afterwards "
+                "arrives in focus. **Find coverslip** is for when you "
+                "are lost in Z — it searches for the surface, then "
+                "focus up to the embryo from there._"
+                "\n\n"
+                "_Hold is switched off automatically when a run "
+                "starts: it would drag the focus back to one plane "
+                "while the stage visits positions at other heights._",
                 width=600, styles={"font-size": "0.8em"},
             ),
             pn.layout.Divider(),

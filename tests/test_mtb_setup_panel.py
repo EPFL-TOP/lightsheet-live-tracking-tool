@@ -1799,3 +1799,206 @@ def test_df2_settings_are_saved_in_a_configuration(panel_obj):
     assert not fresh.apply_config({"widgets": saved})
     assert fresh.df2_on.value is True
     assert fresh.zstack_planes.value == 7
+
+
+def test_REGRESSION_default_channel_asks_for_the_z_stack(panel_obj):
+    """The seed BF row had z_stack False while _on_add_channel used
+    True, so the DEFAULT channel was the one that ignored the
+    Acquisition tab's switch — ticking it appeared to do nothing."""
+    assert panel_obj.channels()[0]["z_stack"] is True
+
+
+def test_added_and_seeded_channels_agree_on_the_z_stack_default(
+        panel_obj):
+    panel_obj._on_add_channel()
+    stacks = [c["z_stack"] for c in panel_obj.channels()]
+    assert len(set(stacks)) == 1, (
+        f"inconsistent z_stack defaults across channel rows: {stacks}"
+    )
+
+
+def test_run_refused_when_no_channel_wants_the_configured_stack(
+        panel_obj, tmp_path):
+    import pandas as pd
+    panel_obj.motion = FakeMotion()
+    panel_obj.mmc = object()
+    panel_obj.pos_table.value = pd.DataFrame(
+        [{"name": "scene_000", "x_um": 1.0, "y_um": 2.0, "z_um": 3.0}]
+    )
+    panel_obj.outdir.value = str(tmp_path / "fresh")
+    panel_obj.zstack_on.value = True
+
+    df = panel_obj.chan_table.value.copy()
+    df["z_stack"] = False
+    panel_obj.chan_table.value = df
+
+    msg = panel_obj._validate_run()
+    assert msg and "single plane" in msg
+
+
+def test_run_allowed_once_a_channel_wants_the_stack(panel_obj, tmp_path):
+    import pandas as pd
+    panel_obj.motion = FakeMotion()
+    panel_obj.mmc = object()
+    panel_obj.pos_table.value = pd.DataFrame(
+        [{"name": "scene_000", "x_um": 1.0, "y_um": 2.0, "z_um": 3.0}]
+    )
+    panel_obj.outdir.value = str(tmp_path / "fresh")
+    panel_obj.zstack_on.value = True
+    assert panel_obj._validate_run() is None
+
+
+# ====================================================================
+# SEARCHING FOR EMBRYOS WITH DF2
+#
+# DF2 is a STABILIZER, not an autofocus: it locks onto the coverslip,
+# never the embryo. The searching win is indirect — every embryo on
+# that coverslip sits at about the same height, so holding a learned
+# plane means each new field arrives in focus.
+# ====================================================================
+
+class FakeHoldDF2(FakeDF2Panel):
+    def __init__(self, axis, learned=False):
+        super().__init__(axis)
+        self.periodic = []
+        self.found = 0
+        self._data = b"blob" if learned else b""
+        self.fail_periodic = False
+
+    def stabilize_periodically(self, on, period=0):
+        if self.fail_periodic:
+            raise RuntimeError("no plane to hold")
+        self.periodic.append(bool(on))
+        return True
+
+    def stabilizer_data(self):
+        return self._data
+
+    def find_focus(self):
+        self.found += 1
+        return True
+
+
+def _hold_panel(panel_obj, learned=False):
+    motion = FakeMotion(xyz=(0.0, 0.0, 250.0))
+    df2 = FakeHoldDF2(motion.z, learned=learned)
+
+    class FakeSession:
+        def axis(self, role):
+            return motion.z
+
+        def definite_focus(self):
+            return df2
+
+        def has_definite_focus(self):
+            return True
+
+    panel_obj.motion = motion
+    panel_obj.session = FakeSession()
+    return motion, df2
+
+
+def test_hold_is_refused_until_a_plane_has_been_learned(panel_obj):
+    """DF2 can only hold something it has been taught; turning this on
+    beforehand would silently do nothing."""
+    _, df2 = _hold_panel(panel_obj, learned=False)
+    panel_obj.tgl_df2_hold.value = True
+    assert panel_obj.tgl_df2_hold.value is False
+    assert df2.periodic == []
+
+
+def test_hold_starts_continuous_stabilization_once_taught(panel_obj):
+    _, df2 = _hold_panel(panel_obj, learned=True)
+    panel_obj.tgl_df2_hold.value = True
+    assert df2.periodic == [True]
+    assert panel_obj.tgl_df2_hold.value is True
+    assert "🔒" in panel_obj.tgl_df2_hold.name
+
+
+def test_hold_accepts_a_reference_learned_in_this_session(panel_obj):
+    """Not just one DF2 already holds — our own learned blob counts."""
+    _, df2 = _hold_panel(panel_obj, learned=False)
+    panel_obj._df2_refs["scene_000"] = b"A"
+    panel_obj.tgl_df2_hold.value = True
+    assert df2.periodic == [True]
+
+
+def test_turning_hold_off_stops_continuous_stabilization(panel_obj):
+    _, df2 = _hold_panel(panel_obj, learned=True)
+    panel_obj.tgl_df2_hold.value = True
+    panel_obj.tgl_df2_hold.value = False
+    assert df2.periodic == [True, False]
+    assert "🔓" in panel_obj.tgl_df2_hold.name
+
+
+def test_hold_reverts_when_the_hardware_refuses(panel_obj):
+    _, df2 = _hold_panel(panel_obj, learned=True)
+    df2.fail_periodic = True
+    panel_obj.tgl_df2_hold.value = True
+    assert panel_obj.tgl_df2_hold.value is False, (
+        "the toggle claims to be holding when DF2 refused"
+    )
+
+
+def test_REGRESSION_a_run_releases_the_continuous_hold(
+        panel_obj, tmp_path, monkeypatch):
+    """Continuous DF2 holds ONE plane. A run visits positions at
+    different heights, so leaving it on fights the run everywhere.
+
+    This drives _on_run rather than the helper: an earlier version of
+    this test called _release_df2_hold() directly and therefore passed
+    even with the call site deleted from _on_run entirely.
+    """
+    import pandas as pd
+    from interactive_tools import mtb_setup
+
+    _, df2 = _hold_panel(panel_obj, learned=True)
+    panel_obj.mmc = object()
+    panel_obj.pos_table.value = pd.DataFrame(
+        [{"name": "scene_000", "x_um": 1.0, "y_um": 2.0, "z_um": 3.0}]
+    )
+    panel_obj.outdir.value = str(tmp_path / "fresh")
+    panel_obj.tgl_df2_hold.value = True
+    assert df2.periodic == [True]
+
+    # Stop at backend construction; the release must already have run.
+    def refuse(*a, **kw):
+        raise RuntimeError("not starting a real backend in a test")
+
+    monkeypatch.setattr(mtb_setup, "MicroscopeInterface_MTB", refuse)
+    panel_obj._on_run()
+
+    assert df2.periodic == [True, False], (
+        "the run did not release the continuous hold"
+    )
+    assert panel_obj.tgl_df2_hold.value is False
+
+
+def test_release_helper_stops_stabilization(panel_obj):
+    _, df2 = _hold_panel(panel_obj, learned=True)
+    panel_obj.tgl_df2_hold.value = True
+    panel_obj._release_df2_hold()
+    assert df2.periodic == [True, False]
+    assert panel_obj.tgl_df2_hold.value is False
+
+
+def test_releasing_an_inactive_hold_does_nothing(panel_obj):
+    _, df2 = _hold_panel(panel_obj, learned=True)
+    panel_obj._release_df2_hold()
+    assert df2.periodic == []
+
+
+def test_find_coverslip_searches_for_the_surface(panel_obj):
+    _, df2 = _hold_panel(panel_obj)
+    panel_obj._on_df2_find()
+    assert df2.found == 1
+
+
+def test_hold_info_tells_you_what_is_missing(panel_obj):
+    _hold_panel(panel_obj, learned=False)
+    panel_obj._update_df2_hold_info()
+    assert "No plane learned" in panel_obj.df2_hold_info.object
+
+    panel_obj._df2_refs["scene_000"] = b"A"
+    panel_obj._update_df2_hold_info()
+    assert "learned" in panel_obj.df2_hold_info.object

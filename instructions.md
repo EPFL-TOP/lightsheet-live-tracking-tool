@@ -128,6 +128,14 @@ Channels are acquired **sequentially** — one camera, one cube.
   *Stack bottom / centre / top* to check the whole range is in focus,
   and *Set position Z = current focus* to re-anchor.
 - **Definite Focus 2** — see below
+
+> **A z-stack needs BOTH switches.** *Acquire Z-stack* here sets the
+> plane count and step; the **`z_stack` column in the Channels tab**
+> decides which channels actually get stacked. That is deliberate —
+> brightfield single-plane with a fluorescence stack is a normal
+> combination — but with every channel unticked you get single planes
+> and the setting looks ignored. The run is now refused with an
+> explanation rather than quietly producing flat frames.
 - **Pixel size XY** — set by *Read objective*. Wrong here means every
   correction is mis-scaled.
 - **2-D tracking** — on ignores Z drift; leave on until XY is trusted
@@ -218,6 +226,36 @@ before the first exposure, so every channel and every plane of a stack
 references the same plane. A z-stack centres on the Z **DF2 actually
 reached**, read back rather than assumed.
 
+### Searching for embryos with DF2
+
+**DF2 is not an autofocus.** It reflects an IR beam off the
+coverslip–medium interface and holds a fixed distance from *that
+surface*. It has never seen your embryo and cannot find one.
+`FindFocus()` searches for the **coverslip**, not the sample.
+
+The searching win is indirect, and it is large: every embryo on that
+coverslip sits at roughly the same height above it. So:
+
+1. Find and focus **one** embryo by hand.
+2. *Acquisition* tab → **Learn focus** (DF2 now knows "this far above
+   the glass").
+3. *Stage* tab → **🔒 Hold focus while searching**.
+4. Drive XY freely. Every new field arrives already in focus.
+
+**Find coverslip** is for when you are lost in Z entirely — it locates
+the glass, and you focus up from there to the specimen.
+
+Hold is switched **off automatically when a run starts**. Continuous
+stabilisation holds one plane, so it would drag the focus back while
+the stage visits positions at other heights; a run uses the per-visit
+`stabilize_now()` with each position's own reference instead.
+
+| | Searching | Running |
+|---|---|---|
+| Mode | `StabilizePeriodically(On)` | `stabilize_now()` per visit |
+| Reference | one plane, held everywhere | one **per position** |
+| Why | fields arrive in focus as you drive | positions sit at different heights |
+
 ### Which actuator does DF2 drive?
 
 **The trap.** DF2 corrects through *either* the motorized focus drive
@@ -227,11 +265,20 @@ The first hardware run of `df2_test.py` reported a failure for exactly
 this reason. Everything now measures the **total** focus, focus +
 piezo, and `describe()` reports which actuator is in use.
 
-**Signal quality** read *before* arming DF2 is meaningless. The
-reading that matters is the one after `learn()`. Zero there means DF2
-has no surface to lock onto — it will run, return success, and do
-nothing. Usual causes: no coverslip-to-medium interface within range,
-the wrong immersion or objective, or the DF2 light path not engaged.
+**Confirmed working on this stand, 2026-09-11.** DF2 corrects through
+the **focus drive**, not the piezo:
+
+```
+defocused via piezo: focus 6618.702 + piezo 255.001 = 6873.703 um (+5.009)
+stabilized:          focus 6613.304 + piezo 255.020 = 6868.324 um
+    focus moved -5.398 um,  piezo moved +0.019 um
+residual total error -0.370 um
+```
+
+**Ignore `SignalQuality`.** It reads 0 on this stand even in the run
+above, which recovered the plane to within 0.4 µm — it appears not to
+be populated outside periodic stabilization. Trust the recovery
+measurement, not the quality byte.
 
 ### If it is absent or fails
 
@@ -347,6 +394,8 @@ thresholding knobs (`containment_threshold`, `score_threshold`, `k`,
 | `.set_operation_mode(name)` | `Exact` / `Balanced` / `Fast` |
 | `.piezo_focus_usage()` | True if DF2 corrects via the piezo, False via the focus drive |
 | `.offset_reference(blob, um)` | derive a new plane `um` from an existing one |
+| `.stabilize_periodically(on)` | continuous hold — the searching mode |
+| `.find_focus()` | search for the coverslip when lost in Z |
 | `.objective_suitable(order_no)` | whether DF2 can work with an objective |
 | `MTBObjective.order_number` | the Zeiss order number DF2 wants |
 | `sample_pixel_size_um(cam, mag, adapter)` | `11 / (mag × adapter)` for the Prime 95B |

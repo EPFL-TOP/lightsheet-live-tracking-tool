@@ -231,10 +231,13 @@ def main() -> int:
     quality = df2.signal_quality
     _log(f"signal quality after learning: {quality}")
     if quality in (0, None):
-        _log("  *** ZERO SIGNAL. DF2 has nothing to lock onto, so it "
-             "will appear to run and do nothing. Usual causes: no "
-             "coverslip-to-medium interface in range, the wrong "
-             "immersion/objective, or the DF2 light path not engaged.")
+        # Confirmed 2026-09-11: this reads 0 on a DF2 that then
+        # recovered the plane to within 0.4 um, so it is NOT a
+        # failure signal on this stand. Report it, do not judge it.
+        _log("  (reads 0 on this stand even when DF2 works — it "
+             "appears not to be populated outside periodic "
+             "stabilization, so ignore it and trust the recovery "
+             "measurement below)")
 
     which = df2.piezo_focus_usage()
     _log(f"DF2 corrects through "
@@ -313,13 +316,8 @@ def main() -> int:
             _log(f"  - {f}")
         _log()
         _log("DF2 DID NOT RECOVER THE PLANE.")
-        if quality in (0, None):
-            _log("Signal quality was ZERO — fix that first; nothing "
-                 "else will work until DF2 can see a surface.")
-        else:
-            _log("Try --mode Exact, a smaller --offset, or "
-                 "--use-piezo on/off to change which actuator DF2 "
-                 "drives.")
+        _log("Try --mode Exact, a smaller --offset, or --use-piezo "
+             "on/off to change which actuator DF2 drives.")
         return 1
     _log(f"DF2 recovered the plane within {args.tol} um, "
          f"{max(1, args.repeat)} time(s).")

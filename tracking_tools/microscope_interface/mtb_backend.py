@@ -795,9 +795,25 @@ class MicroscopeInterface_MTB:
         error, which is far worse than a refusal: the file looks like a
         valid stack and nothing flags it.
         """
-        if not self.z_stack or self.motion is None:
+        if not self.z_stack:
             return []
         warnings = []
+
+        # 0. The one that actually bites, and the only one that
+        #    produces NO stack at all rather than a corrupt one: a
+        #    z-stack is configured but no channel asks for it, so
+        #    every frame comes back as a single plane and the setting
+        #    appears to be ignored.
+        if not any(c.get("z_stack") for c in self.channels):
+            warnings.append(
+                "a z-stack is configured but NO channel has z_stack "
+                "enabled, so every frame will be a single plane. Tick "
+                "z_stack on the channel(s) you want stacked in the "
+                "Channels tab."
+            )
+
+        if self.motion is None:
+            return warnings
         offsets = self.plane_offsets()
         step = float(self.z_stack.get("step_um", 1.0))
         axis = self.motion.z

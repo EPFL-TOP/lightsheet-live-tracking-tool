@@ -1055,24 +1055,49 @@ class MTBDefiniteFocus:
                 continue
         raise MTBError("DF2 FindFocus failed")
 
-    def stabilize_periodically(self, on: bool, period_s: float = 0.0):
-        """Continuous stabilisation.
+    def stabilize_periodically(self, on: bool, period: int = 0) -> bool:
+        """Hold the learned plane CONTINUOUSLY. The searching mode.
 
-        Useful for a single position, but it fights a multi-position
-        run: DF2 would keep pulling the focus back to one plane while
-        the stage visits others. Prefer stabilize_now() per visit.
+        This is what makes hunting for embryos fast. DF2 holds a fixed
+        distance from the COVERSLIP, and every embryo on that coverslip
+        sits at roughly the same height — so once one is in focus, every
+        new field you drive to arrives in focus too, with no refocusing.
+
+        It is the opposite of what a multi-position RUN wants: DF2 would
+        keep dragging the focus back to one plane while the stage visits
+        positions at different heights. Use stabilize_now() per visit
+        there, and make sure this is OFF before a run starts.
+
+        `period` is the device's own UInt32 period; 0 leaves whatever it
+        is configured with. The unit is not documented by MTB — read
+        `.period` back rather than assuming seconds.
         """
         try:
             from ZEISS.MTB.Api import MTBOnOff
             flag = MTBOnOff.On if on else MTBOnOff.Off
         except Exception:
             flag = bool(on)
-        for args in ((flag, period_s) if period_s else (flag,), (flag,)):
+        # UInt32: an accidental float is rejected by pythonnet >=3.0.
+        attempts = ([(flag, int(period))] if period else []) + [(flag,)]
+        for args in attempts:
             try:
                 return self._c.StabilizePeriodically(*args) is not False
             except Exception:
                 continue
         raise MTBError("DF2 StabilizePeriodically failed")
+
+    def is_stabilizing_periodically(self) -> bool | None:
+        """Whether continuous stabilisation is currently running.
+
+        GetStabilizePeriodicallyOnOff has an out-param carrying the
+        REASON it stopped, which pythonnet appends to the return.
+        """
+        try:
+            result = self._c.GetStabilizePeriodicallyOnOff()
+        except Exception:
+            return None
+        value = result[0] if isinstance(result, tuple) else result
+        return "on" in str(value).lower()
 
     def stop(self) -> bool:
         mode = resolve_mode("Synchronous")

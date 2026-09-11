@@ -65,13 +65,16 @@ blob on this build — 9 bytes, learned in 0.4 s, with the objective
 (Fluar 10x/0.50, order 420140-9901-000) reported *Suitable*. So
 per-position references are available.
 
-**Still open — does DF2 actually hold?** The first hardware run looked
-like a failure, but the test watched only the piezo while DF2 may
-correct through the motorized focus drive. `df2_test.py` now measures
-the total focus and reports `GetPiezoFocusUsage()`, so re-run it. Note
-`signal quality` read 0; the reading that matters is the one *after*
-`learn()`, which the test now prints. Zero there means DF2 has no
-surface to lock onto and the mechanical setup needs fixing first.
+**Answered — DF2 holds.** It corrects through the **focus drive**
+(`GetPiezoFocusUsage` = Off): disturbing the piezo by +5.009 µm, DF2
+moved the focus drive −5.398 µm for a residual of −0.370 µm. The first
+run only looked like a failure because the test watched the piezo,
+which DF2 never touches. `SignalQuality` reads 0 even on this
+successful run, so it is not a health signal on this stand.
+
+**Still to measure**: whether the residual accumulates over many
+cycles (`--repeat 10`) and whether `Exact` mode tightens it below the
+~0.4 µm seen at `Balanced`. Worth knowing before choosing a z-step.
 
 **Worth adopting if it works**:
 `SetFocusPositionOffset(Byte[] data, Double offset, String unit,
