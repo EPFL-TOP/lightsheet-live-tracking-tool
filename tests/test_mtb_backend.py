@@ -1292,3 +1292,261 @@ def test_no_illuminate_callback_still_acquires(patched):
     iface = make(stop_after_tp=1)      # synthetic source, no illuminate
     _run(iface)
     assert (tmp_path / "scene_000" / "t0000_BF.tif").exists()
+
+
+# ====================================================================
+# DEFINITE FOCUS 2
+#
+# DF2 holds a learned plane optically. The two things that can go
+# wrong are (a) one global reference being used for positions that sit
+# at different heights, and (b) DF2 and the image-based tracker both
+# aiming the Z axis, which makes them fight every timepoint.
+# ====================================================================
+
+class FakeDF2:
+    """Stands in for MTBDefiniteFocus.
+
+    Models the thing that matters: stabilizing MOVES THE FOCUS. A
+    double that only records calls would let the backend image at the
+    commanded Z and still pass.
+    """
+
+    def __init__(self, axis, planes=None, reject=()):
+        self.axis = axis
+        #: blob -> the Z that blob represents
+        self.planes = planes or {}
+        self.reject = set(reject)
+        self.restored = []
+        self.stabilized = 0
+        self._plane = None
+
+    def restore(self, data):
+        if bytes(data) in self.reject:
+            raise RuntimeError("stale reference")
+        self.restored.append(bytes(data))
+        self._plane = self.planes.get(bytes(data))
+        return True
+
+    def stabilize_now(self):
+        self.stabilized += 1
+        if self._plane is not None:
+            self.axis.move_to(self._plane)
+        return True
+
+    def learn(self):
+        return b"learned"
+
+
+def _df2_backend(patched, **overrides):
+    make, motion, tmp_path = patched
+    df2 = FakeDF2(motion.z)
+    overrides.setdefault("use_definite_focus", True)
+    overrides.setdefault("df2", df2)
+    iface = make(**overrides)
+    iface.session = object()
+    iface.motion = motion
+    iface._connect_df2()
+    return iface, df2, motion
+
+
+def test_df2_reference_blobs_survive_the_json_round_trip():
+    ref = bytes(range(256))
+    encoded = mtb_backend.encode_df2_ref(ref)
+    assert isinstance(encoded, str), "must be JSON-storable"
+    assert mtb_backend.decode_df2_ref(encoded) == ref
+
+
+def test_df2_decode_tolerates_rubbish():
+    """A corrupt reference costs focus stabilisation, not the run."""
+    assert mtb_backend.decode_df2_ref(None) is None
+    assert mtb_backend.decode_df2_ref("") is None
+    assert mtb_backend.decode_df2_ref("not base64!!!") is None
+    assert mtb_backend.decode_df2_ref(12345) is None
+    assert mtb_backend.decode_df2_ref([1, 2]) == b"\x01\x02"
+
+
+def test_df2_references_are_read_from_positions_config(tmp_path):
+    ref = mtb_backend.encode_df2_ref(b"\xaa\xbb")
+    iface = MicroscopeInterface_MTB(
+        {"scene_000": {"xyz_um": (1.0, 2.0, 3.0), "df2_ref": ref}},
+        str(tmp_path), {},
+    )
+    assert iface._df2_refs["scene_000"] == b"\xaa\xbb"
+
+
+def test_df2_is_off_by_default(patched):
+    make, _, _ = patched
+    iface = make()
+    assert iface.use_definite_focus is False
+    assert iface._stabilize("scene_000", 250.0) == 250.0
+
+
+def test_df2_missing_hardware_downgrades_instead_of_failing(patched):
+    """Losing focus stabilisation is a far smaller loss than losing the
+    run, so an absent DF2 must not be fatal."""
+    make, motion, _ = patched
+    iface = make(use_definite_focus=True)
+
+    class NoDF2:
+        def definite_focus(self):
+            raise RuntimeError("MTBFocusStabilizer2 is absent")
+
+    iface.session = NoDF2()
+    iface.motion = motion
+    iface._connect_df2()
+    assert iface.use_definite_focus is False
+    assert iface._stabilize("scene_000", 250.0) == 250.0
+
+
+def test_df2_restores_the_reference_belonging_to_THIS_position(patched):
+    """Positions sit at different heights; one global reference would
+    focus every position on the first one's plane."""
+    make, motion, tmp_path = patched
+    df2 = FakeDF2(motion.z, planes={b"A": 251.5, b"B": 262.5})
+    iface = make(use_definite_focus=True, df2=df2)
+    iface.session = object()
+    iface.motion = motion
+    iface._df2_refs = {"scene_000": b"A", "scene_001": b"B"}
+    iface._connect_df2()
+
+    assert iface._stabilize("scene_000", 250.0) == pytest.approx(251.5)
+    assert iface._stabilize("scene_001", 260.0) == pytest.approx(262.5)
+    assert df2.restored == [b"A", b"B"]
+
+
+def test_df2_returns_the_z_it_actually_reached_not_the_commanded_one(
+        patched):
+    """The stack centres on the returned Z. DF2 moves the focus itself,
+    so assuming the commanded Z would centre the stack in the wrong
+    place by exactly the drift DF2 just removed."""
+    iface, df2, motion = _df2_backend(patched)
+    iface._df2_refs["scene_000"] = b"A"
+    df2.planes[b"A"] = 253.75
+    assert iface._stabilize("scene_000", 250.0) == pytest.approx(253.75)
+
+
+def test_df2_falls_back_to_the_commanded_z_when_stabilizing_fails(
+        patched):
+    iface, df2, motion = _df2_backend(patched)
+
+    def boom():
+        raise RuntimeError("lost the surface")
+
+    df2.stabilize_now = boom
+    assert iface._stabilize("scene_000", 250.0) == 250.0
+
+
+def test_df2_reports_a_stale_reference_once_then_carries_on(patched):
+    """A blob DF2 rejects must not log on every visit of a long run."""
+    make, motion, _ = patched
+    df2 = FakeDF2(motion.z, reject={b"STALE"})
+    iface = make(use_definite_focus=True, df2=df2)
+    iface.session = object()
+    iface.motion = motion
+    iface._df2_refs = {"scene_000": b"STALE"}
+    iface._connect_df2()
+
+    for _ in range(3):
+        iface._stabilize("scene_000", 250.0)
+    assert "scene_000" in iface._df2_bad
+    # Still stabilized every time, just on DF2's current plane.
+    assert df2.stabilized == 3
+
+
+def test_df2_owning_z_drops_tracked_z_corrections(patched):
+    """Two controllers aiming the same axis at different measurements
+    fight every timepoint."""
+    iface, _, _ = _df2_backend(patched, df2_owns_z=True)
+    iface.relative_move("scene_000", 1.0, 2.0, 3.0)
+    dx, dy, dz = iface.get_cum_drift("scene_000")
+    assert (dx, dy) == (1.0, 2.0)
+    assert dz == 0.0, "DF2 and the tracker are both driving Z"
+
+
+def test_tracked_z_is_kept_when_df2_does_not_own_z(patched):
+    iface, _, _ = _df2_backend(patched, df2_owns_z=False)
+    iface.relative_move("scene_000", 1.0, 2.0, 3.0)
+    assert iface.get_cum_drift("scene_000") == (1.0, 2.0, 3.0)
+
+
+def test_tracked_z_is_kept_when_df2_is_off(patched):
+    make, _, _ = patched
+    iface = make()
+    iface.relative_move("scene_000", 1.0, 2.0, 3.0)
+    assert iface.get_cum_drift("scene_000") == (1.0, 2.0, 3.0)
+
+
+def test_specimen_offset_is_applied_on_top_of_the_stabilized_plane(
+        patched):
+    """With df2_owns_z off, DF2 removes the hardware drift and the
+    tracked dz is specimen motion, so it belongs above the plane."""
+    iface, df2, motion = _df2_backend(patched, df2_owns_z=False)
+    iface._df2_refs["scene_000"] = b"A"
+    df2.planes[b"A"] = 250.0
+    iface.relative_move("scene_000", 0.0, 0.0, 4.0)
+
+    assert iface._stabilize("scene_000", 250.0) == pytest.approx(254.0)
+
+
+def test_set_df2_reference_writes_back_into_positions_config(tmp_path):
+    """So a plane learned mid-run is saved with the rest of the
+    position instead of dying with the process."""
+    cfg = {"scene_000": {"xyz_um": (1.0, 2.0, 3.0)}}
+    iface = MicroscopeInterface_MTB(cfg, str(tmp_path), {})
+    iface.set_df2_reference("scene_000", b"\x07\x08")
+    assert iface._df2_refs["scene_000"] == b"\x07\x08"
+    assert cfg["scene_000"]["df2_ref"] == \
+        mtb_backend.encode_df2_ref(b"\x07\x08")
+
+    iface.set_df2_reference("scene_000", None)
+    assert "scene_000" not in iface._df2_refs
+    assert cfg["scene_000"]["df2_ref"] is None
+
+
+def test_refresh_filename_picks_up_a_reference_learned_later(tmp_path):
+    cfg = {"scene_000": {"xyz_um": (1.0, 2.0, 3.0)}}
+    iface = MicroscopeInterface_MTB(cfg, str(tmp_path), {})
+    assert "scene_000" not in iface._df2_refs
+
+    cfg["scene_000"]["df2_ref"] = mtb_backend.encode_df2_ref(b"\x01")
+    iface.refresh_filename("scene_000")
+    assert iface._df2_refs["scene_000"] == b"\x01"
+
+
+def test_visit_stabilizes_before_any_exposure(patched):
+    """Every channel and every plane must reference the same plane, so
+    DF2 runs once, after the move and before the first frame."""
+    iface, df2, motion = _df2_backend(patched)
+    order = []
+    df2.stabilize_now = lambda: order.append("stabilize") or True
+    iface.synthetic_source = (
+        lambda x, y, z, n: order.append("grab")
+        or np.zeros((4, 4), dtype=np.uint16)
+    )
+    iface._visit("scene_000", 0)
+    assert order[0] == "stabilize"
+    assert order.count("stabilize") == 1
+    assert "grab" in order
+
+
+def test_visit_centres_the_stack_on_the_stabilized_plane(patched):
+    """The z-stack belongs to the position, and DF2 refines where that
+    position's plane actually is."""
+    iface, df2, motion = _df2_backend(
+        patched, z_stack={"n_planes": 3, "step_um": 2.0},
+        channels=[{"name": "BF", "reflector_pos": 0,
+                   "exposure_ms": 5.0, "z_stack": True}],
+    )
+    iface._df2_refs["scene_000"] = b"A"
+    df2.planes[b"A"] = 253.0
+
+    grabbed = []
+    iface.synthetic_source = (
+        lambda x, y, z, n: grabbed.append(z)
+        or np.zeros((4, 4), dtype=np.uint16)
+    )
+    iface._visit("scene_000", 0)
+    # Baseline Z is 250.0; DF2 moved the plane to 253.0.
+    assert grabbed == pytest.approx([251.0, 253.0, 255.0]), (
+        "the stack centred on the commanded Z, not the stabilized one"
+    )

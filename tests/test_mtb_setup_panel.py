@@ -1409,9 +1409,16 @@ def test_zstack_info_warns_when_the_stack_exceeds_the_range(panel_obj):
     assert "clamped" in panel_obj.zstack_info.object
 
 
-def test_stack_edge_buttons_move_to_the_planned_extremes(panel_obj):
-    motion = FakeMotion(xyz=(0.0, 0.0, 250.0))
-    axis = FakeAxis(250.0, lo=0.0, hi=500.0)
+def _stack_panel(panel_obj, centre=250.0):
+    """A panel with one captured position and a stack configured.
+
+    session.axis('piezo') and motion.z are the SAME object, as they
+    are in reality — two separate doubles let the fake disagree with
+    itself and hid a genuine inconsistency.
+    """
+    motion = FakeMotion(xyz=(0.0, 0.0, centre))
+    axis = motion.z
+    axis.limits = (0.0, 500.0)
 
     class FakeSession:
         def axis(self, role):
@@ -1419,10 +1426,16 @@ def test_stack_edge_buttons_move_to_the_planned_extremes(panel_obj):
 
     panel_obj.motion = motion
     panel_obj.session = FakeSession()
+    panel_obj._on_capture()                 # z_um = centre
+    panel_obj.pos_table.selection = [0]
     panel_obj.zstack_on.value = True
     panel_obj.zstack_planes.value = 11
-    panel_obj.zstack_step.value = 1.0     # +/- 5 um
+    panel_obj.zstack_step.value = 1.0       # +/- 5 um
+    return motion, axis
 
+
+def test_stack_edge_buttons_move_to_the_planned_extremes(panel_obj):
+    motion, _ = _stack_panel(panel_obj)
     panel_obj._goto_stack_edge(0)
     assert motion.z.moves[-1] == pytest.approx(250.0)
     panel_obj._goto_stack_edge(-1)
@@ -1431,28 +1444,65 @@ def test_stack_edge_buttons_move_to_the_planned_extremes(panel_obj):
     assert motion.z.moves[-1] == pytest.approx(255.0)
 
 
-def test_stack_edges_are_relative_to_a_fixed_centre(panel_obj):
-    """Bottom then top must span the stack, not drift away from it."""
-    motion = FakeMotion(xyz=(0.0, 0.0, 250.0))
-    axis = FakeAxis(250.0, lo=0.0, hi=500.0)
+def test_REGRESSION_stack_centre_comes_from_the_position_not_the_focus(
+        panel_obj):
+    """A z-stack belongs to a position. Reading the live focus made
+    the stack creep every time the focus was touched."""
+    motion, axis = _stack_panel(panel_obj, centre=250.0)
 
-    class FakeSession:
-        def axis(self, role):
-            return axis
-
-    panel_obj.motion = motion
-    panel_obj.session = FakeSession()
-    panel_obj.zstack_on.value = True
-    panel_obj.zstack_planes.value = 11
-    panel_obj.zstack_step.value = 1.0
+    # Drive the focus well away from the position's stored Z.
+    axis.position = 300.0
 
     panel_obj._goto_stack_edge(0)
+    assert motion.z.moves[-1] == pytest.approx(250.0), (
+        "centre followed the live focus instead of the position"
+    )
+
+
+def test_REGRESSION_pressing_centre_never_redefines_the_anchor(
+        panel_obj):
+    """bottom -> centre -> top must span the stack. Re-reading the
+    focus on a centre press moved the anchor down each time."""
+    motion, axis = _stack_panel(panel_obj, centre=250.0)
+
     panel_obj._goto_stack_edge(-1)
     axis.position = motion.z.position        # hardware follows
+    panel_obj._goto_stack_edge(0)
+    assert motion.z.moves[-1] == pytest.approx(250.0)
+    axis.position = motion.z.position
     panel_obj._goto_stack_edge(+1)
-    assert motion.z.moves[-1] == pytest.approx(255.0), (
-        "top drifted because centre was re-read after moving"
-    )
+    assert motion.z.moves[-1] == pytest.approx(255.0)
+
+
+def test_set_position_z_reanchors_the_stack(panel_obj):
+    """The supported way to move a stack: change the POSITION."""
+    motion, axis = _stack_panel(panel_obj, centre=250.0)
+    axis.position = 262.0
+
+    panel_obj._on_set_position_z()
+    assert float(panel_obj.pos_table.value.iloc[0]["z_um"]) == \
+        pytest.approx(262.0)
+
+    panel_obj._goto_stack_edge(0)
+    assert motion.z.moves[-1] == pytest.approx(262.0)
+
+
+def test_set_position_z_needs_exactly_one_selection(panel_obj):
+    _stack_panel(panel_obj)
+    panel_obj._on_capture()
+    panel_obj.pos_table.selection = [0, 1]
+    panel_obj._on_set_position_z()
+    assert "exactly one" in panel_obj.status.object
+
+
+def test_stack_centre_is_per_position(panel_obj):
+    motion, axis = _stack_panel(panel_obj, centre=250.0)
+    axis.position = 400.0
+    panel_obj._on_capture()                  # second position at 400
+    panel_obj.pos_table.selection = [1]
+    assert panel_obj.stack_centre_um() == pytest.approx(400.0)
+    panel_obj.pos_table.selection = [0]
+    assert panel_obj.stack_centre_um() == pytest.approx(250.0)
 
 
 # ------------------------------------------- run banner and live view
@@ -1524,3 +1574,228 @@ def test_render_view_is_a_no_op_without_a_selection(panel_obj):
     panel_obj.view_position.value = None
     panel_obj.view_channels.value = []
     panel_obj._render_view()          # must not raise
+
+
+# ====================================================================
+# DEFINITE FOCUS 2
+# ====================================================================
+
+class FakeDF2Panel:
+    """Stands in for MTBDefiniteFocus at the panel's level.
+
+    learn() returns a DIFFERENT blob each time and moves nothing, so a
+    test can tell which position a reference was attached to.
+    """
+
+    def __init__(self, axis):
+        self.axis = axis
+        self.learned = []
+        self.restored = []
+        self.stabilized = 0
+        self.modes = []
+        self.fail_learn = False
+
+    def learn(self):
+        if self.fail_learn:
+            raise RuntimeError("no focus signal")
+        blob = f"ref{len(self.learned)}".encode()
+        self.learned.append((blob, self.axis.position))
+        return blob
+
+    def restore(self, data):
+        self.restored.append(bytes(data))
+        return True
+
+    def stabilize_now(self):
+        self.stabilized += 1
+        return True
+
+    def set_operation_mode(self, name):
+        self.modes.append(name)
+        return True
+
+    def operation_mode(self):
+        return "Balanced"
+
+    signal_quality = 90
+
+
+def _df2_panel(panel_obj, n_positions=2):
+    """Panel with N captured positions and a fake DF2 attached."""
+    motion = FakeMotion(xyz=(0.0, 0.0, 250.0))
+    axis = motion.z
+    df2 = FakeDF2Panel(axis)
+
+    class FakeSession:
+        def axis(self, role):
+            return axis
+
+        def definite_focus(self):
+            return df2
+
+        def has_definite_focus(self):
+            return True
+
+    panel_obj.motion = motion
+    panel_obj.session = FakeSession()
+    for i in range(n_positions):
+        axis.position = 250.0 + 10.0 * i
+        motion.x.position = 100.0 * i
+        panel_obj._on_capture()
+    return motion, axis, df2
+
+
+def test_df2_learn_attaches_the_reference_to_the_selected_position(
+        panel_obj):
+    _, _, df2 = _df2_panel(panel_obj)
+    panel_obj.pos_table.selection = [1]
+    panel_obj._on_df2_learn()
+
+    assert "scene_001" in panel_obj._df2_refs
+    assert "scene_000" not in panel_obj._df2_refs
+    assert panel_obj._df2_refs["scene_001"] == df2.learned[0][0]
+
+
+def test_df2_learn_requires_an_unambiguous_position(panel_obj):
+    _, _, df2 = _df2_panel(panel_obj)
+    panel_obj.pos_table.selection = [0, 1]
+    panel_obj._on_df2_learn()
+    assert panel_obj._df2_refs == {}
+    assert not df2.learned
+
+
+def test_df2_learn_syncs_the_position_z_to_the_learned_plane(panel_obj):
+    """The position's Z and its DF2 plane must agree, or 'go to
+    position' and 'stabilize' disagree about where focus is."""
+    _, axis, _ = _df2_panel(panel_obj, n_positions=1)
+    panel_obj.pos_table.selection = [0]
+    axis.position = 273.5           # operator refocused
+    panel_obj._on_df2_learn()
+    assert float(panel_obj.pos_table.value.iloc[0]["z_um"]) == \
+        pytest.approx(273.5)
+
+
+def test_df2_learn_all_visits_every_position(panel_obj):
+    """Each position sits at its own height, so each needs its own
+    reference; one global one would focus them all on the first."""
+    motion, _, df2 = _df2_panel(panel_obj, n_positions=3)
+    panel_obj.settle_s.value = 0.0
+    panel_obj._on_df2_learn_all()
+
+    assert set(panel_obj._df2_refs) == {
+        "scene_000", "scene_001", "scene_002"
+    }
+    assert len({v for v in panel_obj._df2_refs.values()}) == 3, (
+        "the same reference was reused for every position"
+    )
+    # It really moved to each one before learning.
+    assert [c[0] for c in motion.moved_to[-3:]] == [0.0, 100.0, 200.0]
+
+
+def test_df2_learn_failure_leaves_no_reference(panel_obj):
+    _, _, df2 = _df2_panel(panel_obj, n_positions=1)
+    df2.fail_learn = True
+    panel_obj.pos_table.selection = [0]
+    panel_obj._on_df2_learn()
+    assert panel_obj._df2_refs == {}
+
+
+def test_df2_stabilize_restores_this_positions_plane_first(panel_obj):
+    _, _, df2 = _df2_panel(panel_obj, n_positions=2)
+    panel_obj._df2_refs = {"scene_000": b"A", "scene_001": b"B"}
+    panel_obj.pos_table.selection = [1]
+    panel_obj._on_df2_stabilize()
+    assert df2.restored == [b"B"]
+    assert df2.stabilized == 1
+
+
+def test_df2_clear_removes_only_the_selected_reference(panel_obj):
+    _df2_panel(panel_obj, n_positions=2)
+    panel_obj._df2_refs = {"scene_000": b"A", "scene_001": b"B"}
+    panel_obj.pos_table.selection = [0]
+    panel_obj._on_df2_clear()
+    assert panel_obj._df2_refs == {"scene_001": b"B"}
+
+
+def test_positions_config_carries_the_focus_references(panel_obj):
+    from interactive_tools.mtb_setup import decode_df2_ref
+    _df2_panel(panel_obj, n_positions=2)
+    panel_obj._df2_refs = {"scene_001": b"\x01\x02"}
+    cfg = panel_obj.positions_config()
+    assert "df2_ref" not in cfg["scene_000"]
+    assert decode_df2_ref(cfg["scene_001"]["df2_ref"]) == b"\x01\x02"
+
+
+def test_positions_file_round_trips_the_focus_references(
+        panel_obj, tmp_path):
+    """A learned plane is expensive to acquire — it must survive a
+    restart with the rest of the position."""
+    _df2_panel(panel_obj, n_positions=2)
+    panel_obj._df2_refs = {"scene_000": b"\xaa", "scene_001": b"\xbb"}
+    path = tmp_path / "positions.json"
+    panel_obj.positions_file.value = str(path)
+    panel_obj._on_save_positions()
+
+    fresh = MTBSetupPanel()
+    fresh.positions_file.value = str(path)
+    fresh._on_load_positions()
+    assert fresh._df2_refs == {"scene_000": b"\xaa",
+                              "scene_001": b"\xbb"}
+    assert list(fresh.pos_table.value["df2"]) == [True, True]
+
+
+def test_df2_column_shows_which_positions_are_taught(panel_obj):
+    _df2_panel(panel_obj, n_positions=2)
+    assert list(panel_obj.pos_table.value["df2"]) == [False, False]
+    panel_obj.pos_table.selection = [0]
+    panel_obj._on_df2_learn()
+    assert list(panel_obj.pos_table.value["df2"]) == [True, False]
+
+
+def test_df2_info_warns_when_positions_have_no_reference(panel_obj):
+    _df2_panel(panel_obj, n_positions=2)
+    panel_obj._update_df2_info()
+    text = panel_obj.df2_info.object
+    assert "0 of 2" in text
+    assert "another position" in text
+
+
+def test_df2_info_is_safe_before_connecting():
+    fresh = MTBSetupPanel()
+    assert "Connect" in fresh.df2_info.object
+
+
+def test_df2_info_says_so_when_the_stand_has_no_stabilizer(panel_obj):
+    motion = FakeMotion()
+
+    class NoDF2Session:
+        def axis(self, role):
+            return motion.z
+
+        def has_definite_focus(self):
+            return False
+
+    panel_obj.motion = motion
+    panel_obj.session = NoDF2Session()
+    panel_obj._update_df2_info()
+    assert "No Definite Focus 2" in panel_obj.df2_info.object
+
+
+def test_df2_settings_are_saved_in_a_configuration(panel_obj):
+    """Including the plane count, which a configuration silently
+    dropped because only the legacy range widget was listed."""
+    assert "df2_on" in panel_obj.CONFIG_FIELDS
+    assert "df2_owns_z" in panel_obj.CONFIG_FIELDS
+    assert "zstack_planes" in panel_obj.CONFIG_FIELDS
+    panel_obj.df2_on.value = True
+    panel_obj.df2_owns_z.value = False
+    panel_obj.zstack_planes.value = 7
+    saved = panel_obj.current_config()["widgets"]
+    assert saved["df2_on"] is True
+    assert saved["df2_owns_z"] is False
+    assert saved["zstack_planes"] == 7
+
+    fresh = MTBSetupPanel()
+    assert not fresh.apply_config({"widgets": saved})
+    assert fresh.df2_on.value is True
+    assert fresh.zstack_planes.value == 7

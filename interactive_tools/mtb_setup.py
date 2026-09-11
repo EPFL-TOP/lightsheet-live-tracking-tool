@@ -76,11 +76,33 @@ except Exception as _e:            # pragma: no cover - env dependent
 try:
     from tracking_tools.microscope_interface.mtb_backend import (  # noqa: E402,E501
         MicroscopeInterface_MTB,
+        decode_df2_ref,
+        encode_df2_ref,
     )
     _BACKEND_IMPORT_ERROR = None
 except Exception as _e:            # pragma: no cover - env dependent
     MicroscopeInterface_MTB = None
     _BACKEND_IMPORT_ERROR = _e
+
+    # The DF2 reference codec is pure base64 with no hardware
+    # dependency. Keep it working even when the backend will not
+    # import, so loading a positions file never fails for want of it.
+    import base64 as _b64
+
+    def encode_df2_ref(data):
+        if not data:
+            return None
+        return _b64.b64encode(bytes(data)).decode("ascii")
+
+    def decode_df2_ref(value):
+        if not value:
+            return None
+        try:
+            if isinstance(value, (bytes, bytearray, list, tuple)):
+                return bytes(bytearray(value))
+            return _b64.b64decode(value, validate=True)
+        except Exception:
+            return None
 
 # The tracker pulls in heavier dependencies (torch, imaging-server-kit)
 # than motion does, so keep its failure separate: you can still set up
@@ -176,6 +198,7 @@ class MTBSetupPanel:
 
         self._build_widgets()
         self._wire()
+        self._update_df2_info()
         try:
             self._update_zstack_info()
             self._refresh_config_list()
@@ -378,7 +401,7 @@ class MTBSetupPanel:
         # --- positions ---
         import pandas as pd
         self.pos_table = pn.widgets.Tabulator(
-            pd.DataFrame(columns=["name", "x_um", "y_um", "z_um"]),
+            pd.DataFrame(columns=["name", "x_um", "y_um", "z_um", "df2"]),
             height=220, width=560, show_index=False,
             selectable="checkbox",
         )
@@ -497,10 +520,50 @@ class MTBSetupPanel:
         self.btn_z_top = pn.widgets.Button(
             name="↥ Stack top", width=140
         )
+        self.btn_set_pos_z = pn.widgets.Button(
+            name="Set position Z = current focus", width=240,
+        )
         self.zstack_step = pn.widgets.FloatInput(
             name="Z step (µm)", value=1.0, start=0.01, end=50.0,
             width=120,
         )
+
+        # --- Definite Focus 2 ---
+        # DF2 holds a learned plane optically. Over hours it beats
+        # correcting Z from images: no light, no exposure time, and it
+        # works on a specimen with nothing trackable in it.
+        self.df2_on = pn.widgets.Checkbox(
+            name="Use Definite Focus 2 during the run", value=False,
+        )
+        self.df2_owns_z = pn.widgets.Checkbox(
+            name="DF2 owns Z (ignore tracked Z drift)", value=True,
+        )
+        self.df2_mode = pn.widgets.Select(
+            name="Precision", options=["Exact", "Balanced", "Fast"],
+            value="Balanced", width=140,
+        )
+        self.btn_df2_learn = pn.widgets.Button(
+            name="Learn focus → selected position",
+            button_type="primary", width=250,
+        )
+        self.btn_df2_learn_all = pn.widgets.Button(
+            name="Learn at every position", width=200,
+        )
+        self.btn_df2_stabilize = pn.widgets.Button(
+            name="Stabilize now", width=140,
+        )
+        self.btn_df2_clear = pn.widgets.Button(
+            name="Clear reference", width=150,
+        )
+        self.df2_info = pn.pane.Markdown(
+            "", width=600, styles={"font-size": "0.85em"},
+        )
+        #: name -> opaque DF2 stabilizing blob. Kept beside the table
+        #: rather than in it: it is a few hundred bytes of binary and
+        #: has no business being shown as a column. The table carries a
+        #: boolean `df2` so the operator can still see which positions
+        #: have one.
+        self._df2_refs: dict[str, bytes] = {}
         # Light is always gated to the exposure. For a z-stack the
         # question is only whether to switch it per PLANE (least light
         # dose) or hold it for the whole stack (fewer mechanical
@@ -639,6 +702,11 @@ class MTBSetupPanel:
         self.btn_z_bottom.on_click(lambda e: self._goto_stack_edge(-1))
         self.btn_z_centre.on_click(lambda e: self._goto_stack_edge(0))
         self.btn_z_top.on_click(lambda e: self._goto_stack_edge(+1))
+        self.btn_set_pos_z.on_click(self._on_set_position_z)
+        self.btn_df2_learn.on_click(self._on_df2_learn)
+        self.btn_df2_learn_all.on_click(self._on_df2_learn_all)
+        self.btn_df2_stabilize.on_click(self._on_df2_stabilize)
+        self.btn_df2_clear.on_click(self._on_df2_clear)
         for w in (self.zstack_planes, self.zstack_step,
                   self.zstack_on):
             w.param.watch(lambda ev: self._update_zstack_info(),
@@ -743,11 +811,13 @@ class MTBSetupPanel:
                       "warn")
             self._show_hw_info()
             self._update_position()
+            self._update_df2_info()
             return
 
         self._say("Hardware connected.", "ok")
         self._show_hw_info()
         self._update_position()
+        self._update_df2_info()
         self.btn_connect.disabled = True
 
     def _open_camera(self) -> None:
@@ -1071,6 +1141,7 @@ class MTBSetupPanel:
             "x_um": round(x, 3),
             "y_um": round(y, 3),
             "z_um": round(z, 3),
+            "df2": False,
         }])
         # Concatenating onto an all-NA/empty frame is deprecated in
         # pandas and changes dtype inference, so start from the row.
@@ -1135,6 +1206,11 @@ class MTBSetupPanel:
                 "xyz_um": (float(r["x_um"]), float(r["y_um"]),
                            float(r["z_um"]))
             }
+            ref = self._df2_refs.get(name)
+            if ref:
+                # base64 so it survives the JSON round trip through
+                # positions.json and tracking_RoIs.json.
+                entry["df2_ref"] = encode_df2_ref(ref)
             if root:
                 entry["log_dir"] = os.path.join(root, name,
                                                 log_dir_name)
@@ -1175,11 +1251,17 @@ class MTBSetupPanel:
                 cfg = json.load(fh)
             import pandas as pd
             rows = []
+            refs = {}
             for name, entry in cfg.items():
                 x, y, z = entry["xyz_um"]
+                ref = decode_df2_ref(entry.get("df2_ref"))
+                if ref:
+                    refs[name] = ref
                 rows.append({"name": name, "x_um": x, "y_um": y,
-                             "z_um": z})
+                             "z_um": z, "df2": bool(ref)})
+            self._df2_refs = refs
             self._set_positions_df(pd.DataFrame(rows))
+            self._update_df2_info()
         except Exception as e:
             self._say(f"Load failed: {e}", "err")
             return
@@ -1299,7 +1381,8 @@ class MTBSetupPanel:
         "camera_pixel_um", "adapter_mag", "pixel_xy", "pixel_z",
         "tracking_2d", "serverkit", "max_xy", "max_z",
         "interval_s", "n_timepoints", "settle_s",
-        "zstack_on", "zstack_range", "zstack_step",
+        "zstack_on", "zstack_planes", "zstack_range", "zstack_step",
+        "df2_on", "df2_owns_z", "df2_mode",
         "auto_track", "require_all_rois", "roi_poll_s",
     )
 
@@ -1534,25 +1617,47 @@ class MTBSetupPanel:
             pass
         self.zstack_info.object = note
 
+    def stack_centre_um(self) -> float | None:
+        """Z that the stack is centred on.
+
+        A z-stack BELONGS TO A POSITION, so the centre is the selected
+        position's stored Z — not wherever the focus happens to be.
+        Reading the live focus made the stack shift every time it was
+        touched. Falls back to the current Z only when no position is
+        selected.
+        """
+        rows = self.pos_table.selection or []
+        df = self.pos_table.value
+        if len(rows) == 1 and rows[0] < len(df):
+            return float(df.iloc[rows[0]]["z_um"])
+        if not df.empty and len(rows) == 0:
+            # Unambiguous single-position case.
+            if len(df) == 1:
+                return float(df.iloc[0]["z_um"])
+        if not self.connected:
+            return None
+        try:
+            return float(self.session.axis(self.z_axis.value).position)
+        except Exception:
+            return None
+
     def _goto_stack_edge(self, where: int) -> None:
         """Move Z to the bottom (-1), centre (0) or top (+1) plane.
 
-        Centre is remembered on the first jump so bottom/top are
-        relative to the stack you set up, not to wherever the last
-        press left the focus.
+        Centre always RETURNS to the anchor; it never redefines it. An
+        earlier version re-read the live focus on every centre press,
+        so pressing bottom then centre silently moved the anchor down
+        and the stack crept.
         """
         if not self._require_connection():
             return
+        centre = self.stack_centre_um()
+        if centre is None:
+            self._say("No stack centre — select a position or "
+                      "connect the hardware.", "warn")
+            return
         offsets = self.stack_offsets()
-        if getattr(self, "_stack_centre", None) is None or where == 0:
-            try:
-                self._stack_centre = self.session.axis(
-                    self.z_axis.value
-                ).position
-            except Exception as e:
-                self._say(f"Could not read Z: {e}", "err")
-                return
-        target = self._stack_centre + (
+        target = centre + (
             offsets[0] if where < 0 else
             offsets[-1] if where > 0 else 0.0
         )
@@ -1563,7 +1668,238 @@ class MTBSetupPanel:
             return
         self._update_position()
         label = {-1: "bottom", 0: "centre", 1: "top"}[where]
-        self._say(f"Z at stack {label}: {target:.2f} µm.", "ok")
+        self._say(
+            f"Z at stack {label}: {target:.2f} µm "
+            f"(centre {centre:.2f}).", "ok",
+        )
+
+    def _on_set_position_z(self, _event=None) -> None:
+        """Adopt the current focus as the selected position's Z.
+
+        The way to re-anchor a stack after finding better focus:
+        change the POSITION, not some hidden stack state.
+        """
+        if not self._require_connection():
+            return
+        rows = self.pos_table.selection or []
+        df = self.pos_table.value
+        if len(rows) != 1:
+            self._say("Select exactly one position to update.", "warn")
+            return
+        try:
+            z = float(self.session.axis(self.z_axis.value).position)
+        except Exception as e:
+            self._say(f"Could not read Z: {e}", "err")
+            return
+        df = df.copy()
+        df.iloc[rows[0], df.columns.get_loc("z_um")] = round(z, 3)
+        self.pos_table.value = df
+        self._update_zstack_info()
+        self._say(
+            f"{df.iloc[rows[0]]['name']} Z set to {z:.2f} µm — the "
+            f"stack is centred here.", "ok",
+        )
+
+    # -------------------------------------------- definite focus 2
+
+    def _df2(self):
+        """The DF2 wrapper, or None with the reason already reported."""
+        if not self._require_connection():
+            return None
+        try:
+            return self.session.definite_focus()
+        except Exception as e:
+            self._say(f"Definite Focus 2 unavailable: {e}", "err")
+            return None
+
+    def _selected_position_name(self) -> str | None:
+        rows = self.pos_table.selection or []
+        df = self.pos_table.value
+        if len(rows) == 1 and rows[0] < len(df):
+            return str(df.iloc[rows[0]]["name"])
+        if len(df) == 1 and not rows:
+            return str(df.iloc[0]["name"])
+        return None
+
+    def _mark_df2_column(self) -> None:
+        """Show which positions carry a reference, without the blob."""
+        df = self.pos_table.value
+        if df.empty:
+            return
+        df = df.copy()
+        df["df2"] = [
+            bool(self._df2_refs.get(str(n))) for n in df["name"]
+        ]
+        self.pos_table.value = df
+
+    def _store_df2_ref(self, name: str, data) -> None:
+        if data:
+            self._df2_refs[name] = bytes(data)
+        else:
+            self._df2_refs.pop(name, None)
+        self._mark_df2_column()
+        if self._runner is not None:
+            # A run already under way picks it up on the next visit.
+            try:
+                self._runner.set_df2_reference(name, data)
+            except Exception:
+                logger.exception("could not push the DF2 reference "
+                                 "to the running backend")
+
+    def _apply_df2_mode(self, df2) -> None:
+        try:
+            df2.set_operation_mode(self.df2_mode.value)
+        except Exception as e:
+            # Not fatal: the stabilizer works in whatever mode it is in.
+            self._say(f"Could not set DF2 precision: {e}", "warn")
+
+    def _learn_here(self, df2, name: str) -> bool:
+        """Learn the current plane and attach it to one position."""
+        try:
+            ref = df2.learn()
+        except Exception as e:
+            self._say(f"{name}: DF2 could not learn the focus ({e}).",
+                      "err")
+            return False
+        self._store_df2_ref(name, ref)
+        # The position's Z and its DF2 plane must agree, or "go to
+        # position" and "stabilize" would disagree about where focus is.
+        try:
+            z = float(self.session.axis(self.z_axis.value).position)
+        except Exception:
+            return True
+        df = self.pos_table.value.copy()
+        match = df.index[df["name"].astype(str) == name]
+        if len(match):
+            df.loc[match[0], "z_um"] = round(z, 3)
+            self.pos_table.value = df
+        return True
+
+    def _on_df2_learn(self, _event=None) -> None:
+        """Teach DF2 the plane the operator has just focused on."""
+        df2 = self._df2()
+        if df2 is None:
+            return
+        name = self._selected_position_name()
+        if name is None:
+            self._say("Select exactly one position to attach the "
+                      "focus reference to.", "warn")
+            return
+        self._apply_df2_mode(df2)
+        self._say(f"Learning the focus plane for {name} — this takes "
+                  f"a few seconds…", "info")
+        if self._learn_here(df2, name):
+            self._say(f"{name}: focus reference stored.", "ok")
+        self._update_df2_info()
+
+    def _on_df2_learn_all(self, _event=None) -> None:
+        """Visit every position and learn its plane.
+
+        Each position sits at its own height, so one global reference
+        cannot serve them all — this is the normal way to prepare a
+        multi-position run.
+        """
+        df2 = self._df2()
+        if df2 is None:
+            return
+        df = self.pos_table.value
+        if df.empty:
+            self._say("No positions captured yet.", "warn")
+            return
+        self._apply_df2_mode(df2)
+        done, failed = [], []
+        for _, r in df.iterrows():
+            name = str(r["name"])
+            try:
+                self.motion.move_to(x=float(r["x_um"]),
+                                    y=float(r["y_um"]),
+                                    z=float(r["z_um"]))
+            except Exception as e:
+                self._say(f"{name}: move failed ({e}).", "err")
+                failed.append(name)
+                continue
+            time.sleep(float(self.settle_s.value or 0))
+            if self._learn_here(df2, name):
+                done.append(name)
+            else:
+                failed.append(name)
+        self._update_position()
+        self._update_df2_info()
+        msg = f"Learned {len(done)} of {len(df)} position(s)."
+        self._say(msg if not failed
+                  else f"{msg} Failed: {', '.join(failed)}",
+                  "ok" if not failed else "warn")
+
+    def _on_df2_stabilize(self, _event=None) -> None:
+        """Restore the selected position's plane and correct focus now."""
+        df2 = self._df2()
+        if df2 is None:
+            return
+        name = self._selected_position_name()
+        ref = self._df2_refs.get(name) if name else None
+        if ref:
+            try:
+                df2.restore(ref)
+            except Exception as e:
+                self._say(f"{name}: DF2 rejected the stored reference "
+                          f"({e}).", "err")
+                return
+        try:
+            before = float(self.session.axis(self.z_axis.value).position)
+            df2.stabilize_now()
+            after = float(self.session.axis(self.z_axis.value).position)
+        except Exception as e:
+            self._say(f"Stabilize failed: {e}", "err")
+            return
+        self._update_position()
+        self._update_df2_info()
+        self._say(
+            f"Stabilized{f' on {name}' if ref else ''}: Z "
+            f"{before:.2f} → {after:.2f} µm "
+            f"({after - before:+.2f}).", "ok",
+        )
+
+    def _on_df2_clear(self, _event=None) -> None:
+        name = self._selected_position_name()
+        if name is None:
+            self._say("Select exactly one position.", "warn")
+            return
+        self._store_df2_ref(name, None)
+        self._update_df2_info()
+        self._say(f"{name}: focus reference cleared.", "ok")
+
+    def _update_df2_info(self) -> None:
+        """Status line: is DF2 there, and which positions are taught."""
+        if not self.connected:
+            self.df2_info.object = (
+                "_Connect the hardware to use Definite Focus 2._"
+            )
+            return
+        if not self.session.has_definite_focus():
+            self.df2_info.object = (
+                "⚠️ **No Definite Focus 2 on this stand** — the run "
+                "will correct Z from the images instead."
+            )
+            return
+        names = [str(n) for n in self.pos_table.value.get("name", [])]
+        taught = [n for n in names if self._df2_refs.get(n)]
+        parts = [f"**{len(taught)} of {len(names)} position(s)** have a "
+                 f"focus reference."]
+        if names and len(taught) < len(names):
+            missing = [n for n in names if n not in taught]
+            parts.append(
+                f"Without one, {', '.join(missing[:5])}"
+                f"{'…' if len(missing) > 5 else ''} would be stabilized "
+                f"on whatever plane DF2 last held — which is another "
+                f"position's."
+            )
+        try:
+            df2 = self.session.definite_focus()
+            parts.append(f"Mode `{df2.operation_mode()}`, signal "
+                         f"quality `{df2.signal_quality}`.")
+        except Exception:
+            pass
+        self.df2_info.object = " ".join(parts)
 
     def _set_tl(self, open_it: bool) -> None:
         """Open or close the transmitted-light shutter."""
@@ -2102,6 +2438,11 @@ class MTBSetupPanel:
             "session": self.session,
             "mmc": self.mmc,
             "camera_label": self._cam_label,
+            # Hardware focus stabilisation. df2_owns_z decides whether
+            # DF2 or the image-based tracker aims the Z axis; they must
+            # not both, or they fight every timepoint.
+            "use_definite_focus": bool(self.df2_on.value),
+            "df2_owns_z": bool(self.df2_owns_z.value),
         }
         zs = self.zstack_config()
         if zs:
@@ -2713,10 +3054,14 @@ class MTBSetupPanel:
             self.zstack_info,
             pn.Row(self.btn_z_bottom, self.btn_z_centre,
                    self.btn_z_top),
+            pn.Row(self.btn_set_pos_z),
             pn.pane.Markdown(
-                "_Jump to the edges of the planned stack to check the "
-                "whole range is in focus before committing. Centre is "
-                "taken from the current Z the first time you press it._",
+                "_A z-stack belongs to a **position**: it is centred on "
+                "that position's stored Z, so it does not drift when "
+                "you touch the focus. Select a position on the *Stage* "
+                "tab, use the buttons to check the whole range is in "
+                "focus, and if you need to re-anchor it, move the focus "
+                "and press **Set position Z**._",
                 width=600, styles={"font-size": "0.8em"},
             ),
             pn.Row(self.gate_per_plane),
@@ -2725,6 +3070,29 @@ class MTBSetupPanel:
                 "step above the actuator's resolution (~0.06 µm for the "
                 "piezo) — finer steps do not move and silently "
                 "duplicate planes.",
+                width=600, styles={"font-size": "0.8em"},
+            ),
+            pn.layout.Divider(),
+            "### Definite Focus 2",
+            pn.Row(self.df2_on, self.df2_mode),
+            pn.Row(self.df2_owns_z),
+            pn.Row(self.btn_df2_learn, self.btn_df2_learn_all),
+            pn.Row(self.btn_df2_stabilize, self.btn_df2_clear),
+            self.df2_info,
+            pn.pane.Markdown(
+                "_DF2 holds a focus plane **optically**, so it costs no "
+                "light and no exposure time and works on a specimen "
+                "with nothing trackable in it. Each position sits at "
+                "its own height, so each needs its **own** reference: "
+                "focus a position, press **Learn focus**, or use "
+                "**Learn at every position** to walk the whole list._"
+                "\n\n"
+                "_With **DF2 owns Z** ticked, the tracker's Z "
+                "corrections are dropped — right when the drift is "
+                "thermal. Untick it when the specimen itself moves in "
+                "Z: DF2 then removes the hardware drift and the "
+                "tracked offset is applied on top of the stabilized "
+                "plane._",
                 width=600, styles={"font-size": "0.8em"},
             ),
             pn.layout.Divider(),

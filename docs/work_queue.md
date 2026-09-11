@@ -46,6 +46,27 @@ opportunities for "I forgot one thing and the closed loop runs open".
 its order. Use one short paragraph per item — link to the relevant file
 and explain the *why* in one line so we don't have to re-derive it.)
 
+### 2026-09-11 · Definite Focus 2 — decide who owns Z, with data
+
+**Why**: DF2 is implemented and both policies are available
+(`df2_owns_z`), but which is right is an empirical question about *this*
+specimen, not a design one. DF2 owning Z is the default because the
+drift we have actually observed looks thermal.
+
+**To settle it**: run `tools/df2_test.py --repeat 5` to confirm DF2
+recovers the plane and that the error does not accumulate. Then run one
+tracked experiment each way and compare how far the embryo leaves the
+focal plane over a few hours. If the specimen genuinely sinks or rises,
+untick *DF2 owns Z* and the tracked offset rides on top of the
+stabilized plane.
+
+**Also unverified**: whether `InitOnCurrentFocusPosition` returns the
+`Byte[]` blob on this build. `MTBDefiniteFocus.learn()` falls back to
+`GetStabilizerData()` and then to the mode-only overload; if no blob
+comes back at all, DF2 can hold only ONE plane and per-position focus
+is unavailable. `tools/df2_test.py` says which case you are in, in the
+LEARN section.
+
 ### 2026-09-02 · Interactive checkout GUI — build vs reuse decision
 
 **Why**: bring-up currently uses Java MMStudio + `tools/hw_smoke_test.py`

@@ -39,6 +39,8 @@ error, piezo with 0.082 µm; camera is a Prime 95B (GS144BSI, 1200x1200,
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import os
 import queue
@@ -50,6 +52,44 @@ import numpy as np
 from .mtb import MTBError, MTBMotion, MTBSession
 
 logger = logging.getLogger(__name__)
+
+
+def encode_df2_ref(data: bytes | None) -> str | None:
+    """Make a DF2 stabilizing blob storable in JSON.
+
+    DF2 hands back an opaque Byte[] describing a learned focus plane.
+    It has to survive a round trip through positions_config and
+    tracking_RoIs.json, which are JSON, so it travels base64-encoded.
+    """
+    if not data:
+        return None
+    return base64.b64encode(bytes(data)).decode("ascii")
+
+
+def decode_df2_ref(value) -> bytes | None:
+    """Inverse of encode_df2_ref, tolerant of what JSON round-trips to.
+
+    Returns None rather than raising on rubbish: a corrupt reference
+    should cost focus stabilisation, not the whole run.
+    """
+    if not value:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    if isinstance(value, (list, tuple)):
+        try:
+            return bytes(bytearray(value))
+        except (ValueError, TypeError):
+            logger.warning("df2_ref list is not a byte sequence")
+            return None
+    if isinstance(value, str):
+        try:
+            return base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError):
+            logger.warning("df2_ref is not valid base64 — ignoring it")
+            return None
+    logger.warning("df2_ref has unusable type %s", type(value).__name__)
+    return None
 
 
 def invert_for_tracking(img: np.ndarray) -> np.ndarray:
@@ -157,6 +197,36 @@ class MicroscopeInterface_MTB:
         self.gate_light_per_plane = bool(
             p.get("gate_light_per_plane", True)
         )
+        # --- Definite Focus 2 -------------------------------------
+        # DF2 holds a learned plane optically. Over a multi-hour run it
+        # beats correcting Z from images: it costs no light, no
+        # exposure time, and it works on a specimen with nothing
+        # trackable in it.
+        self.use_definite_focus = bool(p.get("use_definite_focus", False))
+        # Who owns Z when DF2 is running?
+        #
+        #   True  (default) - DF2 owns it. Z corrections from the
+        #         tracker are DROPPED. Correct when the drift you are
+        #         fighting is thermal: two controllers aiming at the
+        #         same axis from different measurements will otherwise
+        #         fight each other every timepoint.
+        #   False - DF2 removes the hardware drift, and the tracker's
+        #         accumulated dz is then applied as an offset from the
+        #         stabilized plane. Use when the SPECIMEN genuinely
+        #         moves in Z: because DF2 has already re-established
+        #         the plane before each frame, the residual Z error
+        #         the images show is specimen motion, so accumulating
+        #         it on top of the DF2 plane composes correctly.
+        self.df2_owns_z = bool(p.get("df2_owns_z", True))
+        self._df2 = p.get("df2")
+        # Per-position stabilizing blobs. One global DF2 reference
+        # cannot serve several positions sitting at different heights,
+        # so each position carries its own; see decode_df2_ref.
+        self._df2_refs: dict[str, bytes] = {}
+        # Positions whose stored blob DF2 has already rejected, so a
+        # broken reference is reported once rather than every visit.
+        self._df2_bad: set[str] = set()
+
         # An injected session belongs to the caller: we must not log it
         # out, because MTB cannot Login again in this process.
         self._injected_session = p.get("session")
@@ -202,6 +272,11 @@ class MicroscopeInterface_MTB:
             name for name in self.pos_names
             if "invert" in positions_config[name]
         }
+
+        for name in self.pos_names:
+            ref = decode_df2_ref(positions_config[name].get("df2_ref"))
+            if ref:
+                self._df2_refs[name] = ref
 
         self._cum_drift: dict[str, list[float]] = {
             name: [0.0, 0.0, 0.0] for name in self.pos_names
@@ -260,6 +335,8 @@ class MicroscopeInterface_MTB:
 
         for warning in self.check_z_stack():
             logger.warning("Z-STACK: %s", warning)
+
+        self._connect_df2()
 
         self._stop_event.clear()
         self._finished = False
@@ -360,6 +437,123 @@ class MicroscopeInterface_MTB:
 
     # ------------------------------------------------- acquisition
 
+    # ------------------------------------------- definite focus 2
+
+    def _connect_df2(self) -> None:
+        """Attach DF2 if it was asked for. Never fatal.
+
+        A stand without DF2, or a DF2 that will not cast, downgrades to
+        image-based Z correction with a warning — losing focus
+        stabilisation is a much smaller loss than losing the run.
+        """
+        if not self.use_definite_focus:
+            return
+        if self._df2 is not None:
+            logger.info("using the caller's Definite Focus 2 handle")
+        else:
+            try:
+                self._df2 = self.session.definite_focus()
+            except Exception as e:
+                logger.warning(
+                    "Definite Focus 2 requested but unavailable (%s) — "
+                    "falling back to image-based Z correction", e,
+                )
+                self.use_definite_focus = False
+                return
+        missing = [n for n in self.pos_names if n not in self._df2_refs]
+        if missing:
+            logger.warning(
+                "no DF2 reference stored for %s — those positions will "
+                "be stabilized on whatever plane DF2 currently holds. "
+                "Learn a reference at each position in the setup panel.",
+                ", ".join(missing),
+            )
+        logger.info("Definite Focus 2 active, df2_owns_z=%s",
+                    self.df2_owns_z)
+
+    def set_df2_reference(self, pos_name: str, data: bytes | None) -> None:
+        """Store the plane learned at one position.
+
+        Also written back into positions_config so it is saved with the
+        rest of the position and survives a restart.
+        """
+        if pos_name not in self._cum_drift:
+            logger.warning("DF2 reference for unknown position %r",
+                           pos_name)
+            return
+        with self._config_lock:
+            if data:
+                self._df2_refs[pos_name] = bytes(data)
+            else:
+                self._df2_refs.pop(pos_name, None)
+            self._df2_bad.discard(pos_name)
+            entry = self.positions_config.get(pos_name)
+            if entry is not None:
+                entry["df2_ref"] = encode_df2_ref(data)
+        logger.info("%s: DF2 reference %s", pos_name,
+                    "stored" if data else "cleared")
+
+    def _stabilize(self, pos_name: str, commanded_z: float) -> float:
+        """Put DF2 on this position's plane. Returns the Z to image at.
+
+        Called after the stage has arrived, so DF2 starts from roughly
+        the right height. The returned Z is READ BACK rather than
+        assumed: DF2 moves the focus itself, and a z-stack must be
+        centred where the focus actually ended up, not where we asked
+        it to go.
+        """
+        if not self.use_definite_focus or self._df2 is None:
+            return commanded_z
+
+        ref = self._df2_refs.get(pos_name)
+        if ref and pos_name not in self._df2_bad:
+            try:
+                self._df2.restore(ref)
+            except Exception as e:
+                # Once only: a stale blob would otherwise log per visit.
+                self._df2_bad.add(pos_name)
+                logger.warning(
+                    "%s: DF2 rejected the stored reference (%s) — "
+                    "stabilizing on its current plane instead",
+                    pos_name, e,
+                )
+
+        try:
+            self._df2.stabilize_now()
+        except Exception:
+            logger.exception(
+                "%s: DF2 stabilization failed — imaging at the "
+                "commanded Z", pos_name,
+            )
+            return commanded_z
+
+        try:
+            actual = float(self.motion.z.position)
+        except Exception:
+            logger.exception("could not read Z back after DF2")
+            return commanded_z
+
+        if not self.df2_owns_z:
+            # DF2 has removed the hardware drift, so the tracker's
+            # accumulated dz is specimen motion and belongs on top of
+            # the stabilized plane.
+            with self._drift_lock:
+                dz = self._cum_drift[pos_name][2]
+            if dz:
+                try:
+                    self.motion.z.move_to(actual + dz)
+                    actual = float(self.motion.z.position)
+                except Exception:
+                    logger.exception(
+                        "%s: could not apply the tracked Z offset "
+                        "after DF2", pos_name,
+                    )
+
+        if abs(actual - commanded_z) > 0.001:
+            logger.debug("%s: DF2 moved focus %.3f -> %.3f um",
+                         pos_name, commanded_z, actual)
+        return actual
+
     def _target_for(self, pos_name: str) -> tuple[float, float, float]:
         """Absolute target = baseline + cumulative drift.
 
@@ -436,6 +630,12 @@ class MicroscopeInterface_MTB:
         self.motion.move_to(x=x, y=y, z=z)
         if self.settle_s:
             time.sleep(self.settle_s)
+
+        # DF2 runs AFTER the move and before any exposure, so every
+        # channel and every plane of the stack is referenced to the
+        # same stabilized plane. z is rebound because DF2 moves the
+        # focus itself and the stack centres on the result.
+        z = self._stabilize(pos_name, z)
 
         for idx, channel in enumerate(self.channels):
             if self._stop_event.is_set():
@@ -740,6 +940,18 @@ class MicroscopeInterface_MTB:
                            position_name)
             return
 
+        # DF2 and the image-based correction would otherwise aim the
+        # same axis at two different measurements and fight every
+        # timepoint, so when DF2 owns Z the tracker's dz is dropped
+        # here rather than accumulated and then ignored later.
+        if self.use_definite_focus and self.df2_owns_z:
+            if abs(float(shift_z)) > 1e-9:
+                logger.debug(
+                    "%s: dropping Z correction %.3f um — Definite "
+                    "Focus 2 owns Z", position_name, float(shift_z),
+                )
+            shift_z = 0.0
+
         sx = max(-self.max_xy_um, min(self.max_xy_um, float(shift_x)))
         sy = max(-self.max_xy_um, min(self.max_xy_um, float(shift_y)))
         sz = max(-self.max_z_um, min(self.max_z_um, float(shift_z)))
@@ -789,6 +1001,17 @@ class MicroscopeInterface_MTB:
                 self._invert_explicit.add(pos_name)
             logger.info("%s: invert-for-tracking = %s (from ROI config)",
                         pos_name, entry["invert"])
+
+        if "df2_ref" in entry:
+            ref = decode_df2_ref(entry["df2_ref"])
+            with self._config_lock:
+                if ref:
+                    self._df2_refs[pos_name] = ref
+                else:
+                    self._df2_refs.pop(pos_name, None)
+                self._df2_bad.discard(pos_name)
+            logger.info("%s: DF2 reference %s (from config)", pos_name,
+                        "refreshed" if ref else "cleared")
 
         if "xyz_um" not in entry:
             return

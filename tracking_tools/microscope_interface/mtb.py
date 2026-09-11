@@ -396,6 +396,10 @@ class MTBAxis:
 _MAG_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*[xX×]")
 
 
+#: A Zeiss order number, e.g. 420660-9970-000.
+_ORDER_RE = re.compile(r"\d{6}-\d{3,4}-\d{3}")
+
+
 def parse_magnification(text: str) -> float | None:
     """Pull the magnification out of an objective name.
 
@@ -792,6 +796,241 @@ class MTBColibri:
         return "\n".join(lines)
 
 
+class MTBDefiniteFocus:
+    """Definite Focus 2 — hardware focus stabilisation.
+
+    DF2 holds a learned plane against thermal drift optically, which
+    over a multi-hour run beats correcting Z from images: it costs no
+    light, no exposure time, and does not depend on the specimen
+    having trackable structure.
+
+    API confirmed on the microscope 2026-09-11 via
+    `tools/mtb_smoke_test.py --df2`. The component casts to
+    IMTBFocusStabilizer2, whose useful members are:
+
+        InitOnCurrentFocusPosition(mode, timeout)      -> Boolean
+        InitOnCurrentFocusPosition(out Byte[] data, timeout)
+        InitWithStabilizingData(mode, Byte[] data, timeout)
+        GetStabilizerData()                            -> Byte[]
+        StabilizeNow(...)          one-shot correction
+        StabilizePeriodically(...) continuous
+        FindFocus(...)             search for a surface
+        Stop(...)
+        Get/SetOperationMode()     Exact | Balanced | Fast
+        ObjectiveSuitability(objectiveOrderNumber)
+        IsBusy, Period, SignalQuality
+        Get/SetPiezoFocusUsage()   DF2 can drive the piezo directly
+
+    The `Byte[]` blob is the key to multi-position work: learn a plane
+    at each position, keep its blob, and restore that exact plane on
+    every later visit with InitWithStabilizingData. One global
+    reference cannot serve several positions at different heights.
+    """
+
+    #: DF2 measurement is slow; the Micro-Manager wiki recommends a
+    #: 25 s Core timeout for exactly this reason.
+    DEFAULT_TIMEOUT_MS = 30000
+
+    def __init__(self, comp, timeout_ms: int = DEFAULT_TIMEOUT_MS):
+        self._raw = comp
+        self.timeout_ms = timeout_ms
+        self._c = None
+        self.interface = None
+        for name in ("IMTBFocusStabilizer2", "IMTBAutoFocus"):
+            cast = MTBLED._as(comp, name)
+            if cast is not None:
+                self._c = cast
+                self.interface = name
+                break
+        if self._c is None:
+            raise MTBError(
+                "component does not expose IMTBFocusStabilizer2"
+            )
+
+    # --- state ---
+
+    @property
+    def is_busy(self) -> bool:
+        try:
+            return bool(self._c.IsBusy)
+        except Exception:
+            return False
+
+    @property
+    def signal_quality(self):
+        try:
+            return self._c.SignalQuality
+        except Exception:
+            return None
+
+    @property
+    def period(self):
+        try:
+            return self._c.Period
+        except Exception:
+            return None
+
+    def operation_mode(self):
+        try:
+            return str(self._c.GetOperationMode())
+        except Exception:
+            return None
+
+    def set_operation_mode(self, name: str = "Balanced") -> bool:
+        """Exact (slowest, most precise) | Balanced | Fast."""
+        try:
+            from ZEISS.MTB.Api import MTBFocusStabilizer2OperationMode
+            value = getattr(MTBFocusStabilizer2OperationMode, name)
+        except Exception as e:
+            raise MTBError(
+                f"unknown DF2 operation mode {name!r}"
+            ) from e
+        for args in ((value,), (None, value)):
+            try:
+                return bool(self._c.SetOperationMode(*args))
+            except Exception:
+                continue
+        return False
+
+    def objective_suitable(self, order_number: str):
+        """Whether DF2 can stabilise with a given objective.
+
+        Zeiss objectives carry an order number, e.g. the
+        'Objective.420660-9970-000' unique name reported by the
+        nosepiece.
+        """
+        try:
+            return str(self._c.ObjectiveSuitability(str(order_number)))
+        except Exception:
+            return None
+
+    # --- learning and restoring a plane ---
+
+    def learn(self) -> bytes | None:
+        """Learn the CURRENT focus plane. Returns its reference blob.
+
+        Keep the blob with the position it was learned at: restoring it
+        later reproduces that exact plane. Returns None if this build
+        only offers the mode-based overload, in which case the
+        reference lives inside DF2 and only one position can use it.
+        """
+        mode = resolve_mode("Synchronous")
+        # Prefer the overload that hands back the data.
+        for args in ((None, self.timeout_ms), (None,)):
+            try:
+                result = self._c.InitOnCurrentFocusPosition(*args)
+            except Exception:
+                continue
+            data = self._extract_bytes(result)
+            if data is not None:
+                return data
+        for args in ((mode, self.timeout_ms), (mode,)):
+            try:
+                if self._c.InitOnCurrentFocusPosition(*args) is not False:
+                    return self.stabilizer_data()
+            except Exception:
+                continue
+        raise MTBError("DF2 could not learn the current focus plane")
+
+    @staticmethod
+    def _extract_bytes(result):
+        """pythonnet returns out-params in a tuple; find the Byte[]."""
+        if result is None or isinstance(result, bool):
+            return None
+        candidates = result if isinstance(result, tuple) else (result,)
+        for item in candidates:
+            if isinstance(item, (bytes, bytearray)):
+                return bytes(item)
+            try:
+                if len(item) and not isinstance(item, str):
+                    return bytes(bytearray(item))
+            except Exception:
+                continue
+        return None
+
+    def stabilizer_data(self) -> bytes | None:
+        try:
+            return self._extract_bytes(self._c.GetStabilizerData())
+        except Exception:
+            return None
+
+    def restore(self, data: bytes) -> bool:
+        """Re-arm DF2 on a previously learned plane."""
+        if not data:
+            raise MTBError("no stabilizing data to restore")
+        mode = resolve_mode("Synchronous")
+        payload = bytearray(data)
+        for args in ((mode, payload, self.timeout_ms),
+                     (mode, payload)):
+            try:
+                return self._c.InitWithStabilizingData(*args) is not False
+            except Exception:
+                continue
+        raise MTBError("DF2 rejected the stored stabilizing data")
+
+    # --- acting ---
+
+    def stabilize_now(self) -> bool:
+        """One correction back to the learned plane.
+
+        Called before acquiring at a position: it costs a moment but no
+        light, and it is what keeps a long run in focus.
+        """
+        mode = resolve_mode("Synchronous")
+        for args in ((mode, self.timeout_ms), (mode,)):
+            try:
+                return self._c.StabilizeNow(*args) is not False
+            except Exception:
+                continue
+        raise MTBError("DF2 StabilizeNow failed")
+
+    def find_focus(self) -> bool:
+        """Search for a surface — use when no plane is learned yet."""
+        mode = resolve_mode("Synchronous")
+        for args in ((mode, self.timeout_ms), (mode,)):
+            try:
+                return self._c.FindFocus(*args) is not False
+            except Exception:
+                continue
+        raise MTBError("DF2 FindFocus failed")
+
+    def stabilize_periodically(self, on: bool, period_s: float = 0.0):
+        """Continuous stabilisation.
+
+        Useful for a single position, but it fights a multi-position
+        run: DF2 would keep pulling the focus back to one plane while
+        the stage visits others. Prefer stabilize_now() per visit.
+        """
+        try:
+            from ZEISS.MTB.Api import MTBOnOff
+            flag = MTBOnOff.On if on else MTBOnOff.Off
+        except Exception:
+            flag = bool(on)
+        for args in ((flag, period_s) if period_s else (flag,), (flag,)):
+            try:
+                return self._c.StabilizePeriodically(*args) is not False
+            except Exception:
+                continue
+        raise MTBError("DF2 StabilizePeriodically failed")
+
+    def stop(self) -> bool:
+        mode = resolve_mode("Synchronous")
+        for args in ((mode, self.timeout_ms), (mode,)):
+            try:
+                return self._c.Stop(*args) is not False
+            except Exception:
+                continue
+        return False
+
+    def describe(self) -> str:
+        return (
+            f"Definite Focus 2 via {self.interface}\n"
+            f"    mode={self.operation_mode()}  busy={self.is_busy}\n"
+            f"    signal quality={self.signal_quality}  "
+            f"period={self.period}"
+        )
+
+
 class MTBChangerDevice:
     """Any discrete-position MTB changer.
 
@@ -985,6 +1224,10 @@ class MTBObjective:
     _MAG_ATTRS = ("Magnification", "magnification", "Mag")
     _NAME_ATTRS = ("Name", "name", "DisplayName", "Text")
     _APERTURE_ATTRS = ("Aperture", "NumericalAperture", "NA")
+    #: Zeiss order numbers look like 420660-9970-000, and DF2's
+    #: ObjectiveSuitability() is the only API that wants one.
+    _ORDER_ATTRS = ("ArticleNo", "ArticleNumber", "OrderNumber",
+                    "PartNumber", "ArtNo", "UniqueName", "Id")
 
     def __init__(self, comp, label: str = "objective"):
         self.label = label
@@ -1088,6 +1331,35 @@ class MTBObjective:
             val, _ = self._first_attr(target, self._NAME_ATTRS)
             if val:
                 return str(val)
+        return None
+
+    @property
+    def order_number(self) -> str | None:
+        """The objective's Zeiss order number, if it can be found.
+
+        DF2's ObjectiveSuitability() takes one. No attribute is
+        guaranteed, so try the plausible names and then fall back to
+        digging the pattern out of whatever strings the element has —
+        the unique name is typically 'Objective.420660-9970-000'.
+        """
+        el = self._element()
+        for target in (el, self._changer, self._raw):
+            if target is None:
+                continue
+            val, _ = self._first_attr(target, self._ORDER_ATTRS)
+            if val:
+                found = _ORDER_RE.search(str(val))
+                return found.group(0) if found else str(val)
+        for target in (el, self._changer, self._raw):
+            if target is None:
+                continue
+            for attr in ("UniqueName", "Name", "Id"):
+                try:
+                    found = _ORDER_RE.search(str(getattr(target, attr)))
+                except Exception:
+                    continue
+                if found:
+                    return found.group(0)
         return None
 
     @property
@@ -1409,6 +1681,30 @@ class MTBSession:
                 self.component("objective")
             )
         return self._axes["_objective"]
+
+    def definite_focus(self) -> "MTBDefiniteFocus":
+        """The Definite Focus 2 stabilizer, cached."""
+        if "_df2" not in self._axes:
+            # DF2 measurement takes many seconds; never inherit the
+            # session's short motion timeout here.
+            self._axes["_df2"] = MTBDefiniteFocus(
+                self.component("df2"),
+                max(self.timeout_ms, MTBDefiniteFocus.DEFAULT_TIMEOUT_MS),
+            )
+        return self._axes["_df2"]
+
+    def has_definite_focus(self) -> bool:
+        """Whether DF2 is fitted and castable. Never raises.
+
+        The panel asks this before offering the controls; a stand
+        without DF2 should show nothing rather than an error.
+        """
+        try:
+            self.definite_focus()
+            return True
+        except Exception as e:
+            logger.info("Definite Focus 2 unavailable: %s", e)
+            return False
 
     def available(self) -> dict[str, str]:
         """Map role -> reported hardware name, for present components."""

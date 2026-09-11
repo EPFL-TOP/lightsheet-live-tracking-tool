@@ -1385,3 +1385,277 @@ def test_set_on_error_message_includes_the_signature():
     led.unit = "%"
     with pytest.raises(MTBError, match="Reflected signature"):
         led.set_on(True)
+
+
+# ====================================================================
+# DEFINITE FOCUS 2
+#
+# Probed on the microscope 2026-09-11. IMTBFocusStabilizer2 offers two
+# InitOnCurrentFocusPosition overloads:
+#
+#   InitOnCurrentFocusPosition(MTBCmdSetModes mode, Int32 timeout)
+#   InitOnCurrentFocusPosition(Byte[]& data,        Int32 timeout)
+#
+# Only the second hands back the opaque blob that identifies a learned
+# plane, and that blob is what makes per-position focus possible: one
+# global reference cannot serve several positions at different heights.
+# ====================================================================
+
+class FakeStabilizer:
+    """IMTBFocusStabilizer2, with the data-returning overload.
+
+    pythonnet surfaces a .NET `out` parameter by APPENDING it to the
+    return value, so the data overload comes back as a tuple. Modelling
+    that shape is the whole point of this double.
+    """
+
+    def __init__(self, data=b"\x01\x02\x03\x04", with_data_overload=True):
+        self._data = data
+        self._with_data = with_data_overload
+        self.init_calls = []
+        self.restore_calls = []
+        self.stabilize_calls = []
+        self.mode_calls = []
+        self.IsBusy = False
+        self.SignalQuality = 92
+        self.Period = 0
+
+    def InitOnCurrentFocusPosition(self, *args):
+        self.init_calls.append(args)
+        if self._with_data and args and args[0] is None:
+            return (True, bytearray(self._data))
+        if args and args[0] is None:
+            raise TypeError("no such overload")
+        return True
+
+    def InitWithStabilizingData(self, *args):
+        self.restore_calls.append(args)
+        return True
+
+    def GetStabilizerData(self):
+        return bytearray(self._data)
+
+    def StabilizeNow(self, *args):
+        self.stabilize_calls.append(args)
+        return True
+
+    def FindFocus(self, *args):
+        return True
+
+    def Stop(self, *args):
+        return True
+
+    def GetOperationMode(self):
+        return "Balanced"
+
+    def SetOperationMode(self, *args):
+        self.mode_calls.append(args)
+        return True
+
+    def ObjectiveSuitability(self, order_number):
+        return "Suitable"
+
+
+def _df2(fake=None, monkeypatch=None):
+    """Build MTBDefiniteFocus around a fake, bypassing the .NET cast."""
+    from tracking_tools.microscope_interface.mtb import (
+        MTBDefiniteFocus, MTBLED,
+    )
+    fake = fake if fake is not None else FakeStabilizer()
+    orig = MTBLED._as
+    MTBLED._as = staticmethod(lambda obj, iface: obj)
+    try:
+        return MTBDefiniteFocus(fake), fake
+    finally:
+        MTBLED._as = orig
+
+
+def test_df2_refuses_a_component_it_cannot_cast():
+    from tracking_tools.microscope_interface.mtb import (
+        MTBDefiniteFocus, MTBError, MTBLED,
+    )
+    orig = MTBLED._as
+    MTBLED._as = staticmethod(lambda obj, iface: None)
+    try:
+        with pytest.raises(MTBError, match="IMTBFocusStabilizer2"):
+            MTBDefiniteFocus(object())
+    finally:
+        MTBLED._as = orig
+
+
+def test_df2_learn_returns_the_reference_blob():
+    df2, fake = _df2()
+    ref = df2.learn()
+    assert ref == b"\x01\x02\x03\x04"
+    assert isinstance(ref, bytes), "the blob must survive as bytes"
+
+
+def test_df2_learn_prefers_the_overload_that_returns_data():
+    """The mode-based overload leaves the reference inside DF2, where
+    only one position can use it. The data overload must be tried
+    first."""
+    df2, fake = _df2()
+    df2.learn()
+    assert fake.init_calls[0][0] is None, (
+        "learn() did not try the Byte[] overload first"
+    )
+
+
+def test_df2_learn_falls_back_when_only_the_mode_overload_exists():
+    df2, fake = _df2(FakeStabilizer(with_data_overload=False))
+    ref = df2.learn()
+    # Falls back to GetStabilizerData(), which this build does provide.
+    assert ref == b"\x01\x02\x03\x04"
+
+
+def test_df2_learn_raises_when_nothing_works():
+    from tracking_tools.microscope_interface.mtb import MTBError
+
+    class Dead(FakeStabilizer):
+        def InitOnCurrentFocusPosition(self, *args):
+            raise RuntimeError("no focus signal")
+
+        def GetStabilizerData(self):
+            raise RuntimeError("nothing learned")
+
+    df2, _ = _df2(Dead())
+    with pytest.raises(MTBError, match="learn"):
+        df2.learn()
+
+
+def test_df2_extract_bytes_handles_the_shapes_pythonnet_produces():
+    from tracking_tools.microscope_interface.mtb import MTBDefiniteFocus
+    ex = MTBDefiniteFocus._extract_bytes
+    assert ex(None) is None
+    assert ex(True) is None, "a bare bool is a result, not a blob"
+    assert ex(b"ab") == b"ab"
+    assert ex(bytearray(b"ab")) == b"ab"
+    assert ex((True, bytearray(b"ab"))) == b"ab"
+    assert ex([1, 2, 3]) == b"\x01\x02\x03"
+
+
+def test_df2_restore_sends_the_blob_and_a_resolved_mode(monkeypatch):
+    monkeypatch.setattr(
+        mtb, "resolve_mode", lambda name="Synchronous": f"<{name}>"
+    )
+    df2, fake = _df2()
+    assert df2.restore(b"\x09\x08") is True
+    args = fake.restore_calls[-1]
+    assert args[0] == "<Synchronous>", (
+        "a raw int reached .NET — pythonnet >=3.0 rejects that"
+    )
+    assert bytes(args[1]) == b"\x09\x08"
+
+
+def test_df2_restore_refuses_an_empty_reference():
+    from tracking_tools.microscope_interface.mtb import MTBError
+    df2, _ = _df2()
+    with pytest.raises(MTBError, match="no stabilizing data"):
+        df2.restore(b"")
+
+
+def test_df2_uses_a_long_timeout():
+    """DF2 measurement takes many seconds; the Micro-Manager wiki
+    recommends ~25 s. Inheriting a 10 s motion timeout would abort a
+    perfectly good measurement."""
+    from tracking_tools.microscope_interface.mtb import MTBDefiniteFocus
+    assert MTBDefiniteFocus.DEFAULT_TIMEOUT_MS >= 25000
+    df2, fake = _df2()
+    df2.learn()
+    assert fake.init_calls[0][1] >= 25000
+
+
+def test_df2_stabilize_now_reports_failure_rather_than_lying():
+    from tracking_tools.microscope_interface.mtb import MTBError
+
+    class Dead(FakeStabilizer):
+        def StabilizeNow(self, *args):
+            raise RuntimeError("lost the surface")
+
+    df2, _ = _df2(Dead())
+    with pytest.raises(MTBError, match="StabilizeNow"):
+        df2.stabilize_now()
+
+
+def test_df2_set_operation_mode_rejects_an_unknown_name():
+    from tracking_tools.microscope_interface.mtb import MTBError
+    df2, _ = _df2()
+    with pytest.raises(MTBError, match="operation mode"):
+        df2.set_operation_mode("Sharpish")
+
+
+def test_df2_reports_state_without_raising():
+    df2, _ = _df2()
+    assert df2.is_busy is False
+    assert df2.signal_quality == 92
+    assert "Definite Focus 2" in df2.describe()
+    assert "\\n" not in df2.describe(), (
+        "describe() contains a literal backslash-n instead of newlines"
+    )
+
+
+def test_session_exposes_definite_focus_and_caches_it(monkeypatch):
+    """has_definite_focus() must never raise: a stand without DF2 shows
+    no controls rather than an error."""
+    from tracking_tools.microscope_interface.mtb import (
+        MTBSession, MTBLED,
+    )
+    s = MTBSession.__new__(MTBSession)
+    s._axes = {}
+    s.timeout_ms = 10000
+    s._root = object()
+    fake = FakeStabilizer()
+    monkeypatch.setattr(MTBSession, "component", lambda self, r: fake)
+    orig = MTBLED._as
+    MTBLED._as = staticmethod(lambda obj, iface: obj)
+    try:
+        first = s.definite_focus()
+        assert s.definite_focus() is first, "not cached"
+        assert s.has_definite_focus() is True
+        # A long timeout even though the session's own is short.
+        assert first.timeout_ms >= 25000
+    finally:
+        MTBLED._as = orig
+
+
+def test_has_definite_focus_is_false_when_absent(monkeypatch):
+    from tracking_tools.microscope_interface.mtb import (
+        MTBError, MTBSession,
+    )
+    s = MTBSession.__new__(MTBSession)
+    s._axes = {}
+    s.timeout_ms = 10000
+    s._root = object()
+
+    def absent(self, role):
+        raise MTBError("MTBFocusStabilizer2 is absent")
+
+    monkeypatch.setattr(MTBSession, "component", absent)
+    assert s.has_definite_focus() is False
+
+
+def test_objective_order_number_is_dug_out_of_the_unique_name():
+    """DF2's ObjectiveSuitability() wants a Zeiss order number, and no
+    attribute is guaranteed to hold one on its own."""
+    from tracking_tools.microscope_interface.mtb import MTBObjective
+
+    class El:
+        UniqueName = "Objective.420660-9970-000"
+        Name = "EC Plan-Neofluar 10x/0.3"
+
+    obj = MTBObjective.__new__(MTBObjective)
+    obj._raw = obj._changer = None
+    obj._element = lambda position=None: El()
+    assert obj.order_number == "420660-9970-000"
+
+
+def test_objective_order_number_is_none_when_nothing_carries_one():
+    from tracking_tools.microscope_interface.mtb import MTBObjective
+
+    class El:
+        Name = "EC Plan-Neofluar 10x/0.3"
+
+    obj = MTBObjective.__new__(MTBObjective)
+    obj._raw = obj._changer = None
+    obj._element = lambda position=None: El()
+    assert obj.order_number is None

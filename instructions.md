@@ -120,9 +120,14 @@ Channels are acquired **sequentially** — one camera, one cube.
 ### 6. Acquisition settings
 
 - **Interval / timepoints** — `0` timepoints means run until stopped
-- **Z-stack** — range and step. Keep the step **above ~0.06 µm** for
+- **Z-stack** — **planes × step**. Keep the step **above ~0.06 µm** for
   the piezo: finer steps do not move and silently duplicate planes.
-  Warnings appear in the log at start.
+  Warnings appear in the log at start. A stack belongs to a
+  **position**: it centres on that position's stored Z, not on wherever
+  the focus happens to be, so touching the focus never moves it. Use
+  *Stack bottom / centre / top* to check the whole range is in focus,
+  and *Set position Z = current focus* to re-anchor.
+- **Definite Focus 2** — see below
 - **Pixel size XY** — set by *Read objective*. Wrong here means every
   correction is mis-scaled.
 - **2-D tracking** — on ignores Z drift; leave on until XY is trusted
@@ -150,6 +155,74 @@ re-saving ROIs mid-run re-initialises that position.
     embryo_tracking/
       tracking_RoIs.json
       logs.json
+```
+
+---
+
+## Definite Focus 2
+
+DF2 holds a focus plane **optically**. Over a multi-hour run that beats
+correcting Z from images: it costs no light, no exposure time, and it
+works on a specimen with nothing trackable in it.
+
+### One reference per position
+
+DF2 identifies a learned plane by an opaque byte blob it hands back
+from `InitOnCurrentFocusPosition`. That blob is what makes
+multi-position work possible — **positions sit at different heights, so
+one global reference would focus every position on the first one's
+plane.** Each position therefore carries its own, saved with it in
+`positions.json` as `df2_ref` (base64).
+
+On the *Acquisition* tab:
+
+| Control | What it does |
+|---|---|
+| **Learn focus → selected position** | Learns the plane you are focused on now and attaches it to the selected position. Also sets that position's `z_um` to the current focus, so "go to position" and "stabilize" agree. |
+| **Learn at every position** | Walks the whole list, moving to each and learning there. The normal way to prepare a run. |
+| **Stabilize now** | Restores the selected position's plane and corrects focus once. Use it to check DF2 actually works before committing. |
+| **Clear reference** | Drops the selected position's plane. |
+| **Precision** | `Exact` (slowest, most precise) / `Balanced` / `Fast`. |
+
+The `df2` column in the position table shows which positions are
+taught. `0 of N` in the status line means a run would stabilize every
+position on whatever plane DF2 last held — which is another position's.
+
+### Who owns Z
+
+This is the one real decision, and it is scientific rather than
+technical.
+
+- **DF2 owns Z** (ticked, the default) — the tracker's Z corrections
+  are **dropped**. Right when the drift you are fighting is *thermal*.
+  Two controllers aiming at the same axis from different measurements
+  fight each other every timepoint.
+- **Unticked** — DF2 removes the hardware drift and the tracker's
+  accumulated dz is applied *on top of* the stabilized plane. Right
+  when the **specimen itself** moves in Z. This composes correctly
+  because DF2 re-establishes the plane before every frame, so the
+  residual Z error the images show is specimen motion.
+
+During a run DF2 fires once per position visit, after the move and
+before the first exposure, so every channel and every plane of a stack
+references the same plane. A z-stack centres on the Z **DF2 actually
+reached**, read back rather than assumed.
+
+### If it is absent or fails
+
+Nothing is fatal. A stand without DF2, a DF2 that will not cast, a
+stale reference blob and a failed stabilization all downgrade to
+image-based Z correction with a warning — losing focus stabilisation
+is a far smaller loss than losing the run. A rejected reference is
+reported **once** per position, not on every visit.
+
+Verify on hardware before trusting it:
+
+```bat
+python tools\df2_test.py                       :: learn, defocus 5 um, recover
+python tools\df2_test.py --offset 20 --mode Exact --tol 0.5
+python tools\df2_test.py --repeat 5            :: does the error accumulate?
+python tools\df2_test.py --report-only         :: nothing moves
 ```
 
 ---
@@ -229,6 +302,8 @@ thresholding knobs (`containment_threshold`, `score_threshold`, `k`,
 | `.changer(role)` | `MTBChangerDevice` for `tl_shutter`, `sideport`, `condenser`, `reflector` |
 | `.objective()` | `MTBObjective` — nosepiece, magnification |
 | `.colibri()` | `MTBColibri` — the fluorescence LEDs |
+| `.definite_focus()` | `MTBDefiniteFocus` — DF2; raises if absent |
+| `.has_definite_focus()` | never raises, for deciding whether to offer the controls |
 | `.light_path()` | every reachable light-path changer, in optical order |
 | `MTBAxis.position` / `.move_to()` / `.move_by()` | µm; clamps to limits, skips no-op moves |
 | `MTBAxis.arrival_tolerance` | `max(step, typical_deviation)` — a servoing piezo dithers well above its step |
@@ -239,6 +314,12 @@ thresholding knobs (`containment_threshold`, `score_threshold`, `k`,
 | `MTBObjective.set_position(p)` | rotate the nosepiece |
 | `MTBColibri.select(nm, pct)` | switch one LED on exclusively |
 | `MTBColibri.all_off()` | every LED off |
+| `MTBDefiniteFocus.learn()` | learn the current plane; returns its reference blob |
+| `.restore(blob)` | re-arm DF2 on a previously learned plane |
+| `.stabilize_now()` | one correction back to that plane |
+| `.set_operation_mode(name)` | `Exact` / `Balanced` / `Fast` |
+| `.objective_suitable(order_no)` | whether DF2 can work with an objective |
+| `MTBObjective.order_number` | the Zeiss order number DF2 wants |
 | `sample_pixel_size_um(cam, mag, adapter)` | `11 / (mag × adapter)` for the Prime 95B |
 
 **Indexing:** `Position` is **1-based**; `GetElement(n)` is
@@ -261,7 +342,12 @@ correction applied on the next visit; `refresh_filename(pos)`;
 Key `mtb_params`: `session`, `mmc`, `camera_label` (shared resources),
 `channels`, `apply_channel`, `z_axis`, `interval_s`, `settle_s`,
 `max_xy_um`, `max_z_um`, `z_stack`, `stop_after_tp`,
-`synthetic_source`.
+`synthetic_source`, `use_definite_focus`, `df2_owns_z`.
+
+Per position, `positions_config[name]` carries `xyz_um` (required),
+`log_dir`, `invert` and `df2_ref` — the base64 DF2 reference blob.
+`set_df2_reference(pos, blob)` updates one mid-run, and
+`encode_df2_ref` / `decode_df2_ref` convert to and from JSON.
 
 ### Command-line tools
 
@@ -272,6 +358,11 @@ python tools\mtb_smoke_test.py --move          :: small test moves
 python tools\mtb_smoke_test.py --lightpath     :: shutters, turrets, lamps
 python tools\mtb_smoke_test.py --objective     :: nosepiece detail
 python tools\mtb_smoke_test.py --colibri       :: LED controller detail
+python tools\mtb_smoke_test.py --df2           :: Definite Focus 2 interface dump
+
+:: definite focus 2  (MOVES THE FOCUS)
+python tools\df2_test.py --report-only         :: state only, nothing moves
+python tools\df2_test.py                       :: learn, defocus, prove recovery
 
 :: camera
 python tools\probe_camera.py --all             :: real camera or phantom slot?
