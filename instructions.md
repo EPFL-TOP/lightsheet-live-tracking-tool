@@ -191,6 +191,43 @@ axes came out as `Q` (unknown) with no z-step.
 
 ---
 
+## Acquiring in 3-D, tracking in 2-D
+
+These are separate decisions. The stack is usually wanted for the
+**science**; tracking only needs to know where the embryo moved in
+**XY**. Running the tracker over 100 planes to compute a Z shift that
+*2-D tracking* then discards is pure waste.
+
+*Acquisition* → **Track on**:
+
+| Setting | The tracker gets | Use when |
+|---|---|---|
+| **Max projection** (default) | one image, brightest across Z | almost always — fast, and robust to the embryo drifting in Z |
+| **Centre plane** | the middle plane only | the specimen is thin and reliably centred |
+| **Mean projection** | one averaged image | noisy frames where averaging helps |
+| **The whole stack (3-D)** | every plane | you genuinely want Z corrections measured from the images |
+
+**The full stack is saved either way.** Flattening happens only on the
+copy handed to the tracker, and every option preserves XY geometry, so
+ROIs drawn in the selection dashboard stay valid.
+
+If you pick *The whole stack* **and** tick *2-D tracking*, the run
+warns you: that combination pays for a full 3-D correlation and then
+throws the Z answer away.
+
+### Why the order matters
+
+The inversion runs **before** the projection, and it has to. In
+brightfield the embryo is **dark**, and a real embryo occupies only
+part of the stack's depth. A max projection of the *raw* stack takes
+the bright background from the out-of-focus planes at the embryo's own
+pixels and erases it completely. Inverting first makes the embryo
+bright, and since the inversion is monotone decreasing,
+`max(invert(x)) == invert(min(x))` — exactly the "darkest across
+planes" you want.
+
+---
+
 ## How long a z-stack takes
 
 A 100-plane stack took over a minute, which was ~75 % pure

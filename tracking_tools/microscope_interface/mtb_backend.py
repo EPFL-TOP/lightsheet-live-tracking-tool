@@ -114,6 +114,61 @@ def invert_for_tracking(img: np.ndarray) -> np.ndarray:
     return (hi + lo) - a
 
 
+#: How to flatten a z-stack before handing it to the tracker.
+#: XY geometry is untouched by every one of these, so ROIs drawn on
+#: the saved stack stay valid whichever is chosen.
+TRACK_PROJECTIONS = ("none", "max", "mean", "centre")
+
+
+def project_for_tracking(img: np.ndarray, mode) -> np.ndarray:
+    """Flatten a (planes, H, W) stack to (H, W) for 2-D tracking.
+
+    Acquiring a stack and tracking in 3-D are separable decisions. The
+    stack is usually wanted for the SCIENCE, while tracking only needs
+    to know where the embryo has moved in XY — and running CoTracker
+    over 100 planes to compute a Z shift that is then discarded is
+    pure waste.
+
+    Order matters, and this must run AFTER invert_for_tracking: in
+    brightfield the embryo is DARK, so a max projection of the raw
+    stack returns the bright background at every pixel and erases it.
+    Inverting first makes the embryo bright, and because the inversion
+    is monotone decreasing, max(invert(x)) == invert(min(x)) — i.e.
+    exactly the "darkest across planes" you actually want.
+
+    `mode` is one of TRACK_PROJECTIONS, or an integer plane index.
+    A 2-D frame and mode 'none' both pass straight through.
+    """
+    a = np.asarray(img)
+    if a.ndim != 3 or mode in (None, "none", False):
+        return a
+
+    if mode == "max":
+        return a.max(axis=0)
+    if mode == "mean":
+        # Back to the original dtype: the tracker's thresholding and
+        # the saved frames should share a scale.
+        return a.mean(axis=0).astype(a.dtype)
+    if mode in ("centre", "center"):
+        return a[a.shape[0] // 2]
+
+    try:
+        idx = int(mode)
+    except (TypeError, ValueError):
+        logger.warning(
+            "unknown track_projection %r — handing the tracker the "
+            "full stack", mode,
+        )
+        return a
+    if not 0 <= idx < a.shape[0]:
+        logger.warning(
+            "track_projection plane %d is outside the %d-plane stack "
+            "— using the centre plane instead", idx, a.shape[0],
+        )
+        return a[a.shape[0] // 2]
+    return a[idx]
+
+
 class MicroscopeInterface_MTB:
     """Closed-loop tracking backend: MTB motion + PVCAM camera.
 
@@ -133,7 +188,13 @@ class MicroscopeInterface_MTB:
                       so the stage figure here is pure waste
       max_xy_um       per-correction XY clamp (default 50)
       max_z_um        per-correction Z clamp  (default 20)
-      z_stack         {'range_um': float, 'step_um': float} or None
+      z_stack         {'n_planes': int, 'step_um': float} or None
+      track_projection how to flatten a stack before TRACKING:
+                      'none' (default - hand over the whole stack),
+                      'max', 'mean', 'centre', or a plane index.
+                      Acquiring in 3-D and tracking in 2-D are
+                      separable: the stack is usually wanted for the
+                      science, while tracking only needs XY.
       stop_after_tp   stop after this many timepoints, or None
       buffer_mb       MMCore circular buffer (default 512)
       synthetic_source  callable(x, y, z, pos_name) -> ndarray, used
@@ -174,6 +235,14 @@ class MicroscopeInterface_MTB:
         self.max_xy_um = float(p.get("max_xy_um", 50.0))
         self.max_z_um = float(p.get("max_z_um", 20.0))
         self.z_stack = p.get("z_stack")
+        # Acquire in 3-D, track in 2-D. 'none' keeps the old behaviour
+        # of handing the tracker the whole stack; 'max' / 'mean' /
+        # 'centre' / a plane index flatten it first. See
+        # project_for_tracking for why this is worth doing.
+        self.track_projection = p.get("track_projection", "none")
+        # Only used to flag the wasteful combination below; the
+        # PositionTracker owns the actual behaviour.
+        self.tracking_2d = bool(p.get("tracking_2d", False))
         # Written into the TIFF so downstream analysis inherits the
         # calibration instead of re-deriving it from the objective.
         self.pixel_size_um = p.get("pixel_size_um")
@@ -694,11 +763,13 @@ class MicroscopeInterface_MTB:
                 # is where the operator configures what to track and
                 # sees the preview — the channel's flag is only the
                 # default until ROIs are saved.
-                self._image_queue.put(
-                    (invert_for_tracking(img)
-                     if self.wants_invert(pos_name, channel) else img,
-                     tp, pos_name)
-                )
+                frame = img
+                if self.wants_invert(pos_name, channel):
+                    frame = invert_for_tracking(frame)
+                # AFTER the inversion — see project_for_tracking.
+                frame = project_for_tracking(frame,
+                                             self.track_projection)
+                self._image_queue.put((frame, tp, pos_name))
 
     def _acquire(self, pos_name, x, y, z, stack=None,
                  exposure_ms=None, channel=None) -> np.ndarray:
@@ -838,6 +909,17 @@ class MicroscopeInterface_MTB:
                 "enabled, so every frame will be a single plane. Tick "
                 "z_stack on the channel(s) you want stacked in the "
                 "Channels tab."
+            )
+
+        # 0b. Paying for 3-D tracking and throwing the answer away.
+        if (self.track_projection in (None, "none", False)
+                and self.tracking_2d):
+            warnings.append(
+                "tracking_2d discards the Z shift, but the tracker is "
+                "still being handed the whole stack — it computes a "
+                "3-D correlation over every plane and the Z result is "
+                "then dropped. Set track_projection to 'max' (or "
+                "'centre') to track on one flattened image instead."
             )
 
         if self.motion is None:

@@ -1798,3 +1798,190 @@ def test_a_single_frame_still_sets_its_exposure(patched):
     iface._acquire("scene_000", 0.0, 0.0, 250.0, stack=False,
                    exposure_ms=5.0, channel={"name": "BF"})
     assert iface.mmc.exposures == 1
+
+
+# ====================================================================
+# ACQUIRE IN 3-D, TRACK IN 2-D
+#
+# Separable decisions: the stack is usually wanted for the science,
+# while tracking only needs to know where the embryo moved in XY.
+# Running the tracker over 100 planes to compute a Z shift that
+# tracking_2d then discards is pure waste.
+# ====================================================================
+
+def _bf_stack():
+    """Brightfield-like: a DARK object on a BRIGHT background.
+
+    The object occupies a LIMITED Z RANGE - it is present on the
+    middle plane only, and the outer planes show plain background
+    there. That is what a real embryo in a deep stack looks like, and
+    it is what makes the invert/project ORDER matter: a max projection
+    of the raw stack takes the background value from the outer planes
+    at the object's own pixels and erases it completely.
+
+    An object present on every plane survives either order, so a
+    synthetic like that cannot detect the bug.
+    """
+    stack = np.full((5, 16, 16), 4000, dtype=np.uint16)
+    stack[2, 6:10, 6:10] = 2000
+    return stack
+
+
+def _plane_server(stack):
+    """A synthetic source that serves ONE PLANE per call.
+
+    The backend's grabber returns a single plane and _acquire_stack
+    stacks them; a source handing back the whole stack each time
+    produces a 4-D array, which is a test bug rather than a real one.
+    """
+    calls = {"i": 0}
+
+    def source(x, y, z, pos_name):
+        i = calls["i"] % stack.shape[0]
+        calls["i"] += 1
+        return stack[i]
+
+    return source
+
+
+def test_projection_none_hands_over_the_whole_stack():
+    stack = _bf_stack()
+    out = mtb_backend.project_for_tracking(stack, "none")
+    assert out.shape == stack.shape
+
+
+def test_projection_max_flattens_to_one_image():
+    out = mtb_backend.project_for_tracking(_bf_stack(), "max")
+    assert out.shape == (16, 16)
+
+
+def test_projection_centre_takes_the_middle_plane():
+    stack = _bf_stack()
+    out = mtb_backend.project_for_tracking(stack, "centre")
+    assert np.array_equal(out, stack[2])
+    assert out[7, 7] == 2000, "the centre plane lost the object"
+
+
+def test_projection_mean_keeps_the_dtype():
+    out = mtb_backend.project_for_tracking(_bf_stack(), "mean")
+    assert out.dtype == np.uint16
+
+
+def test_projection_accepts_an_explicit_plane_index():
+    stack = _bf_stack()
+    assert np.array_equal(
+        mtb_backend.project_for_tracking(stack, 1), stack[1]
+    )
+
+
+def test_projection_index_outside_the_stack_falls_back_to_centre():
+    stack = _bf_stack()
+    out = mtb_backend.project_for_tracking(stack, 99)
+    assert np.array_equal(out, stack[2])
+
+
+def test_projection_leaves_a_2d_frame_alone():
+    frame = np.zeros((16, 16), dtype=np.uint16)
+    for mode in ("max", "mean", "centre", "none", 3):
+        assert mtb_backend.project_for_tracking(frame, mode).shape \
+            == (16, 16)
+
+
+def test_an_unknown_projection_degrades_to_the_full_stack():
+    stack = _bf_stack()
+    out = mtb_backend.project_for_tracking(stack, "sideways")
+    assert out.shape == stack.shape
+
+
+def test_REGRESSION_inversion_happens_before_the_projection(patched):
+    """In brightfield the embryo is DARK, so a max projection of the
+    RAW stack returns the bright background at every pixel and erases
+    it. Inverting first is what makes the projection meaningful."""
+    make, motion, _ = patched
+    stack = _bf_stack()
+    iface = make(
+        z_stack={"n_planes": 5, "step_um": 1.0},
+        track_projection="max",
+        channels=[{"name": "BF", "reflector_pos": 0, "exposure_ms": 5.0,
+                   "z_stack": True, "invert": True}],
+        synthetic_source=_plane_server(stack),
+    )
+    iface.motion = motion
+    iface._visit("scene_000", 0)
+    frame, _, _ = iface._image_queue.get_nowait()
+
+    assert frame.ndim == 2
+    obj = frame[6:10, 6:10].mean()
+    bg = frame[0:4, 0:4].mean()
+    assert obj > bg, (
+        "the embryo is not brighter than the background — the raw "
+        "stack was max-projected before inversion, so the outer "
+        "planes' background overwrote the object's own pixels"
+    )
+    # Not merely brighter: it must retain the full contrast the
+    # in-focus plane had.
+    assert obj - bg == pytest.approx(2000, rel=0.01)
+
+
+def test_projection_keeps_xy_geometry_so_rois_stay_valid(patched):
+    """ROIs are drawn on the saved stack; every projection must leave
+    the XY frame identical in size."""
+    make, motion, _ = patched
+    stack = _bf_stack()
+    iface = make(
+        z_stack={"n_planes": 5, "step_um": 1.0},
+        track_projection="max",
+        channels=[{"name": "BF", "reflector_pos": 0, "exposure_ms": 5.0,
+                   "z_stack": True}],
+        synthetic_source=_plane_server(stack),
+    )
+    iface.motion = motion
+    iface._visit("scene_000", 0)
+    frame, _, _ = iface._image_queue.get_nowait()
+    assert frame.shape == stack.shape[1:]
+
+
+def test_the_saved_file_still_holds_every_plane(patched):
+    """Tracking in 2-D must not cost you the science data."""
+    make, motion, tmp_path = patched
+    stack = _bf_stack()
+    iface = make(
+        z_stack={"n_planes": 5, "step_um": 1.0},
+        track_projection="max",
+        channels=[{"name": "BF", "reflector_pos": 0, "exposure_ms": 5.0,
+                   "z_stack": True}],
+        synthetic_source=_plane_server(stack),
+    )
+    iface.motion = motion
+    iface._visit("scene_000", 0)
+    info = _read_tif(str(tmp_path / "scene_000" / "t0000_BF.tif"))
+    assert info["pages"] == 5
+    assert info["axes"] == "ZYX"
+
+
+def test_full_stack_is_still_the_default(patched):
+    """Changing this silently would alter existing runs."""
+    make, _, _ = patched
+    assert make().track_projection == "none"
+
+
+def test_paying_for_3d_tracking_then_discarding_z_is_flagged(patched):
+    make, motion, _ = patched
+    iface = make(z_stack={"n_planes": 50, "step_um": 1.0},
+                 track_projection="none", tracking_2d=True,
+                 channels=[{"name": "BF", "reflector_pos": 0,
+                            "exposure_ms": 5.0, "z_stack": True}])
+    iface.motion = motion
+    assert any("discards the Z shift" in w
+               for w in iface.check_z_stack())
+
+
+def test_no_complaint_when_a_projection_is_configured(patched):
+    make, motion, _ = patched
+    iface = make(z_stack={"n_planes": 50, "step_um": 1.0},
+                 track_projection="max", tracking_2d=True,
+                 channels=[{"name": "BF", "reflector_pos": 0,
+                            "exposure_ms": 5.0, "z_stack": True}])
+    iface.motion = motion
+    assert not any("discards the Z shift" in w
+                   for w in iface.check_z_stack())

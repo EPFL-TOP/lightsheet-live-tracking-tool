@@ -79,6 +79,18 @@ class PositionTrackerSingleRoI_v2 :
 
 
     def compute_shift_um(self, frame) :
+        # If frame is 2D, convert to 3D
+        # PositionTrackerMultiROI has always done this; this class did
+        # not, so a 2-D frame set self.shape to (H, W) and then
+        # compute_shift_px's `D, H, W = self.shape` raised
+        #   ValueError: not enough values to unpack (expected 3, got 2)
+        # That is reachable whenever the microscope sends single
+        # planes - which is every run without a z-stack, and now also
+        # every run that acquires a stack but tracks on a projection.
+        if frame.ndim == 2 :
+            self.logger.info("Converting 2D image to 3D")
+            frame = frame[np.newaxis, ...]
+
         # if first frame initialize pos_tracker and base_tracker and return 0 shift
         if self.shape == None :
             self.shape = frame.shape
