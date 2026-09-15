@@ -191,40 +191,50 @@ axes came out as `Q` (unknown) with no z-step.
 
 ---
 
-## Acquiring in 3-D, tracking in 2-D
+## Acquiring in 3-D, correcting in XY only
 
-These are separate decisions. The stack is usually wanted for the
-**science**; tracking only needs to know where the embryo moved in
-**XY**. Running the tracker over 100 planes to compute a Z shift that
-*2-D tracking* then discards is pure waste.
+**The full stack always goes to the tracker.** This is a flag, not a
+change to the pixels — and that is deliberate, because of how the
+tracker works:
 
-*Acquisition* → **Track on**:
-
-| Setting | The tracker gets | Use when |
+| | Method | Needs |
 |---|---|---|
-| **Max projection** (default) | one image, brightest across Z | almost always — fast, and robust to the embryo drifting in Z |
-| **Centre plane** | the middle plane only | the specimen is thin and reliably centred |
-| **Mean projection** | one averaged image | noisy frames where averaging helps |
-| **The whole stack (3-D)** | every plane | you genuinely want Z corrections measured from the images |
+| **XY** | CoTracker, on a max projection the tracker makes **itself** | any stack |
+| **Z** | centre of mass across planes, on the thresholded volume | **every plane** |
 
-**The full stack is saved either way.** Flattening happens only on the
-copy handed to the tracker, and every option preserves XY geometry, so
-ROIs drawn in the selection dashboard stay valid.
+Two consequences follow, and they are the whole design:
 
-If you pick *The whole stack* **and** tick *2-D tracking*, the run
-warns you: that combination pays for a full 3-D correlation and then
-throws the Z answer away.
+1. **Flattening the stack before the tracker saves nothing on XY** —
+   that path already runs on a max projection.
+2. **It would destroy Z tracking permanently.** With one plane the
+   centre of mass in Z is meaningless, and no amount of
+   re-configuration brings it back without re-acquiring.
 
-### Why the order matters
+So *Track in XY only* suppresses the **Z correction**, leaving the
+frames untouched. Turn it back on later and Z tracking resumes on the
+same data.
 
-The inversion runs **before** the projection, and it has to. In
-brightfield the embryo is **dark**, and a real embryo occupies only
-part of the stack's depth. A max projection of the *raw* stack takes
-the bright background from the out-of-focus planes at the embryo's own
-pixels and erases it completely. Inverting first makes the embryo
-bright, and since the inversion is monotone decreasing,
-`max(invert(x)) == invert(min(x))` — exactly the "darkest across
-planes" you want.
+### Where to set it
+
+**In the ROI selection dashboard, per position** — beside *Invert
+contrast* and *Grid mask*, for the same reason: that is where you
+decide what to track, and one embryo may sit still in Z while another
+sinks. It travels in `tracking_RoIs.json`:
+
+```
+ROI dashboard  →  tracking_RoIs.json  {"tracking_2d": true}
+               →  TrackingRunner merges it into positions_config
+               →  position_tracker_params / roi_tracker_params
+               →  the Z shift is suppressed, and not even computed
+```
+
+The Zeiss panel's *2-D tracking* checkbox is only the **run-wide
+default**, used until a position has ROIs saved. The dashboard wins,
+exactly as it does for inversion.
+
+With the flag on, `compute_new_position_z` is **skipped** rather than
+computed and discarded — it runs a 3-D Gaussian and a centre of mass
+over the cropped volume, which on a deep stack is not cheap.
 
 ---
 
@@ -408,6 +418,7 @@ The **Selection** tab's preprocessing controls all apply to the preview
 | Control | Effect |
 |---|---|
 | **Invert contrast (brightfield)** | flips dark-on-bright to bright-on-dark |
+| **Track in XY only (ignore Z drift)** | suppresses the Z correction; the full stack still reaches the tracker, so this is reversible |
 | Downscale | speed vs precision |
 | Gaussian blur factor | suppresses texture; transmitted light usually needs more than fluorescence |
 | Mask kernel size | morphological cleanup |

@@ -141,6 +141,28 @@ class TrackingRunner() :
                 "threshold_type", "otsu"
             )
         )
+        # The base tracker needs it too, so it can skip computing a Z
+        # position that would only be discarded.
+        roi_tracker_params["tracking_2d"] = bool(
+            self.positions_config[PosSetting].get(
+                "tracking_2d",
+                self.position_tracker_params.get("tracking_2d", False),
+            )
+        )
+        # Same pattern as threshold_type above: the ROI selection
+        # dashboard's per-position choice overrides the run-wide
+        # default. tracking_2d suppresses the Z CORRECTION; the
+        # tracker still receives the whole stack, because XY and Z are
+        # measured by different methods (CoTracker on a max
+        # projection, centre of mass across planes) and flattening the
+        # input would destroy Z tracking irreversibly.
+        position_tracker_params = dict(self.position_tracker_params)
+        position_tracker_params["tracking_2d"] = bool(
+            self.positions_config[PosSetting].get(
+                "tracking_2d",
+                self.position_tracker_params.get("tracking_2d", False),
+            )
+        )
         tracker = self.tracker_class(
             first_frame=image,
             rois=rois,
@@ -153,7 +175,7 @@ class TrackingRunner() :
             mask_kernel_size=mask_kernel_size,
             position_name=position_name,
             roi_tracker_params=roi_tracker_params,
-            position_tracker_params=self.position_tracker_params,
+            position_tracker_params=position_tracker_params,
         )
         self.trackers[position_name] = tracker
 

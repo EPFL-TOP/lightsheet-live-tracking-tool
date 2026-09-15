@@ -631,20 +631,6 @@ class MTBSetupPanel:
             name="Pixel size Z (µm)", value=1.0, start=0.001,
             end=100.0, step=0.01, width=160,
         )
-        # Acquire in 3-D, track in 2-D. Running CoTracker over 100
-        # planes to compute a Z shift that tracking_2d then discards
-        # is pure waste — flattening first is both faster and, on a
-        # thick specimen, usually more robust.
-        self.track_projection = pn.widgets.Select(
-            name="Track on", width=190,
-            options={
-                "Max projection (recommended)": "max",
-                "Centre plane": "centre",
-                "Mean projection": "mean",
-                "The whole stack (3-D)": "none",
-            },
-            value="max",
-        )
         self.tracking_2d = pn.widgets.Checkbox(
             name="2-D tracking (ignore Z shift)", value=True
         )
@@ -778,7 +764,7 @@ class MTBSetupPanel:
             w.param.watch(lambda ev: self._update_zstack_info(),
                           "value")
         for w in (self.zstack_on, self.zstack_planes,
-                  self.track_projection, self.tracking_2d):
+                  self.tracking_2d):
             w.param.watch(self._update_track_info, "value")
         for w in (self.view_position, self.view_channels,
                   self.view_plane, self.view_maxproj):
@@ -1513,7 +1499,6 @@ class MTBSetupPanel:
         "exposure", "live_fps", "preview_px", "z_axis",
         "camera_pixel_um", "adapter_mag", "pixel_xy", "pixel_z",
         "tracking_2d", "serverkit", "max_xy", "max_z",
-        "track_projection",
         "interval_s", "n_timepoints", "settle_s",
         "plane_settle",
         "zstack_on", "zstack_planes", "zstack_range", "zstack_step",
@@ -1717,35 +1702,34 @@ class MTBSetupPanel:
         return [-span / 2.0 + i * step for i in range(n)]
 
     def _update_track_info(self, _event=None) -> None:
-        """Explain what the tracker will actually be handed."""
+        """Say what the tracker actually does with the frames.
+
+        The tracker max-projects internally for the XY (CoTracker)
+        path and uses a SEPARATE centre-of-mass method across planes
+        for Z. So the full stack always goes over, and "XY only" is a
+        flag, never a change to the pixels.
+        """
         if not self.zstack_on.value:
             self.track_info.object = (
-                "_Single planes — the tracker sees each frame as it is "
-                "acquired._"
+                "_Single planes. XY tracking works on them directly; "
+                "there is no Z to measure._"
             )
             return
-        mode = self.track_projection.value
         planes = len(self.stack_offsets())
-        if mode == "none":
-            note = (f"⚠️ The tracker gets **all {planes} planes** and "
-                    f"correlates in 3-D.")
-            if self.tracking_2d.value:
-                note += (" With *2-D tracking* ticked the Z result is "
-                         "then **thrown away** — you are paying for a "
-                         f"{planes}-plane correlation for nothing. "
-                         "Pick a projection instead.")
-            else:
-                note += (" Slow on a deep stack; only worth it if you "
-                         "genuinely want Z corrections from the "
-                         "images.")
+        if self.tracking_2d.value:
+            note = (f"The full **{planes}-plane** stack goes to the "
+                    f"tracker, which max-projects it internally for "
+                    f"XY. **Z corrections are suppressed**, so the "
+                    f"stage only moves in XY.")
         else:
-            label = {"max": "a max projection",
-                     "mean": "a mean projection",
-                     "centre": "the centre plane"}.get(mode, mode)
-            note = (f"The {planes}-plane stack is **saved in full**, "
-                    f"but the tracker gets {label} — one image, so "
-                    f"tracking is 2-D and fast. XY geometry is "
-                    f"identical, so ROIs stay valid.")
+            note = (f"The full **{planes}-plane** stack goes to the "
+                    f"tracker: XY from a max projection, Z from the "
+                    f"centre of mass across planes. The stage is "
+                    f"corrected in all three axes.")
+        note += ("\n\n_This is the **default**. The ROI selection "
+                 "dashboard's per-position *Track in XY only* setting "
+                 "overrides it, the same way it does for inversion — "
+                 "different embryos can need different treatment._")
         self.track_info.object = note
 
     def _update_zstack_info(self) -> None:
@@ -2898,7 +2882,6 @@ class MTBSetupPanel:
             "pixel_size_xy": float(self.pixel_xy.value),
             "pixel_size_z": float(self.pixel_z.value),
             "tracking_2d": bool(self.tracking_2d.value),
-            "track_projection": self.track_projection.value,
         }
         log_dir_name = runner_config["log_dir_name"]
 
@@ -3495,9 +3478,8 @@ class MTBSetupPanel:
             pn.layout.Divider(),
             "### Drift correction",
             pn.Row(self.pixel_xy, self.pixel_z),
-            pn.Row(self.track_projection, self.tracking_2d),
+            pn.Row(self.tracking_2d, self.serverkit),
             self.track_info,
-            pn.Row(self.serverkit),
             pn.Row(self.max_xy, self.max_z),
             width=620,
         )

@@ -64,6 +64,18 @@ def make_layout():
     checkbox_showmask = CheckboxGroup(
         labels=["Show grid mask"], active=[]
     )
+    # The tracker measures XY and Z by DIFFERENT methods: CoTracker on
+    # a max projection for XY, centre of mass across planes for Z. So
+    # "track in XY only" is a flag, not a change to the pixels — the
+    # full stack still reaches the tracker and Z tracking can be turned
+    # back on later without re-acquiring anything.
+    #
+    # It belongs here, per position, for the same reason inversion
+    # does: this is where you decide what to track, and one embryo may
+    # sit still in Z while another sinks.
+    checkbox_xy_only = CheckboxGroup(
+        labels=["Track in XY only (ignore Z drift)"], active=[]
+    )
     
     # Dropdowns
     downscale=['0','1','2','3','4','5']
@@ -666,6 +678,12 @@ def make_layout():
             # by TrackingRunner.initialize_tracker and passed to the
             # tracker in roi_tracker_params.
             'threshold_type': dropdown_threshold.value, 
+            # Suppresses the Z correction only. The full stack still
+            # goes to the tracker, so this costs nothing and is
+            # reversible. Read back by
+            # TrackingRunner.initialize_tracker into
+            # position_tracker_params.
+            'tracking_2d': 0 in checkbox_xy_only.active, 
             'scaling_factor':int(dropdown_downscale.value),
             'blur_factor':int(dropdown_blur_factor.value),
             'mask_kernel_size':sigma_size_slider.value,
@@ -862,6 +880,7 @@ def make_layout():
                      grid_size_slider, sigma_size_slider,
                      dropdown_threshold,
                      checkbox_invert, checkbox_showmask,
+                     checkbox_xy_only,
                      checkbox_detection,
                      mk_div(),mk_div(),
                      checkbox_maxproj, contrast_slider, 

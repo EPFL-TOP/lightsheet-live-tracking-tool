@@ -29,6 +29,7 @@ class SingleRoIBaseTracker_v2 :
             score_threshold,
             model_path,
             threshold_type="otsu",
+            tracking_2d=False,
     ) :
         """ROI Tracker class. Uses CoTracker and Faster-RCNN to track an ROI in a streaming video.
         The compute_new_position() updates the tracker.
@@ -64,6 +65,14 @@ class SingleRoIBaseTracker_v2 :
         # segments by local variance instead and works for both.
         # Supplied per position from tracking_RoIs.json.
         self.threshold_type = threshold_type or "otsu"
+        # When True the Z SHIFT is discarded downstream, so
+        # computing it is pure cost: compute_new_position_z
+        # runs a 3-D Gaussian and a centre of mass over the
+        # whole cropped VOLUME, which on a deep stack is not
+        # cheap. The frames are untouched either way, so Z
+        # tracking can be switched back on without
+        # re-acquiring anything.
+        self.tracking_2d = bool(tracking_2d)
         self.kernel_size_z = kernel_size_z
         self.log = log
         self.use_detection = use_detection
@@ -198,7 +207,7 @@ class SingleRoIBaseTracker_v2 :
                 position_yx, new_roi = self.fuse_positions_yx(roi_predicted, roi_detected, score)
                 self.rois_list.append([new_roi])
 
-                position_z = self.compute_new_position_z(new_roi)
+                position_z = self._position_z_or_reference(new_roi)
 
                 new_position = position_yx.to_position3D(z=position_z)
             self.tracked_points.append(new_position)
@@ -334,6 +343,19 @@ class SingleRoIBaseTracker_v2 :
             new_roi = roi_predicted
         return fused_pos_yx, new_roi
 
+
+    def _position_z_or_reference(self, roi) :
+        """Z of the ROI, or the reference plane when tracking in XY.
+
+        compute_shift_px measures the shift against Position3D(z=D//2),
+        so returning D//2 here yields a Z shift of exactly zero -
+        identical to what tracking_2d produces downstream, but without
+        running a 3-D Gaussian and a centre of mass over the whole
+        cropped volume first.
+        """
+        if self.tracking_2d :
+            return self.current_frame.shape[0] // 2
+        return self.compute_new_position_z(roi)
 
     def compute_new_position_z(self, roi) :
         """Computes the position in z given an ROI, using the center of mass method
@@ -528,6 +550,7 @@ class MultiRoIBaseTracker :
             score_threshold,
             model_path,
             threshold_type="otsu",
+            tracking_2d=False,
     ) :
         # Takes raw frames as input, handle processing (norm, scaling, projection), manage the sliding window
         # and manage the computation of the RoI position across frames
@@ -545,6 +568,16 @@ class MultiRoIBaseTracker :
         self.size_ratio_threshold = size_ratio_threshold
         self.score_threshold = score_threshold
         self.model_path = model_path
+        # This class ACCEPTED threshold_type but never stored it, so
+        # _initialize_queries' getattr(self, "threshold_type", "otsu")
+        # always fell back to otsu. Multi-ROI brightfield therefore
+        # never got the texture mask chosen in the ROI dashboard -
+        # measured on t0000_BF.tif, otsu keeps 44% of points on the
+        # embryo against texture's 95%.
+        self.threshold_type = threshold_type or "otsu"
+        # See the note in the single-ROI class: when the Z shift is
+        # discarded downstream, computing it is pure cost.
+        self.tracking_2d = bool(tracking_2d)
 
         # Convert to ROI dataclass, downscale rois
         self.rois = [ROI(**roi).scale(scaling_factor=self.scaling_factor, down=True) for roi in rois]      
@@ -691,7 +724,7 @@ class MultiRoIBaseTracker :
                     # self.rois_list.append([new_roi]) ######################
                     new_rois.append(new_roi)
 
-                    position_z = self.compute_new_position_z(new_roi)
+                    position_z = self._position_z_or_reference(new_roi)
 
                     new_positions.append(position_yx.to_position3D(z=position_z))
                 
@@ -832,6 +865,19 @@ class MultiRoIBaseTracker :
             new_roi = roi_predicted
         return fused_pos_yx, new_roi
 
+
+    def _position_z_or_reference(self, roi) :
+        """Z of the ROI, or the reference plane when tracking in XY.
+
+        compute_shift_px measures the shift against Position3D(z=D//2),
+        so returning D//2 here yields a Z shift of exactly zero -
+        identical to what tracking_2d produces downstream, but without
+        running a 3-D Gaussian and a centre of mass over the whole
+        cropped volume first.
+        """
+        if self.tracking_2d :
+            return self.current_frame.shape[0] // 2
+        return self.compute_new_position_z(roi)
 
     def compute_new_position_z(self, roi) :
         """Computes the position in z given an ROI, using the center of mass method
