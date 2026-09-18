@@ -690,9 +690,14 @@ class MTBSetupPanel:
         # stay untracked for the whole run, since the ROI watcher only
         # watches folders known at attach time. Waiting for all is the
         # safer default.
+        # Default OFF. Imaging and tracking are different decisions:
+        # you may want twenty positions recorded and three
+        # drift-corrected. Positions gain tracking the moment their
+        # ROIs are saved, so waiting for all of them only delays the
+        # ones that are ready.
         self.require_all_rois = pn.widgets.Checkbox(
-            name="Wait until every position has ROIs before tracking",
-            value=True,
+            name="Wait for ROIs on EVERY position before tracking",
+            value=False,
         )
         self.track_info = pn.pane.Markdown(
             "", width=600, styles={"font-size": "0.8em"},
@@ -2911,45 +2916,58 @@ class MTBSetupPanel:
                 )
 
         captured = self.positions_config(root, log_dir_name)
-        merged = {}
-        for name, entry in discovered.items():
-            if name not in captured:
-                logger.warning(
-                    "position %s has ROIs but no captured baseline — "
-                    "skipping, the tracker cannot correct it", name
-                )
-                continue
-            merged[name] = dict(entry)
-            merged[name]["xyz_um"] = captured[name]["xyz_um"]
 
-        if not merged:
+        # EVERY captured position goes to the runner, not just the ones
+        # with ROIs. Two reasons:
+        #   * imaging and tracking are different decisions — you may
+        #     want twenty positions recorded and three drift-corrected;
+        #   * the ROI watcher only watches folders it was given, so a
+        #     position omitted here could never JOIN the loop later.
+        # TrackingRunner builds trackers only for positions whose ROI
+        # keys are present, and the watcher adds the rest as their
+        # files appear.
+        merged = {}
+        for name, entry in captured.items():
+            merged[name] = dict(entry)
+            if name in discovered:
+                roi_entry = dict(discovered[name])
+                # The stage baseline exists nowhere on disk, so ours
+                # always wins over anything get_pos_config invented.
+                roi_entry.pop("xyz_um", None)
+                merged[name].update(roi_entry)
+
+        orphans = [n for n in discovered if n not in captured]
+        if orphans:
+            logger.warning(
+                "ROIs exist for %s but no position was captured here — "
+                "the tracker has no stage baseline for them",
+                ", ".join(orphans),
+            )
+
+        trackable = [n for n in merged if n in discovered]
+        if not trackable:
             raise RuntimeError(
                 "No position has BOTH a captured baseline and ROIs. "
                 "Capture positions here, acquire, then draw ROIs."
             )
 
-        untracked = [n for n in self.positions_config()
-                     if n not in merged]
+        untracked = [n for n in merged if n not in discovered]
         if untracked:
-            # run_zeiss() logs "No tracker for [pos] — skipping" and
-            # keeps acquiring, so these still get imaged; they just are
-            # not drift-corrected. The ROI watcher only watches folders
-            # in positions_config, so ROIs drawn for them AFTER this
-            # point need a restart to take effect.
-            logger.warning(
-                "acquiring but NOT tracking (no ROIs): %s",
-                ", ".join(untracked),
-            )
             self._push_log(
-                f"NOT tracked (no ROIs): {', '.join(untracked)} — "
-                f"they keep acquiring; restart to pick up ROIs added "
-                f"for them later"
+                f"imaging {len(merged)} position(s), tracking "
+                f"{len(trackable)}: {', '.join(trackable)}. "
+                f"No ROIs yet for {', '.join(untracked)} — save ROIs "
+                f"and they join the loop, no restart needed."
             )
 
-        # Keep the backend's view consistent with what we will track.
-        self._runner.positions_config = merged
-        self._runner.pos_names = list(merged.keys())
-        for name in merged:
+        # Merge the ROI keys into the BACKEND's own config without
+        # touching its position list. Replacing positions_config and
+        # pos_names here is what previously stopped untracked positions
+        # being ACQUIRED at all — _acquisition_loop iterates pos_names.
+        for name in trackable:
+            entry = self._runner.positions_config.setdefault(name, {})
+            entry.update({k: v for k, v in merged[name].items()
+                          if k != "xyz_um"})
             self._runner.refresh_filename(name)
 
         return TrackingRunner(
@@ -2995,10 +3013,20 @@ class MTBSetupPanel:
                         )
                         break
                     if ready and pending:
+                        # Only reachable with require_all_rois ticked;
+                        # otherwise the branch above has already
+                        # attached the tracker.
                         self._push_log(
-                            f"waiting for ROIs on "
-                            f"{', '.join(pending)} "
-                            f"({len(ready)}/{len(state)} ready)"
+                            f"holding: {len(ready)}/{len(state)} have "
+                            f"ROIs, still waiting on "
+                            f"{', '.join(pending)}. Untick *Wait for "
+                            f"ROIs on EVERY position* to start now."
+                        )
+                    elif not ready:
+                        self._push_log(
+                            f"no ROIs yet for any of "
+                            f"{len(state)} position(s) — still "
+                            f"acquiring"
                         )
 
                 # (None, None, None) on timeout — the contract every
@@ -3495,6 +3523,15 @@ class MTBSetupPanel:
             ),
             pn.Row(self.auto_track),
             pn.Row(self.require_all_rois),
+            pn.pane.Markdown(
+                "_Tracking starts as soon as **any** position has ROIs. "
+                "Positions without them keep being **imaged**, and join "
+                "the tracking loop the moment you save ROIs for them — "
+                "no restart. Tick the box only if a run is invalid "
+                "unless every position is corrected from the first "
+                "timepoint._",
+                width=600, styles={"font-size": "0.8em"},
+            ),
             pn.Row(self.roi_poll_s, self.btn_check_rois),
             self.roi_state,
             pn.layout.Divider(),

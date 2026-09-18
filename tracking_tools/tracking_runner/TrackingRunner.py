@@ -55,6 +55,8 @@ class TrackingRunner() :
         # Populated by run_zeiss(); positions whose ROI JSON was modified at runtime
         self._pending_reinit = set()
         self._roi_observer   = None
+        # Positions we have already explained away as untracked.
+        self._untracked_reported = set()
 
     # ------------------------------------
     # Tracking Loops
@@ -63,9 +65,7 @@ class TrackingRunner() :
     def run_LS1(self) :
         self._pending_reinit = set()
         # Initialize trackers before main loop
-        self.logger.info(f"Initializing trackers")
-        for position_name in self.positions_config.keys() :
-            self.initialize_tracker(position_name)
+        self.initialize_ready_trackers()
 
         # Enable pause after position after initialisation to avoid timing problems
         self._start_roi_watcher()
@@ -99,9 +99,7 @@ class TrackingRunner() :
 
         
         # Initialize trackers before main loop
-        self.logger.info(f"Initializing trackers")
-        for position_name in self.positions_config.keys() :
-            self.initialize_tracker(position_name)
+        self.initialize_ready_trackers()
         
         self.logger.info(f"Main tracking loop")
         while not self.stop_requested :
@@ -178,6 +176,52 @@ class TrackingRunner() :
             position_tracker_params=position_tracker_params,
         )
         self.trackers[position_name] = tracker
+
+    #: Keys that only exist once tracking_RoIs.json has been merged
+    #: into positions_config. Their absence means "imaged, not yet
+    #: tracked" - a normal state, not an error.
+    _ROI_KEYS = ("RoIs", "detection", "tracking_mode", "scaling_factor",
+                 "blur_factor", "grid_size", "mask_kernel_size")
+
+    def is_trackable(self, position_name) :
+        """Whether this position has ROIs and can therefore be tracked.
+
+        Positions WITHOUT ROIs are still imaged - you may want to
+        record twenty positions and drift-correct three, or decide
+        halfway through a run that a fourth is worth following.
+        """
+        cfg = self.positions_config.get(position_name) or {}
+        return all(k in cfg for k in self._ROI_KEYS)
+
+    def tracked_positions(self) :
+        return sorted(self.trackers.keys())
+
+    def untracked_positions(self) :
+        return sorted(n for n in self.positions_config
+                      if n not in self.trackers)
+
+    def initialize_ready_trackers(self) :
+        """Build trackers for whichever positions have ROIs so far.
+
+        Called at startup. Positions that acquire an ROI file later are
+        picked up by the watcher, so this is a starting point rather
+        than a fixed set.
+        """
+        for position_name in list(self.positions_config) :
+            if self.is_trackable(position_name) :
+                self.initialize_tracker(position_name)
+        tracked = self.tracked_positions()
+        waiting = self.untracked_positions()
+        self.logger.info(
+            f"Tracking {len(tracked)} of {len(self.positions_config)} "
+            f"position(s): {', '.join(tracked) if tracked else 'none'}"
+        )
+        if waiting :
+            self.logger.info(
+                f"Imaging but not tracking (no ROIs yet): "
+                f"{', '.join(waiting)} - save ROIs for any of them and "
+                f"they join the tracking loop without a restart"
+            )
 
     def track_and_correct(self, position_name, time_point, image) :
         tracker = self.trackers[position_name]
@@ -275,9 +319,7 @@ class TrackingRunner() :
         """
         self._pending_reinit = set()
  
-        self.logger.info("Initializing trackers")
-        for position_name in self.positions_config:
-            self.initialize_tracker(position_name)
+        self.initialize_ready_trackers()
  
         self._start_roi_watcher()
         self.microscope.connect()
@@ -301,9 +343,15 @@ class TrackingRunner() :
                     continue
 
                 if position_name not in self.trackers:
-                    self.logger.warning(
-                        f"No tracker for position [{position_name}] — skipping"
-                    )
+                    # Normal: this position is being imaged but has no
+                    # ROIs yet. Say so ONCE - every timepoint would
+                    # flood the log on a 20-position run.
+                    if position_name not in self._untracked_reported:
+                        self._untracked_reported.add(position_name)
+                        self.logger.info(
+                            f"[{position_name}] imaged but not tracked "
+                            f"(no ROIs yet) - save ROIs to start"
+                        )
                     continue
  
                 if self.tracking_state_dict.get(position_name) != TrackingState.TRACKING_OFF:
@@ -346,11 +394,30 @@ class TrackingRunner() :
         roi_file_to_position = {}
         watch_dirs = set()
         for pos_name, cfg in self.positions_config.items():
+            log_dir = cfg.get('log_dir')
+            if not log_dir:
+                self.logger.warning(
+                    f"[{pos_name}] has no log_dir - ROIs saved for it "
+                    f"cannot be noticed at runtime"
+                )
+                continue
             roi_path = os.path.normpath(
-                os.path.join(cfg['log_dir'], 'tracking_RoIs.json')
+                os.path.join(log_dir, 'tracking_RoIs.json')
             )
             roi_file_to_position[roi_path] = pos_name
-            watch_dirs.add(os.path.dirname(roi_path))
+            # The directory must EXIST before watchdog can watch it,
+            # and for an untracked position it may not yet. Creating it
+            # here is what lets ROIs drawn mid-run start tracking
+            # without a restart - watching the parent instead would
+            # fire on every acquired frame.
+            watch_dir = os.path.dirname(roi_path)
+            try:
+                os.makedirs(watch_dir, exist_ok=True)
+            except OSError as e:
+                self.logger.warning(
+                    f"could not create {watch_dir}: {e}"
+                )
+            watch_dirs.add(watch_dir)
  
         # Normalise keys to lowercase so Windows case differences don't break matching
         roi_file_to_position = {k.lower(): v for k, v in roi_file_to_position.items()}
@@ -362,10 +429,16 @@ class TrackingRunner() :
                 path = os.path.normpath(event.src_path).lower()
                 if path in roi_file_to_position:
                     pos = roi_file_to_position[path]
-                    runner.logger.info(
-                        f"tracking_RoIs.json changed for [{pos}] — "
-                        "tracker will be reinitialized"
-                    )
+                    if pos in runner.trackers:
+                        runner.logger.info(
+                            f"tracking_RoIs.json changed for [{pos}] — "
+                            "tracker will be reinitialized"
+                        )
+                    else:
+                        runner.logger.info(
+                            f"ROIs saved for [{pos}] — it will JOIN "
+                            f"the tracking loop"
+                        )
                     runner._pending_reinit.add(pos)
 
             # On Windows json.dump can trigger on_created (atomic overwrite)
@@ -427,20 +500,39 @@ class TrackingRunner() :
                         f"microscope.refresh_filename failed for [{position_name}]: {e}"
                     )
 
-            # Archive the current tracker's tracks before replacing it
-            if position_name in self.trackers:
+            # Archive the current tracker's tracks before replacing
+            # it. Absent for a position JOINING the loop for the first
+            # time, which is not a reinitialization at all.
+            joining = position_name not in self.trackers
+            if not joining:
                 old_tracks = self.trackers[position_name].get_tracks()
                 self._tracks_history.setdefault(position_name, []).append(old_tracks)
                 self._reinit_epoch[position_name] = (
                     self._reinit_epoch.get(position_name, 0) + 1
                 )
 
+            if not self.is_trackable(position_name):
+                self.logger.warning(
+                    f"[{position_name}] ROI file is missing keys "
+                    f"{[k for k in self._ROI_KEYS if k not in self.positions_config[position_name]]}"
+                    f" - not tracking it"
+                )
+                return
+
             self.initialize_tracker(position_name)
-            self.logger.info(
-                f"Tracker for [{position_name}] reinitialized "
-                f"(epoch {self._reinit_epoch.get(position_name, 0)}) "
-                f"with {len(new_config['RoIs'])} ROI(s)"
-            )
+            self._untracked_reported.discard(position_name)
+            if joining:
+                self.logger.info(
+                    f"[{position_name}] JOINED the tracking loop with "
+                    f"{len(new_config['RoIs'])} ROI(s) - no restart "
+                    f"needed"
+                )
+            else:
+                self.logger.info(
+                    f"Tracker for [{position_name}] reinitialized "
+                    f"(epoch {self._reinit_epoch.get(position_name, 0)}) "
+                    f"with {len(new_config['RoIs'])} ROI(s)"
+                )
         except Exception as e:
             self.logger.error(
                 f"Failed to reinitialize tracker for [{position_name}]: {e}"

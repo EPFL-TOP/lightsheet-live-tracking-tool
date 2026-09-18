@@ -169,6 +169,31 @@ Channels are acquired **sequentially** — one camera, one cube.
 No restart is needed — the tracker attaches to the running loop, and
 re-saving ROIs mid-run re-initialises that position.
 
+### Imaging everything, tracking a subset
+
+**You do not need ROIs for every position.** Imaging and tracking are
+separate decisions: recording twenty positions and drift-correcting
+three is a normal experiment.
+
+- Tracking starts as soon as **any** position has ROIs.
+- Positions without ROIs **keep being imaged** — frames, z-stacks,
+  channels, all unchanged. They are simply not drift-corrected.
+- Save ROIs for one of them at any point and it **joins the tracking
+  loop within a few seconds**, with no restart. The log says
+  `[scene_004] JOINED the tracking loop`.
+- The reverse still works too: re-saving ROIs for a tracked position
+  re-initialises it.
+
+*Wait for ROIs on EVERY position before tracking* is off by default.
+Tick it only when a run is invalid unless every position is corrected
+from the very first timepoint.
+
+Two things used to prevent this, both now fixed: `TrackingRunner`
+built a tracker for **every** position at startup, so one without
+`tracking_RoIs.json` broke the run; and the Zeiss panel replaced the
+backend's `positions_config` and `pos_names` with only the trackable
+subset, which silently stopped the others being **acquired** at all.
+
 ```
 <experiment root>/
   scene_000/

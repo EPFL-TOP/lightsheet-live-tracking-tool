@@ -621,11 +621,17 @@ def test_REGRESSION_empty_roi_folder_is_not_mistaken_for_ready(
     assert state == {"scene_000": True, "scene_001": False}
 
 
-def test_require_all_rois_defaults_on(panel_obj):
-    """Attaching with a partial set leaves the rest untracked for the
-    whole run, since the ROI watcher only watches folders known at
-    attach time."""
-    assert panel_obj.require_all_rois.value is True
+def test_require_all_rois_defaults_off(panel_obj):
+    """Imaging and tracking are different decisions: twenty positions
+    recorded, three drift-corrected, is a normal experiment.
+
+    This used to default ON because the ROI watcher only watched
+    folders known at attach time, so a position left untracked stayed
+    untracked for the whole run. Every captured position is now handed
+    to the runner and watched, so positions join the loop as their
+    ROIs are saved and waiting for all of them only delays the ones
+    that are ready."""
+    assert panel_obj.require_all_rois.value is False
 
 
 def test_check_rois_names_the_positions_still_missing(panel_obj,
