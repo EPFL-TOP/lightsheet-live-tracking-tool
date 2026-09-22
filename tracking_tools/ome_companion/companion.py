@@ -450,6 +450,51 @@ def _indent(elem, level=0):
 
 # --------------------------------------------------------------- write
 
+def _diagnose(root: str) -> str:
+    """Explain what IS in a folder when nothing indexable was found.
+
+    "expected <root>/<position>/t0000_<channel>.tif" is useless on its
+    own: it does not say whether the folder is empty, holds images
+    under names we do not recognise, or is simply one level off. Naming
+    the files actually present answers all three at a glance.
+    """
+    try:
+        entries = sorted(os.listdir(root))
+    except OSError as e:
+        return f"cannot read {root}: {e}"
+
+    tifs = [e for e in entries if e.lower().endswith((".tif", ".tiff"))]
+    subdirs = [e for e in entries
+               if os.path.isdir(os.path.join(root, e))
+               and not e.startswith(".")]
+
+    if tifs:
+        shown = ", ".join(tifs[:5]) + (" ..." if len(tifs) > 5 else "")
+        return (
+            f"{len(tifs)} TIFF(s) here, but none are named "
+            f"t<number>_<channel>.tif — found: {shown}"
+        )
+    if subdirs:
+        shown = ", ".join(subdirs[:8]) + (" ..." if len(subdirs) > 8 else "")
+        return (
+            f"no TIFFs here, and none in the {len(subdirs)} "
+            f"subfolder(s) either: {shown}"
+        )
+    return "the folder is empty"
+
+
+def looks_like_position(root: str) -> bool:
+    """True when `root` IS a position folder rather than holding them.
+
+    Unambiguous: a folder either has t<number>_<channel>.tif files
+    directly inside it or it does not.
+    """
+    try:
+        return any(_TNAME.match(e) for e in os.listdir(root))
+    except OSError:
+        return False
+
+
 def discover_positions(root: str, pattern: str = "*") -> list:
     """Position folders directly under an experiment root."""
     import fnmatch
@@ -491,13 +536,25 @@ def write_companion(root: str, pattern: str = "*",
     {pixel_size_um, z_step_um, interval_s, stage_xyz_um: {position:
     (x, y, z)}}. Everything in it is optional.
 
+    `root` may be EITHER an experiment root holding position folders,
+    OR a single position folder holding the frames itself — pointing at
+    one position is the obvious thing to do and used to fail with an
+    unhelpful message. Which one it is gets decided by looking, not by
+    a flag: a folder either has t<number>_<channel>.tif files directly
+    in it or it does not.
+
     Returns a report dict; writes nothing when `dry_run`.
     """
     meta = dict(metadata or {})
     stage = meta.get("stage_xyz_um") or {}
 
     report = {"root": root, "written": [], "positions": {},
-              "warnings": [], "skipped": []}
+              "warnings": [], "skipped": [], "single_position": False}
+
+    if looks_like_position(root):
+        return _write_single_position(
+            root, meta, stage, report, dry_run, header_cache, verify
+        )
 
     groups_all = []
     for position in discover_positions(root, pattern):
@@ -542,8 +599,11 @@ def write_companion(root: str, pattern: str = "*",
 
     if not groups_all:
         raise CompanionError(
-            f"no indexable TIFFs under {root} — expected "
-            f"<root>/<position>/t0000_<channel>.tif"
+            f"nothing indexable under {root}.\n"
+            f"  {_diagnose(root)}\n"
+            f"  Point this at either an experiment root (holding "
+            f"position folders) or a single position folder (holding "
+            f"t0000_BF.tif and friends)."
         )
 
     if root_level:
@@ -554,6 +614,67 @@ def write_companion(root: str, pattern: str = "*",
             _atomic_write(target, xml)
         report["written"].append(target)
 
+    return report
+
+
+def _write_single_position(root, meta, stage, report, dry_run,
+                           header_cache, verify) -> dict:
+    """`root` is itself a position folder: one companion, bare names.
+
+    There is no experiment level to write, because the position IS the
+    root — a second companion here would be the same file under the
+    same name.
+    """
+    position = os.path.basename(os.path.normpath(root)) or "position"
+    report["single_position"] = True
+
+    recs = scan_position(root, header_cache=header_cache, verify=verify)
+    if not recs:                                  # looks_like_position
+        raise CompanionError(                     # matched but nothing
+            f"nothing indexable in {root}.\n  {_diagnose(root)}"
+        )
+
+    # A folder with frames AND position subfolders is ambiguous; say so
+    # rather than silently ignoring half the data.
+    nested = [d for d in os.listdir(root)
+              if os.path.isdir(os.path.join(root, d))
+              and not d.startswith(".")
+              and d not in ("embryo_tracking", "max_proj")
+              and looks_like_position(os.path.join(root, d))]
+    if nested:
+        report["warnings"].append(
+            f"{root} holds frames of its own AND subfolder(s) with "
+            f"frames ({', '.join(nested[:5])}); indexing only the "
+            f"frames here. Point at the parent to index those instead."
+        )
+
+    groups = group_position(position, recs)
+    for g in groups:
+        g.pixel_size_um = meta.get("pixel_size_um")
+        g.z_step_um = meta.get("z_step_um")
+        g.interval_s = meta.get("interval_s")
+        g.stage_xyz_um = stage.get(position)
+        report["warnings"].extend(g.warnings)
+        for rec in g.recs:
+            if rec.note:
+                report["warnings"].append(f"{rec.name}: {rec.note}")
+
+    timepoints, channels = _axes_of(groups[0])
+    report["positions"][position] = {
+        "files": len(recs),
+        "timepoints": len(timepoints),
+        "channels": channels,
+        "planes": groups[0].recs[0].n_planes,
+        "shape": (groups[0].recs[0].height, groups[0].recs[0].width),
+        "dtype": groups[0].recs[0].dtype,
+        "images": len(groups),
+    }
+
+    xml = build_ome(groups, path_prefix=lambda g: "")
+    target = os.path.join(root, COMPANION_NAME)
+    if not dry_run:
+        _atomic_write(target, xml)
+    report["written"].append(target)
     return report
 
 

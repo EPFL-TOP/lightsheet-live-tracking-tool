@@ -240,9 +240,15 @@ Refreshing is a directory scan with a header cache: 90 ms cold, under
 
 ### After the fact
 
+Point it at **either** level — it works out which you meant by looking
+for `t<number>_<channel>.tif` files directly inside:
+
 ```bat
-:: index an experiment that has already been acquired
-python tools\make_ome_companion.py D:\data\20260918_run
+:: a whole experiment: the folder holding the position folders
+python tools\make_ome_companion.py D:\zeiss_data\260917-late\movie-2
+
+:: or a single position: the companion lands beside its frames
+python tools\make_ome_companion.py D:\zeiss_data\260917-late\movie-2\scene_012
 
 :: look first
 python tools\make_ome_companion.py D:\data\run --dry-run
@@ -250,6 +256,17 @@ python tools\make_ome_companion.py D:\data\run --dry-run
 :: supply calibration the files cannot report
 python tools\make_ome_companion.py D:\data\run --pixel-size 0.65 --z-step 1.5 --interval 60
 ```
+
+If it finds nothing it names the files it DID see, so a wrong level or
+an unexpected naming scheme is obvious:
+
+```
+FAILED: nothing indexable under D:\data\run.
+  2 TIFF(s) here, but none are named t<number>_<channel>.tif — found: frame_001.tif, frame_002.tif
+  Point this at either an experiment root (holding position folders) or
+  a single position folder (holding t0000_BF.tif and friends).
+```
+
 
 It refuses to overwrite an existing companion without `--force`, so a
 vendor-written one is never clobbered.

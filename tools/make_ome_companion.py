@@ -9,9 +9,10 @@ TIFFs are opened read-only for their headers and nothing else. That is
 the whole point: one Viventis timepoint is 1.06 GB, so consolidating a
 series would mean rewriting hundreds of gigabytes to gain nothing.
 
-It expects the layout every backend in this project writes:
+Point it at EITHER level — it works out which you meant by looking:
 
-    <experiment root>/<position>/t{NNNN}_{channel}.tif
+    <experiment root>/<position>/t{NNNN}_{channel}.tif    <- whole run
+    <position>/t{NNNN}_{channel}.tif                      <- one position
 
 and copes with the variations actually found in the wild: a 3-digit
 timepoint with no channel suffix (the Cell Tracking Challenge sets), a
@@ -30,8 +31,11 @@ differently:
     lets a single position folder be handed to a collaborator intact.
 
 Usage:
-    # Index an experiment, writing both companion levels
+    # A whole experiment, writing both companion levels
     python tools/make_ome_companion.py /data/20260918_run
+
+    # Just one position — the companion lands inside that folder
+    python tools/make_ome_companion.py /data/20260918_run/scene_012
 
     # See what it would do first
     python tools/make_ome_companion.py /data/20260918_run --dry-run
@@ -82,8 +86,11 @@ def parse_args() -> argparse.Namespace:
         description="Index existing TIFFs with an OME companion file. "
                     "Rewrites nothing.",
     )
-    p.add_argument("root", help="Experiment root: the folder holding "
-                                "the position folders.")
+    p.add_argument("root",
+                   help="Either an experiment root (the folder holding "
+                        "the position folders) or a single position "
+                        "folder (the one holding t0000_BF.tif). Which "
+                        "it is gets worked out by looking.")
     p.add_argument("--positions", default="*",
                    help="Glob selecting position folders "
                         "(default: all).")
@@ -117,6 +124,9 @@ def main() -> int:
         from tracking_tools.ome_companion import (
             COMPANION_NAME, CompanionError, write_companion,
         )
+        from tracking_tools.ome_companion.companion import (
+            looks_like_position,
+        )
     except ImportError as e:
         _log(f"Cannot import the companion builder: {e}")
         return 2
@@ -127,18 +137,23 @@ def main() -> int:
         return 1
 
     _hdr("SCAN")
-    _log(f"root: {root}")
+    single = looks_like_position(root)
+    _log(f"{'position folder' if single else 'experiment root'}: {root}")
+    if single:
+        _log("  (frames are directly in here, so one companion is "
+             "written beside them)")
 
     # Refuse to clobber silently. A folder from the lightsheet may
     # already hold a vendor-written companion.
     if not args.force and not args.dry_run:
-        existing = [
-            p for p in [os.path.join(root, COMPANION_NAME)] + [
+        candidates = [os.path.join(root, COMPANION_NAME)]
+        if not looks_like_position(root):
+            candidates += [
                 os.path.join(root, d, COMPANION_NAME)
                 for d in os.listdir(root)
                 if os.path.isdir(os.path.join(root, d))
-            ] if os.path.exists(p)
-        ]
+            ]
+        existing = [p for p in candidates if os.path.exists(p)]
         if existing:
             _log("A companion already exists:")
             for p in existing:

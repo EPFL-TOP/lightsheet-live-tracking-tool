@@ -4,6 +4,7 @@ from .companion import (  # noqa: F401
     CompanionError,
     FileRec,
     build_ome,
+    looks_like_position,
     scan_position,
     write_companion,
 )

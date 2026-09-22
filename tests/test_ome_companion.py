@@ -526,3 +526,118 @@ def test_REGRESSION_the_save_fallback_writes_no_shaped_tag():
     assert "metadata=None" in fallback, (
         "the fallback imwrite does not suppress tifffile's shaped tag"
     )
+
+
+# ------------------------------------------- pointing at one position
+
+def test_a_position_folder_can_be_indexed_directly(experiment):
+    """Pointing at the folder that holds the frames is the obvious
+    thing to do, and used to fail with 'no indexable TIFFs'."""
+    pos = experiment / "scene_000"
+    report = write_companion(str(pos))
+    assert report["single_position"] is True
+    assert report["written"] == [str(pos / COMPANION_NAME)]
+    assert list(report["positions"]) == ["scene_000"], (
+        "the position should be named after its folder"
+    )
+    _assert_valid(pos / COMPANION_NAME)
+
+
+def test_a_directly_indexed_position_reads_back_correctly(experiment):
+    pos = experiment / "scene_000"
+    write_companion(str(pos))
+    xml = (pos / COMPANION_NAME).read_text()
+    with tifffile.TiffFile(str(pos / "t0000_BF.tif"), omexml=xml,
+                           is_ome=True) as tf:
+        arr = tf.series[0].asarray()
+    assert arr.shape == (3, 2, 5, 32, 32)
+    for t in range(3):
+        for ci in range(2):
+            assert int(arr[t, ci].ravel()[0]) == _value(0, t, ci)
+
+
+def test_a_direct_position_writes_only_one_companion(experiment):
+    """There is no experiment level to write: a second companion would
+    be the same file under the same name."""
+    pos = experiment / "scene_001"
+    report = write_companion(str(pos))
+    assert len(report["written"]) == 1
+
+
+def test_a_trailing_separator_does_not_break_the_position_name(
+        experiment):
+    report = write_companion(str(experiment / "scene_000") + os.sep)
+    assert list(report["positions"]) == ["scene_000"]
+
+
+def test_the_experiment_root_still_takes_precedence(experiment):
+    """A root holding position folders but no frames of its own must
+    still be treated as a root."""
+    report = write_companion(str(experiment))
+    assert report["single_position"] is False
+    assert len(report["positions"]) == 3
+
+
+def test_frames_beside_position_folders_are_flagged(tmp_path):
+    """Ambiguous: index what is here, but say the subfolders exist
+    rather than silently ignoring half the data."""
+    root = tmp_path / "exp"
+    (root / "scene_000").mkdir(parents=True)
+    _write_stack(root / "t0000_BF.tif", 1, planes=1)
+    _write_stack(root / "scene_000" / "t0000_BF.tif", 2, planes=1)
+    report = write_companion(str(root))
+    assert report["single_position"] is True
+    assert any("subfolder" in w for w in report["warnings"]), (
+        f"nested frames not mentioned: {report['warnings']}"
+    )
+
+
+# -------------------------------------------------- the error message
+
+def test_the_error_names_the_files_it_did_find(tmp_path):
+    """'expected <root>/<position>/t0000_<channel>.tif' does not say
+    whether the folder is empty, one level off, or holds images under
+    names we do not recognise."""
+    d = tmp_path / "exp"
+    d.mkdir()
+    for n in ("img_001.tif", "img_002.tif", "notes.txt"):
+        (d / n).write_bytes(b"")
+    with pytest.raises(CompanionError) as e:
+        write_companion(str(d))
+    msg = str(e.value)
+    assert "img_001.tif" in msg, f"does not name what it found: {msg}"
+    assert "2 TIFF" in msg
+
+
+def test_the_error_says_when_the_folder_is_empty(tmp_path):
+    d = tmp_path / "exp"
+    d.mkdir()
+    with pytest.raises(CompanionError, match="empty"):
+        write_companion(str(d))
+
+
+def test_the_error_lists_subfolders_when_they_hold_nothing(tmp_path):
+    d = tmp_path / "exp"
+    (d / "scene_000").mkdir(parents=True)
+    (d / "scene_001").mkdir()
+    with pytest.raises(CompanionError) as e:
+        write_companion(str(d))
+    assert "scene_000" in str(e.value)
+
+
+def test_the_error_explains_both_accepted_layouts(tmp_path):
+    d = tmp_path / "exp"
+    d.mkdir()
+    with pytest.raises(CompanionError) as e:
+        write_companion(str(d))
+    msg = str(e.value)
+    assert "experiment root" in msg and "position folder" in msg
+
+
+def test_looks_like_position_is_decided_by_looking(experiment):
+    from tracking_tools.ome_companion import looks_like_position
+
+    assert looks_like_position(str(experiment / "scene_000"))
+    assert not looks_like_position(str(experiment))
+    assert not looks_like_position(str(experiment / "scene_003"))
+    assert not looks_like_position(str(experiment / "nope"))
