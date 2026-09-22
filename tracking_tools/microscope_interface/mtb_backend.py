@@ -177,6 +177,18 @@ class MicroscopeInterface_MTB:
         # Written into the TIFF so downstream analysis inherits the
         # calibration instead of re-deriving it from the objective.
         self.pixel_size_um = p.get("pixel_size_um")
+        # An OME companion: one small XML beside the frames saying how
+        # they compose into a (T, C, Z, Y, X) series. It indexes the
+        # TIFFs, never rewrites them, so it costs nothing but a
+        # directory scan and makes the run openable in Fiji/OMERO as a
+        # single dataset instead of thousands of loose files.
+        self.write_ome_companion = bool(
+            p.get("write_ome_companion", True)
+        )
+        # Keyed on (path, size, mtime): refreshing once per timepoint
+        # would otherwise re-open every file written so far, which is
+        # quadratic over a long run.
+        self._companion_cache: dict = {}
         self.stop_after_tp = p.get("stop_after_tp")
         self.buffer_mb = int(p.get("buffer_mb", 512))
         self.synthetic_source = p.get("synthetic_source")
@@ -615,6 +627,10 @@ class MicroscopeInterface_MTB:
                         )
 
                 tp += 1
+                # After the timepoint, not after each frame: a run
+                # killed at any point still leaves a companion
+                # describing every COMPLETE timepoint.
+                self.refresh_companion()
 
                 elapsed = time.monotonic() - started
                 remaining = self.interval_s - elapsed
@@ -629,6 +645,8 @@ class MicroscopeInterface_MTB:
                     )
         finally:
             self._finished = True
+            # Last word, so a stopped run indexes its final timepoint.
+            self.refresh_companion()
             self._image_queue.put(None)
             logger.info("acquisition loop exited after %d timepoints",
                         tp)
@@ -969,8 +987,55 @@ class MicroscopeInterface_MTB:
             logger.exception(
                 "writing %s with metadata failed — falling back", path
             )
-            tifffile.imwrite(path, img, photometric="minisblack")
+            # metadata=None matters: left to its default, tifffile
+            # stamps a 'shaped' JSON description of its own, and that
+            # tag takes precedence over the OME companion for every
+            # Python reader — so a single fallback frame would silently
+            # detach that timepoint from the series.
+            tifffile.imwrite(path, img, photometric="minisblack",
+                             metadata=None)
         return path
+
+    def refresh_companion(self) -> list:
+        """Rewrite the OME companion to cover everything saved so far.
+
+        Cheap and idempotent: it scans the experiment tree, reuses
+        cached TIFF headers, and writes a few kilobytes of XML
+        atomically. Never raises — losing the index must not lose the
+        run, and `tools/make_ome_companion.py` can rebuild it after the
+        fact from exactly the same code.
+        """
+        if not self.write_ome_companion:
+            return []
+        try:
+            from ..ome_companion import write_companion
+        except ImportError as e:
+            logger.info("OME companion unavailable: %s", e)
+            self.write_ome_companion = False
+            return []
+
+        step = None
+        if isinstance(self.z_stack, dict):
+            step = float(self.z_stack.get("step_um", 0)) or None
+        with self._config_lock:
+            stage = {n: xyz for n, xyz in self._baseline_um.items()}
+        try:
+            report = write_companion(
+                self.dirpath,
+                metadata={
+                    "pixel_size_um": self.pixel_size_um,
+                    "z_step_um": step,
+                    "interval_s": self.interval_s,
+                    "stage_xyz_um": stage,
+                },
+                header_cache=self._companion_cache,
+            )
+            return report["written"]
+        except Exception as e:
+            # Includes the legitimate "nothing acquired yet" case on
+            # the very first timepoint.
+            logger.debug("OME companion not written yet: %s", e)
+            return []
 
     def _tiff_kwargs(self, img: np.ndarray) -> dict:
         """ImageJ metadata describing what the array actually is."""

@@ -216,6 +216,108 @@ axes came out as `Q` (unknown) with no z-step.
 
 ---
 
+## OME companion — opening a run as one movie
+
+A run writes thousands of loose files. An **OME companion** is a small
+XML index, `ome-tiff.companion.ome`, written beside them, that tells
+Fiji, Bio-Formats, OMERO and tifffile how they compose into a single
+5-D (T, C, Z, Y, X) series.
+
+**No pixel is ever rewritten.** The companion only points at the TIFFs
+that already exist, which matters twice: a single lightsheet timepoint
+is 1.06 GB, so consolidating a series would mean rewriting hundreds of
+gigabytes; and the `t{NNNN}_{channel}.tif` filenames are load-bearing —
+the ROI dashboard parses the channel out of them — so they must not
+change.
+
+### Live
+
+On by default (*Acquisition* → **Write OME companion**). It is
+refreshed after every **timepoint**, not every frame, so a run killed
+at any moment still leaves an index covering every complete timepoint.
+Refreshing is a directory scan with a header cache: 90 ms cold, under
+1 ms warm.
+
+### After the fact
+
+```bat
+:: index an experiment that has already been acquired
+python tools\make_ome_companion.py D:\data\20260918_run
+
+:: look first
+python tools\make_ome_companion.py D:\data\run --dry-run
+
+:: supply calibration the files cannot report
+python tools\make_ome_companion.py D:\data\run --pixel-size 0.65 --z-step 1.5 --interval 60
+```
+
+It refuses to overwrite an existing companion without `--force`, so a
+vendor-written one is never clobbered.
+
+### Two files, because two readers differ
+
+| File | Referenced as | For |
+|---|---|---|
+| `<root>/ome-tiff.companion.ome` | `<position>/t0000_BF.tif` | Fiji / OMERO — the whole experiment as one multi-series dataset |
+| `<root>/<position>/ome-tiff.companion.ome` | `t0000_BF.tif` | tifffile, which resolves paths against the member file's own folder; also what lets one position folder be handed over intact |
+
+```python
+import tifffile
+with tifffile.TiffFile('pos/t0000_BF.tif',
+                       omexml=open('pos/ome-tiff.companion.ome').read(),
+                       is_ome=True) as tf:
+    movie = tf.series[0].asarray()        # (T, C, Z, Y, X)
+```
+
+### Why that exact filename
+
+Both halves are load-bearing, verified against Bio-Formats 8.0.1:
+
+- The **`.companion.ome` suffix** is what routes the file to
+  `OMETiffReader`, the only reader that follows
+  `<TiffData><UUID FileName=...>`. Named `.ome`, `.ome.xml` or `.xml`
+  it goes to `OMEXMLReader`, which reports the dimensions and then
+  cannot read a single pixel.
+- The **`ome-tiff` prefix** is what the stand's own ZEN-written TIFFs
+  already point at — every one carries
+  `<BinaryOnly MetadataFile="ome-tiff.companion.ome"/>` and nothing
+  else. `data/t0001_Channel 1.tif` is unreadable as a z-stack today
+  (tifffile reports its axes as `IYX`) purely because that companion
+  was never written. Dropping ours in under that name repairs those
+  files in place.
+
+### What it records, and what it deliberately does not
+
+Per position: `SizeT/C/Z/Y/X`, pixel type, channel names, the XY pixel
+size, the z-step, the timepoint interval, and the stage XYZ in
+`<StageLabel>`.
+
+It emits **no `<Plane>` elements**. The only per-plane quantity this
+project has is the stage position, which is per *position* and already
+in `StageLabel`; a regular interval is `TimeIncrement`. A full
+(z, c, t) grid for a 20-position, 500-timepoint, 3-channel, 100-plane
+run would be three million elements describing nothing we know.
+
+Calibration is omitted rather than invented — a single-plane image gets
+no z-spacing and a single-timepoint one no interval, because a wrong
+calibration silently mis-scales every downstream measurement.
+
+### Damaged and irregular data
+
+- A position with **no images** is skipped. A companion with zero
+  Images is XSD-valid *and* crashes Bio-Formats, and eight real
+  position folders under `data/` hold no TIFFs.
+- A file **killed mid-write** is reported. Checking its size does not
+  work — truncating a 5-plane stack to 99 % leaves it *larger* than its
+  own declared pixels — so the last plane is decoded instead.
+- Files whose **shape changes** partway through a run go into separate
+  Images; one `<Pixels>` declares one `SizeZ`, so mixing them would
+  zero-fill or truncate planes.
+- **LZW-compressed** and **3-digit, channel-less** files
+  (`t000.tif`) index fine, as do channel names containing spaces.
+
+---
+
 ## Acquiring in 3-D, correcting in XY only
 
 **The full stack always goes to the tracker.** This is a flag, not a

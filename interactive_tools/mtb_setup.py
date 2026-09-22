@@ -609,6 +609,15 @@ class MTBSetupPanel:
             name="Settle per plane (s)", value=0.02, start=0.0,
             end=2.0, step=0.01, width=170,
         )
+        # An OME companion: one small XML beside the frames saying how
+        # they compose into a (T, C, Z, Y, X) series, so the run opens
+        # in Fiji as ONE dataset instead of thousands of loose files.
+        # It indexes the TIFFs and never rewrites them, so leaving it
+        # on costs a directory scan per timepoint and nothing else.
+        self.ome_companion = pn.widgets.Checkbox(
+            name="Write OME companion (opens in Fiji as one movie)",
+            value=True,
+        )
         self.gate_per_plane = pn.widgets.Checkbox(
             name="Switch light per z-plane (lower dose)", value=True,
         )
@@ -1509,6 +1518,7 @@ class MTBSetupPanel:
         "zstack_on", "zstack_planes", "zstack_range", "zstack_step",
         "df2_on", "df2_owns_z", "df2_mode",
         "auto_track", "require_all_rois", "roi_poll_s",
+        "ome_companion",
     )
 
     def _config_folder(self) -> str:
@@ -2807,6 +2817,7 @@ class MTBSetupPanel:
             # Recorded in every TIFF, so analysis downstream inherits
             # the calibration rather than re-deriving it.
             "pixel_size_um": float(self.pixel_xy.value or 0) or None,
+            "write_ome_companion": bool(self.ome_companion.value),
             "use_definite_focus": bool(self.df2_on.value),
             "df2_owns_z": bool(self.df2_owns_z.value),
         }
@@ -3473,6 +3484,7 @@ class MTBSetupPanel:
                 width=600, styles={"font-size": "0.8em"},
             ),
             pn.Row(self.plane_settle, self.gate_per_plane),
+            pn.Row(self.ome_companion),
             pn.pane.Markdown(
                 "Applies to channels with `z_stack` ticked. Keep the "
                 "step above the actuator's resolution (~0.06 µm for the "
