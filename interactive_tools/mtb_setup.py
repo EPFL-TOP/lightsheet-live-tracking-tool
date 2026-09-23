@@ -198,8 +198,10 @@ class MTBSetupPanel:
 
         self._build_widgets()
         self._wire()
+        self._install_darken_hooks()
         self._update_df2_info()
         self._update_track_info()
+        self._update_dose_info()
         self._df2_hold_guard = False
         self._sync_df2_hold_label(False)
         try:
@@ -708,6 +710,9 @@ class MTBSetupPanel:
             name="Wait for ROIs on EVERY position before tracking",
             value=False,
         )
+        self.dose_info = pn.pane.Markdown(
+            "", width=600, styles={"font-size": "0.85em"},
+        )
         self.track_info = pn.pane.Markdown(
             "", width=600, styles={"font-size": "0.8em"},
         )
@@ -780,6 +785,9 @@ class MTBSetupPanel:
         for w in (self.zstack_on, self.zstack_planes,
                   self.tracking_2d):
             w.param.watch(self._update_track_info, "value")
+        for w in (self.zstack_on, self.zstack_planes, self.zstack_step,
+                  self.n_timepoints, self.exposure, self.chan_table):
+            w.param.watch(self._update_dose_info, "value")
         for w in (self.view_position, self.view_channels,
                   self.view_plane, self.view_maxproj):
             w.param.watch(lambda ev: self._render_view(), "value")
@@ -1170,6 +1178,8 @@ class MTBSetupPanel:
         if self.btn_live.value:
             self.btn_live.value = False
         self._sync_live_label()
+        # Live is where an operator sits for minutes with the light on.
+        self._darken(" after live")
 
     def _live_tick(self) -> None:
         """One live frame. Stops itself on repeated failure."""
@@ -1180,10 +1190,41 @@ class MTBSetupPanel:
             self._stop_live()
             self._say(f"Live stopped after an error: {e}", "err")
 
+    def selected_channel(self) -> dict:
+        """The channel Snap and Live illuminate with.
+
+        The selected row of the channel table, or brightfield if none
+        is selected. _illuminate reads only led_nm, led_percent and tl,
+        so those three are all this needs to carry.
+        """
+        rows = list(self.chan_table.selection or [])
+        df = self.chan_table.value
+        if len(rows) == 1 and rows[0] < len(df):
+            r = df.iloc[rows[0]]
+            return {
+                "name": str(r["name"]),
+                "led_nm": int(r.get("led_nm", 0) or 0),
+                "led_percent": float(r.get("led_percent", 0.0) or 0.0),
+                "tl": bool(r.get("tl", False)),
+            }
+        return {"name": "BF", "led_nm": 0, "led_percent": 0.0,
+                "tl": True}
+
     def _on_snap(self, _event=None) -> None:
         if self.mmc is None:
             self._say("Camera not available.", "warn")
             return
+        # GATED, exactly like an acquisition frame. This is also every
+        # LIVE tick, and live is where the sample used to be cooked:
+        # the light was whatever the operator had switched on by hand,
+        # burning continuously between frames rather than only while
+        # the sensor integrates. At 2 fps with a 20 ms exposure that is
+        # a ~25x dose reduction for the same picture.
+        channel = self.selected_channel()
+        try:
+            self._illuminate(channel, True)
+        except Exception as e:
+            logger.warning("could not switch the light on: %s", e)
         try:
             self.mmc.setExposure(float(self.exposure.value))
             self.mmc.snapImage()
@@ -1191,6 +1232,13 @@ class MTBSetupPanel:
         except Exception as e:
             self._say(f"Snap failed: {e}", "err")
             return
+        finally:
+            # finally, not after: a failed snap must not leave the
+            # sample lit.
+            try:
+                self._illuminate(channel, False)
+            except Exception as e:
+                logger.warning("could not switch the light off: %s", e)
 
         mn, mx = float(img.min()), float(img.max())
         mean, std = float(img.mean()), float(img.std())
@@ -1715,6 +1763,70 @@ class MTBSetupPanel:
             return [0.0]
         span = (n - 1) * step
         return [-span / 2.0 + i * step for i in range(n)]
+
+    def planned_dose_s(self) -> dict:
+        """Seconds of illumination ONE embryo receives over the run.
+
+        Per channel, because 475 nm and brightfield are not
+        interchangeable in what they do to a live embryo. Not
+        multiplied by the position count: the stage is at one position
+        at a time, so each embryo is lit for its own exposures only —
+        unless illumination spills past the field of view, which is a
+        property of the field diaphragm and not something the software
+        can know.
+        """
+        planes = len(self.stack_offsets()) if self.zstack_on.value else 1
+        n_tp = int(self.n_timepoints.value or 0)
+        out = {}
+        for ch in self.channels():
+            per_tp = (planes if ch["z_stack"] else 1) * \
+                ch["exposure_ms"] / 1000.0
+            out[ch["name"]] = {
+                "per_timepoint_s": per_tp,
+                "total_s": per_tp * n_tp if n_tp else None,
+                "led_nm": ch["led_nm"],
+                "led_percent": ch["led_percent"],
+            }
+        return out
+
+    def _update_dose_info(self, _event=None) -> None:
+        """Show the light budget before the run, not after the autopsy."""
+        try:
+            dose = self.planned_dose_s()
+        except Exception:
+            self.dose_info.object = ""
+            return
+        if not dose:
+            self.dose_info.object = ""
+            return
+
+        rows, worst = [], 0.0
+        for name, d in dose.items():
+            src = (f"{d['led_nm']} nm @ {d['led_percent']:g}%"
+                   if d["led_nm"] else "transmitted")
+            total = d["total_s"]
+            worst = max(worst, total or 0.0)
+            rows.append(
+                f"- **{name}** ({src}): "
+                f"{d['per_timepoint_s']:.3g} s per timepoint"
+                + (f", **{total:.4g} s total**" if total
+                   else ", total unbounded (0 timepoints = run forever)")
+            )
+        note = ("**Light one embryo receives**\n\n" + "\n".join(rows))
+        if worst >= 60:
+            note += (
+                f"\n\n⚠️ That is **{worst / 60:.0f} minutes of "
+                f"continuous illumination** on one embryo. Fewer "
+                f"planes, a lower LED %, a shorter exposure and a "
+                f"longer interval all divide it directly."
+            )
+        note += (
+            "\n\n_Assumes the illuminated field is the field of view. "
+            "If the transmitted-light field diaphragm is open wider "
+            "than the frame, every embryo within the lit area also "
+            "receives this dose once per OTHER position imaged._"
+        )
+        self.dose_info.object = note
 
     def _update_track_info(self, _event=None) -> None:
         """Say what the tracker actually does with the frames.
@@ -2357,6 +2469,89 @@ class MTBSetupPanel:
         )
         self._say(f"Read {len(leds)} LED(s).", "ok")
 
+    def _install_darken_hooks(self) -> None:
+        """Switch the light off when the process or the tab goes away.
+
+        Closing the browser tab used to leave an LED burning until
+        someone walked to the microscope. Both hooks are best-effort:
+        neither is guaranteed to run on a hard kill, which is why the
+        acquisition loop keeps the sample dark by default rather than
+        relying on cleanup.
+        """
+        import atexit
+
+        atexit.register(self._darken, " at exit")
+        try:
+            pn.state.on_session_destroyed(
+                lambda ctx: self._darken(" on session end")
+            )
+        except Exception as e:
+            # No server context (tests, plain import) — atexit alone.
+            logger.debug("no session-destroy hook: %s", e)
+
+    def lights_currently_on(self) -> list:
+        """Anything illuminating the sample right now. Never raises."""
+        on = []
+        if not self.connected:
+            return on
+        try:
+            for led in self.session.colibri().leds():
+                if led.is_on:
+                    on.append(f"LED {led.wavelength} nm")
+        except Exception as e:
+            logger.info("could not read the LEDs: %s", e)
+        try:
+            if self.session.changer("tl_shutter").is_open:
+                on.append("transmitted light")
+        except Exception as e:
+            logger.info("could not read the TL shutter: %s", e)
+        return on
+
+    def _darken(self, why: str = "") -> list:
+        """Switch EVERYTHING off. Never raises. Returns what refused.
+
+        An overnight run is dark between exposures, but every way an
+        operator turns light on BY HAND is sticky: Live and Snap do not
+        gate, the panel's own help tells you to switch an LED on to
+        tune it, and defining a fluorescence channel REQUIRES the LED
+        to be physically on. Nothing then turns it off — not stopping
+        live, not starting a run, not stopping one, not disconnecting,
+        not closing the tab. Twenty minutes of finding embryos is 1200
+        seconds of continuous excitation delivered in one burst, which
+        dwarfs the gated dose of the entire night that follows.
+
+        So this is called unconditionally from every exit path. It has
+        no failure mode worth guarding against: turning light off can
+        only ever be safe.
+        """
+        failed = []
+        if not self.connected:
+            return failed
+        try:
+            self.session.colibri().all_off()
+        except Exception as e:
+            failed.append(f"LEDs ({e})")
+            logger.warning("could not switch the LEDs off%s: %s",
+                           why, e)
+        try:
+            self.session.changer("tl_shutter").set_open(False)
+        except Exception as e:
+            failed.append(f"transmitted light ({e})")
+            logger.warning("could not close the TL shutter%s: %s",
+                           why, e)
+        if failed:
+            # A failure to switch light OFF is the one failure that
+            # damages the sample, so it must be visible rather than a
+            # log line nobody reads.
+            self._push_banner(
+                f"⚠️ LIGHT MAY STILL BE ON — could not switch off: "
+                f"{', '.join(failed)}. Check the microscope.",
+                running=True,
+            )
+        else:
+            self._sync_tl_label(False)
+        return failed
+
     def _all_leds_off(self) -> None:
         if not self._require_connection():
             return
@@ -2744,6 +2939,13 @@ class MTBSetupPanel:
         if not self.pos_table.value.shape[0]:
             return ("No positions defined. Jog to each embryo and use "
                     "*Capture current position*.")
+        lit = self.lights_currently_on()
+        if lit:
+            return (f"{', '.join(lit)} still on. Setting up positions "
+                    f"leaves the light on and nothing switches it off "
+                    f"— switch it off before starting, or the sample "
+                    f"is illuminated continuously until the first "
+                    f"exposure asserts the gate.")
         if self.zstack_on.value and not any(
                 c["z_stack"] for c in self.channels()):
             return ("Z-stack is on, but no channel has z_stack ticked "
@@ -2850,6 +3052,10 @@ class MTBSetupPanel:
                                name, e)
 
         # The camera is exclusive — live snapping must not interleave.
+        # _stop_live also darkens, which matters more: setting up
+        # positions leaves an LED on, and without this it would burn
+        # through the whole first timepoint before _apply_channel
+        # reasserted the gate.
         self._stop_live()
         self._stop_flag.clear()
         self._run_thread = threading.Thread(
@@ -3121,6 +3327,9 @@ class MTBSetupPanel:
                 iface.disconnect()
             except Exception:
                 pass
+            # However the run ended — finished, stopped, or crashed —
+            # the sample must not be left under light.
+            self._darken(" after the run")
             self._push_done()
 
     def _push_log(self, msg: str) -> None:
@@ -3492,6 +3701,9 @@ class MTBSetupPanel:
                 "duplicate planes.",
                 width=600, styles={"font-size": "0.8em"},
             ),
+            pn.layout.Divider(),
+            "### Light budget",
+            self.dose_info,
             pn.layout.Divider(),
             "### Definite Focus 2",
             pn.Row(self.df2_on, self.df2_mode),

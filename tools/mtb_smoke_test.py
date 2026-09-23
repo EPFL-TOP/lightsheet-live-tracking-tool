@@ -50,6 +50,11 @@ DEFAULT_DLL = (
     r"C:\Program Files\Carl Zeiss\MTB 2011 - 2.12.0.7\MTBApi\MTBApi.dll"
 )
 
+DEFAULT_CONFIG_XML = (
+    r"C:\ProgramData\Carl Zeiss\MTB2011\2.12.0.7"
+    r"\Active Configuration.xml"
+)
+
 # MTBIds confirmed present on this machine (probe_mtb.py --connect,
 # 2026-09-03). Role -> (MTBId, description).
 COMPONENTS = {
@@ -117,6 +122,19 @@ def parse_args() -> argparse.Namespace:
                    help="Report shutters, reflector, sideport and lamps "
                         "— i.e. why no light may be reaching the "
                         "camera.")
+    p.add_argument("--enumerate", dest="enumerate_all",
+                   action="store_true",
+                   help="Walk the whole device tree and list EVERY "
+                        "component, not just the ids we thought to "
+                        "guess. Use this to settle whether a "
+                        "motorized field diaphragm exists.")
+    p.add_argument("--config-xml", default=DEFAULT_CONFIG_XML,
+                   help="MTB Active Configuration.xml, dumped with "
+                        f"--enumerate (default: {DEFAULT_CONFIG_XML}).")
+    p.add_argument("--xml-only", action="store_true",
+                   help="Dump Active Configuration.xml and exit. "
+                        "Needs no connection and no hardware, so it is "
+                        "safe to run mid-experiment.")
     return p.parse_args()
 
 
@@ -707,6 +725,10 @@ def _dump_lightpath(root) -> None:
             _log(f"  {mtb_id:32s} ERROR {type(e).__name__}")
             continue
         if comp is None:
+            # Say so. Silence here is indistinguishable from "we never
+            # looked", and that ambiguity is exactly what left the
+            # question of a field diaphragm unanswered.
+            _log(f"  {mtb_id:32s} absent")
             continue
         found += 1
 
@@ -800,6 +822,346 @@ def _dump_lightpath(root) -> None:
     _log("    - a CONDENSER on a phase ring (PH1/PH2/PH3) instead of")
     _log("      brightfield throws away most of the light")
 
+
+# Every MTBId we have ever *guessed* at for restricting or attenuating
+# light, beyond the ones in COMPONENTS. None of these has been
+# confirmed on this stand. They are probed by NAME, which can only
+# ever find an id somebody thought to type in — which is why
+# --enumerate exists below.
+_STOP_IDS = [
+    # Transmitted-light field diaphragm (Leuchtfeldblende). This is
+    # the one that decides how much of the WELL is lit.
+    "MTBTLFieldStop", "MTBTLFieldDiaphragm", "MTBTLLuminousFieldStop",
+    "MTBFieldStop", "MTBLuminousFieldStop",
+    # Transmitted-light aperture diaphragm (condenser NA, not area).
+    "MTBTLAperture", "MTBTLApertureDiaphragm", "MTBApertureChanger",
+    "MTBApertureStop", "MTBCondenserAperture",
+    # Reflected-light (epi / Colibri) side.
+    "MTBRLFieldStop", "MTBRLFieldDiaphragm", "MTBRLAperture",
+    "MTBRLShutter", "MTBFLLEDShutter", "MTBLampShutter",
+    # Attenuators — a neutral-density wheel halves dose without
+    # touching exposure or LED percentage.
+    "MTBAttenuator", "MTBRLAttenuator", "MTBFLAttenuator",
+    "MTBNDFilter", "MTBFilterWheel", "MTBFilterChanger",
+]
+
+# Substrings that mark a component as interesting for light DOSE.
+# Zeiss ships German names in places, hence 'blende'.
+_DOSE_KEYWORDS = (
+    "field", "blende", "diaphragm", "aperture", "stop",
+    "atten", "nd", "shutter", "lamp", "led", "light",
+    "condenser", "filter",
+)
+
+def _ident(comp) -> dict:
+    """Best-effort (ID, Name, Type, ...) for one component.
+
+    GetComponent() returns concrete ZEISS.MTB.MicControl classes whose
+    interface members are explicit implementations, so identity has to
+    be read through an interface cast just like positions are.
+    """
+    import ZEISS.MTB.Api as api
+
+    out: dict = {}
+    sources = []
+    for iface in ("IMTBIdent", "IMTBBase", "IMTBComponent"):
+        try:
+            cast = getattr(api, iface)(comp)
+        except Exception:
+            continue
+        if cast is not None:
+            sources.append(cast)
+    sources.append(comp)          # some builds surface them directly
+
+    for src in sources:
+        for attr in ("ID", "Id", "Name", "Type", "DeviceID",
+                     "Version", "SerialNumber", "MaterialNumber"):
+            if attr in out:
+                continue
+            try:
+                v = getattr(src, attr)
+            except Exception:
+                continue
+            if v is None or callable(v):
+                continue
+            out[attr] = v
+    return out
+
+
+def _count_of(obj, names) -> tuple:
+    """A count that may be a property on one MTB build, a method on
+    the next. Try both rather than betting on one."""
+    for n in names:
+        try:
+            v = getattr(obj, n)
+        except Exception:
+            continue
+        try:
+            return int(v() if callable(v) else v), n
+        except Exception:
+            continue
+    return None, None
+
+
+def _item_of(obj, names, i):
+    """Element i of an indexer that may be a method or a subscript."""
+    for n in names:
+        try:
+            f = getattr(obj, n)
+        except Exception:
+            continue
+        try:
+            return f(i) if callable(f) else f[i]
+        except Exception:
+            continue
+    return None
+
+
+def _members_of(obj) -> list:
+    """Public members, for when the walk API cannot be guessed."""
+    try:
+        return sorted(
+            a for a in dir(obj)
+            if not a.startswith(("_", "get_", "set_", "add_",
+                                 "remove_"))
+            and a not in ("Equals", "GetHashCode", "GetType",
+                          "ToString", "Overloads")
+        )
+    except Exception:
+        return []
+
+
+def _dump_all_components(root, asm) -> None:
+    """Enumerate EVERY component the stand exposes, by walking the
+    device tree rather than by guessing MTBIds.
+
+    Why this is not the same as --lightpath: that probes
+    root.GetComponent(id) for a hand-written list, so a component
+    whose id nobody guessed is indistinguishable from a component
+    that is not fitted. The specific question this was written for —
+    "is there a motorized transmitted-light FIELD DIAPHRAGM, so the
+    illuminated area can be cut to the field of view instead of
+    flooding the whole well?" — cannot be answered by a name probe,
+    because the answer we fear is 'it is there under a name we never
+    tried'.
+
+    The walk API is DISCOVERED, not assumed: MTB builds differ on
+    whether the count is a property or a method. If the walk fails
+    entirely, the reflected members of the root are printed so the
+    right call can be identified from the output.
+    """
+    import ZEISS.MTB.Api as api
+
+    n_dev, how = _count_of(root, ("DeviceCount", "GetDeviceCount",
+                                  "NumberOfDevices"))
+    if n_dev is None:
+        _log("  cannot enumerate: the root exposes no device count.")
+        _log(f"  root members: {_members_of(root)}")
+        for iface in ("IMTBRoot", "IMTBBase", "IMTBIdent"):
+            try:
+                cast = getattr(api, iface)(root)
+            except Exception:
+                continue
+            if cast is not None:
+                _log(f"  root as {iface}: {_members_of(cast)}")
+        _log("  -> pick the enumeration member from the lists above "
+             "and add it to _count_of/_item_of.")
+        return
+
+    _log(f"  {n_dev} device(s) via root.{how}")
+    flagged: list = []
+    total = 0
+
+    for d in range(n_dev):
+        dev = _item_of(root, ("GetDevice", "Device"), d)
+        if dev is None:
+            _log(f"  device {d}: could not be fetched")
+            continue
+        dev_id = _ident(dev)
+        _log()
+        _log(f"  device {d}: "
+             f"{dev_id.get('Name', '?')!r}  id={dev_id.get('ID', '?')!r}")
+
+        n_c, chow = _count_of(dev, ("ComponentCount",
+                                    "GetComponentCount",
+                                    "NumberOfComponents"))
+        if n_c is None:
+            _log(f"    no component count; members: {_members_of(dev)}")
+            continue
+
+        for c in range(n_c):
+            comp = _item_of(dev, ("GetComponent", "Component"), c)
+            if comp is None:
+                _log(f"    component {c}: could not be fetched")
+                continue
+            total += 1
+            ident = _ident(comp)
+            cid = str(ident.get("ID", "?"))
+            cname = str(ident.get("Name", "?"))
+            ctype = str(ident.get("Type", ""))
+            hay = f"{cid} {cname} {ctype}".lower()
+            mark = ""
+            if any(k in hay for k in _DOSE_KEYWORDS):
+                mark = "   <== light dose"
+                flagged.append((cid, cname))
+            _log(f"    {cid:40s} {cname!r}{mark}")
+
+            # What can it actually be DRIVEN as? A diaphragm is either
+            # a continual axis (an opening in mm or %) or a changer
+            # (discrete positions). Say which, so the next step is
+            # obvious rather than another probe run.
+            if not mark:
+                continue
+            for iface, fields in (
+                ("IMTBContinual", ()),
+                ("IMTBChanger", ("Position", "MinPosition",
+                                 "MaxPosition")),
+                ("IMTBShutterState", ("Open",)),
+                ("IMTBLamp", ("IsActive", "Intensity")),
+                ("IMTBLampControl", ("IsActive", "Intensity")),
+            ):
+                try:
+                    cast = getattr(api, iface)(comp)
+                except Exception:
+                    continue
+                if cast is None:
+                    continue
+                bits = []
+                for f in fields:
+                    try:
+                        v = getattr(cast, f)
+                        if not callable(v):
+                            bits.append(f"{f}={v!r}")
+                    except Exception:
+                        pass
+                if iface == "IMTBContinual":
+                    # THE answer for a diaphragm: a settable opening
+                    # with real limits and a unit.
+                    try:
+                        units = [cast.GetPositionUnit(i)
+                                 for i in
+                                 range(cast.GetPositionUnitCount())]
+                        u = units[0] if units else None
+                        bits.append(f"units={units}")
+                        if u:
+                            bits.append(
+                                f"pos={cast.GetPosition(u)} "
+                                f"[{cast.GetMinPosition(u)}"
+                                f"..{cast.GetMaxPosition(u)}] {u}"
+                            )
+                    except Exception as e:
+                        bits.append(f"<{type(e).__name__}>")
+                if bits:
+                    _log(f"        {iface}: {'  '.join(bits)}")
+
+    _log()
+    _log(f"  {total} component(s) across {n_dev} device(s)")
+    _log()
+    _log("  Name probe for stops and attenuators we never confirmed:")
+    for mtb_id in _STOP_IDS:
+        try:
+            comp = root.GetComponent(mtb_id)
+        except Exception as e:
+            _log(f"    {mtb_id:28s} ERROR {type(e).__name__}")
+            continue
+        if comp is None:
+            _log(f"    {mtb_id:28s} absent")
+            continue
+        name = ""
+        try:
+            name = f"  ({comp.Name})"
+        except Exception:
+            pass
+        _log(f"    {mtb_id:28s} PRESENT{name}")
+
+    _log()
+    if flagged:
+        _log("  Components that can change the delivered dose:")
+        for cid, cname in flagged:
+            _log(f"    {cid}  {cname!r}")
+    else:
+        _log("  NOTHING in the tree looks like a field or aperture "
+             "stop. If that holds, the illuminated AREA is not under "
+             "software control on this stand and has to be set by "
+             "hand at the microscope — close the transmitted-light "
+             "field diaphragm until its edge just clears the camera "
+             "field.")
+
+
+def _dump_config_xml(path: str) -> int:
+    """Every MTBId in MTB's own Active Configuration.xml.
+
+    No connection, no hardware, no risk, and it can be run on the
+    microscope PC in ten seconds without interrupting an experiment.
+    MTB wrote this file from what is actually fitted, so if a
+    motorized field diaphragm exists its id is in here. Parsing is
+    deliberately schema-agnostic — every attribute value that looks
+    like an MTBId is collected — because guessing the schema is the
+    same mistake as guessing the component names.
+    """
+    import re
+    import xml.etree.ElementTree as ET
+
+    if not os.path.exists(path):
+        _log(f"  not found: {path}")
+        _log("  Locate it with:")
+        _log('    dir /s /b "C:\\ProgramData\\Carl Zeiss\\'
+             'Active Configuration.xml"')
+        return 3
+
+    _log(f"  {path}")
+    ids: dict = {}
+    try:
+        tree = ET.parse(path)
+        for el in tree.iter():
+            tag = el.tag.split("}")[-1]
+            name = (el.get("Name") or el.get("name") or "")
+            for k, v in el.attrib.items():
+                if not isinstance(v, str):
+                    continue
+                if re.fullmatch(r"MTB[A-Za-z0-9_]+", v):
+                    ids.setdefault(v, (tag, k, name))
+            if re.fullmatch(r"MTB[A-Za-z0-9_]+", tag):
+                ids.setdefault(tag, (tag, "<tag>", name))
+    except Exception as e:
+        _log(f"  XML parse failed ({type(e).__name__}: {e}); "
+             f"falling back to a raw scan")
+        try:
+            with open(path, "r", encoding="utf-8",
+                      errors="replace") as fh:
+                for m in re.finditer(r"MTB[A-Za-z0-9_]+", fh.read()):
+                    ids.setdefault(m.group(0), ("<raw>", "", ""))
+        except Exception as e2:
+            _log(f"  raw scan failed too: {type(e2).__name__}: {e2}")
+            return 3
+
+    if not ids:
+        _log("  no MTB* identifiers found — wrong file?")
+        return 1
+
+    _log(f"  {len(ids)} distinct MTB identifier(s):")
+    hits = []
+    for mid in sorted(ids):
+        tag, attr, name = ids[mid]
+        hay = f"{mid} {name}".lower()
+        mark = ""
+        if any(k in hay for k in _DOSE_KEYWORDS):
+            mark = "   <== light dose"
+            hits.append(mid)
+        extra = f"  {name!r}" if name else ""
+        _log(f"    {mid:44s} [{tag}/{attr}]{extra}{mark}")
+
+    _log()
+    if hits:
+        _log("  Anything above marked 'light dose' is worth casting "
+             "to IMTBContinual — a diaphragm reads as an opening with "
+             "min/max and a unit.")
+    else:
+        _log("  No field stop, aperture stop or attenuator is "
+             "configured. The illuminated AREA is then a MANUAL "
+             "setting on the stand, not something this software can "
+             "change.")
+    return 0
 
 def _dump_objective(root, comp) -> None:
     """Print every route to the objective's magnification.
@@ -1067,6 +1429,13 @@ def _dump_objective(root, comp) -> None:
 
 def main() -> int:
     args = parse_args()
+
+    # Before anything touches the hardware: the configuration file is
+    # MTB's own record of what is fitted, and reading it costs nothing.
+    if args.xml_only:
+        _hdr("MTB ACTIVE CONFIGURATION")
+        return _dump_config_xml(args.config_xml)
+
     clr, asm = load_api(args.dll)
 
     _hdr("SET MODE ENUM")
@@ -1126,6 +1495,12 @@ def main() -> int:
         if args.lightpath:
             _hdr("LIGHT PATH")
             _dump_lightpath(root)
+
+        if args.enumerate_all:
+            _hdr("EVERY COMPONENT ON THE STAND")
+            _dump_all_components(root, asm)
+            _hdr("MTB ACTIVE CONFIGURATION")
+            _dump_config_xml(args.config_xml)
 
         if args.move:
             _hdr("TEST MOVES")

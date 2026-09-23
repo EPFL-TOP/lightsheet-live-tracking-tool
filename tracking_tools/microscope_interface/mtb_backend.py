@@ -756,7 +756,15 @@ class MicroscopeInterface_MTB:
             stack and self.z_stack
         )
         if not want:
-            return grab(z)
+            # A SINGLE frame is always gated per exposure, whatever
+            # gate_light_per_plane says. That flag is about holding a
+            # mechanical shutter open ACROSS THE PLANES OF A STACK; it
+            # has no meaning for one frame. Passing it through here
+            # meant an unstacked channel with the box unticked was
+            # never lit at all, and its frames came back black.
+            return self._snap(exposure_ms, channel=channel,
+                              gate=True) \
+                if self.synthetic_source is None else grab(z)
 
         # Holding a mechanical shutter open across the stack trades a
         # larger light dose for fewer shutter cycles.

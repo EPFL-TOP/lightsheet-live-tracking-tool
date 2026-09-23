@@ -539,6 +539,113 @@ python tools\df2_test.py --report-only         :: nothing moves
 
 ---
 
+## Phototoxicity — where the light dose actually comes from
+
+An overnight run killed a plate of embryos. The audit found the
+acquisition loop was gating correctly — and that everything *around*
+it was not.
+
+### What was wrong
+
+**During a run, light was already gated.** `_snap` switches on
+immediately before `snapImage()` and off in a `finally`; the stage
+move, the settle, DF2 and the whole inter-timepoint interval are dark.
+
+**Outside a run, light was sticky forever.** Nothing switched it off —
+not stopping Live, not starting or stopping a run, not disconnecting,
+not closing the tab. And **Live and Snap never gated at all**: the only
+way to see anything was to open the shutter or an LED by hand, and the
+panel's own help told you to do exactly that. Defining a fluorescence
+channel still *requires* the LED to be physically on.
+
+Twenty minutes of finding embryos is **1200 s of continuous
+excitation** in one burst with no dark recovery. A whole gated night at
+the defaults delivers a few seconds. **The setup dose was the
+experiment.**
+
+Fixed: `_darken()` runs on every exit path — end of Live, start of a
+run, the run loop's `finally`, `atexit`, and browser session end — and
+`_on_snap` (every Live tick) now gates like an acquisition frame. At
+2 fps with a 20 ms exposure that alone is a ~25× cut.
+
+A run is also **refused while any light is on**, because the previous
+behaviour was to illuminate continuously until the first exposure
+asserted the gate.
+
+### Separately: an unstacked channel was imaged in the dark
+
+`gate_light_per_plane` is about holding a mechanical shutter open
+*across the planes of a stack*. It was passed through to single frames
+too, where the hold-open branch is unreachable (`if not want: return
+grab(z)` comes first) — so a channel with `z_stack` unticked and the
+box unticked was never lit, and its frames came back black.
+
+### The light budget, before you press Start
+
+*Acquisition* now shows the seconds of illumination **one embryo**
+receives, per channel, and warns past a minute:
+
+```
+GFP (475 nm @ 20%): 2.2 s per timepoint, 1584 s total
+⚠️ That is 26 minutes of continuous illumination on one embryo.
+```
+
+It is **not** multiplied by position count — the stage is at one
+position at a time. That assumption only holds if the illuminated field
+is the field of view; see below.
+
+### The full-well / bystander question
+
+This splits by light path and the two have different fixes:
+
+- **Transmitted light** — its field diaphragm is on the **condenser**,
+  and its image at the sample does *not* shrink with objective
+  magnification. Wide open it lights several mm, i.e. a whole well. If
+  N embryos sit in the lit area and each is a separate position, each
+  gets N doses per timepoint. **Fix: close the field diaphragm to just
+  outside the frame. At the bench — no field-stop component is in
+  `MTB_IDS`, so this has never been under software control.**
+- **Epi fluorescence (Colibri)** — comes up *through the objective*, so
+  it is capped at roughly field number / magnification. With the Fluar
+  10×/0.5 the frame is 1.32 mm and the lit disc ~2.5 mm, so an embryo
+  more than ~1.25 mm off-axis receives essentially nothing from a
+  neighbour's exposure.
+
+**The test costs nothing: look at the dead plate.** If embryos that
+were *never imaged* also died, bystander illumination is confirmed and
+it is the transmitted path. If only the imaged ones died, geometry is
+not the mechanism and the dose at the imaged position is.
+
+### Levers, by factor
+
+| Lever | Factor | Where |
+|---|---|---|
+| Gate Live / darken on exit | unbounded | done, in code |
+| Close the TL field diaphragm | 10–70× on BF bystander dose | at the microscope |
+| `led_percent` 100 → 20 | 5× | channel table |
+| Planes 11 → 3 | 3.7× | Acquisition |
+| Interval 60 → 300 s | 5× | Acquisition |
+| Longer-wavelength reporter | large, not quantified | 475 nm is the damaging line |
+
+### The probe
+
+One command, run with **no sample on the stage**. It moves no axis and
+writes nothing:
+
+```bat
+python tools\light_check.py
+```
+
+It answers, with the camera as witness: do the TL shutter's element
+names let `set_open()` work at all (if not, transmitted light was never
+gated and the error was swallowed every time); does the frame return to
+the read-noise floor when light is commanded off; how slow is an MTB
+round trip; and is there any motorized field stop, aperture or
+attenuator that would put the illuminated *area* under software
+control.
+
+---
+
 ## Brightfield tracking and preprocessing
 
 The ROI tracker segments by thresholding for a **bright object on a

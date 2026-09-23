@@ -1798,3 +1798,59 @@ def test_a_single_frame_still_sets_its_exposure(patched):
     iface._acquire("scene_000", 0.0, 0.0, 250.0, stack=False,
                    exposure_ms=5.0, channel={"name": "BF"})
     assert iface.mmc.exposures == 1
+
+
+def test_REGRESSION_an_unstacked_channel_is_lit_when_per_plane_is_off(
+        patched):
+    """gate_light_per_plane is about holding a mechanical shutter open
+    ACROSS THE PLANES OF A STACK. It has no meaning for a single frame,
+    but it was passed through anyway — so an unstacked channel with the
+    box unticked was never lit at all and its frames came back black.
+
+    The hold-open branch that would have lit it sits AFTER
+    `if not want: return grab(z)`, so it was unreachable."""
+    make, _, _ = patched
+    light = LightLog()
+    core = LoggingCore(light)
+    iface = make(
+        synthetic_source=None, mmc=core, camera_label="Cam",
+        stop_after_tp=1, illuminate=light.illuminate,
+        gate_light_per_plane=False,
+        z_stack=None,
+        channels=[{"name": "BF", "reflector_pos": 0, "tl": True,
+                   "exposure_ms": 5.0, "z_stack": False}],
+    )
+    _run(iface, seconds=3.0)
+
+    assert light.snaps_while_lit > 0, (
+        "every frame was acquired in the dark — the light was never "
+        "switched on"
+    )
+    assert light.snaps_while_dark == 0
+
+
+def test_a_stacked_channel_still_holds_the_shutter_open(patched):
+    """The flag must keep working for the case it exists for."""
+    make, _, _ = patched
+    light = LightLog()
+    iface = make(
+        synthetic_source=None, mmc=LoggingCore(light),
+        camera_label="Cam", stop_after_tp=1,
+        illuminate=light.illuminate,
+        gate_light_per_plane=False,
+        z_stack={"n_planes": 4, "step_um": 1.0},
+        channels=[{"name": "BF", "reflector_pos": 0, "tl": True,
+                   "exposure_ms": 5.0, "z_stack": True}],
+    )
+    _run(iface, seconds=3.0)
+    ons = [e for e in light.events if e[0] == "on"]
+    # Once per POSITION visit, not once per plane. The fixture has two
+    # positions and the stack has four planes, so per-plane gating
+    # would be 8 cycles and holding open is 2 — that gap is the whole
+    # point of the flag.
+    assert len(ons) == 2, (
+        f"the shutter was cycled {len(ons)} times; expected one "
+        f"open/close per position across the whole 4-plane stack"
+    )
+    assert light.snaps_while_dark == 0
+    assert light.events[-1][0] == "off"

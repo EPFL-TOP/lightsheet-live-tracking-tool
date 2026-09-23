@@ -2162,3 +2162,294 @@ def test_plane_settle_reaches_the_backend_params(panel_obj):
     assert "plane_settle" in panel_obj.CONFIG_FIELDS
     panel_obj.plane_settle.value = 0.005
     assert panel_obj.current_config()["widgets"]["plane_settle"] == 0.005
+
+
+# ====================================================================
+# PHOTOTOXICITY — light must never outlive the exposure that needs it
+#
+# A real overnight experiment killed the embryos. The acquisition loop
+# was gating correctly, but EVERY way an operator turns light on by
+# hand was sticky: Live and Snap did not gate at all, the panel's own
+# help text tells you to switch an LED on to tune it, and defining a
+# fluorescence channel REQUIRES the LED to be physically on. Nothing
+# then switched it off — not stopping live, not starting or stopping a
+# run, not disconnecting, not closing the tab.
+#
+# Twenty minutes of finding embryos is 1200 s of continuous excitation
+# in one burst with no dark recovery. The whole gated night that
+# follows delivers seconds. The setup dose was the experiment.
+# ====================================================================
+
+class LightSpy:
+    """Records every light transition the panel asks for."""
+
+    def __init__(self, fail_off=False):
+        self.events = []
+        self.led_on = False
+        self.tl_open = False
+        self.fail_off = fail_off
+
+    # --- colibri ---
+    def all_off(self):
+        if self.fail_off:
+            raise RuntimeError("Colibri not answering")
+        self.events.append(("led", False))
+        self.led_on = False
+
+    def select(self, nm, pct):
+        self.events.append(("led", True))
+        self.led_on = True
+
+    # --- tl shutter ---
+    def set_open(self, want):
+        self.events.append(("tl", bool(want)))
+        self.tl_open = bool(want)
+
+    def set_position(self, p):
+        pass
+
+
+def _light_panel(panel_obj, fail_off=False):
+    spy = LightSpy(fail_off=fail_off)
+    motion = FakeMotion()
+
+    class FakeSession:
+        def axis(self, role):
+            return motion.z
+
+        def colibri(self):
+            return spy
+
+        def changer(self, role):
+            return spy
+
+        def has_definite_focus(self):
+            return False
+
+    panel_obj.motion = motion
+    panel_obj.session = FakeSession()
+    return spy
+
+
+def test_REGRESSION_snap_gates_the_light(panel_obj):
+    """Snap — and therefore every Live tick — used to be
+    setExposure/snapImage/getImage with no light call at all, so the
+    only way to see anything was to switch an LED on by hand and leave
+    it burning between frames."""
+    spy = _light_panel(panel_obj)
+
+    class Core:
+        def setExposure(self, ms):
+            pass
+
+        def snapImage(self):
+            spy.events.append(("snap", spy.led_on or spy.tl_open))
+
+        def getImage(self):
+            return np.zeros((8, 8), dtype=np.uint16)
+
+    panel_obj.mmc = Core()
+    panel_obj._on_snap()
+
+    snaps = [e for e in spy.events if e[0] == "snap"]
+    assert snaps, "no frame was taken"
+    assert all(lit for _, lit in snaps), "frame taken in the dark"
+    assert spy.events[-1][1] is False, (
+        f"light left on after the snap: {spy.events}"
+    )
+
+
+def test_snap_darkens_even_when_the_camera_raises(panel_obj):
+    spy = _light_panel(panel_obj)
+
+    class Exploding:
+        def setExposure(self, ms):
+            pass
+
+        def snapImage(self):
+            raise RuntimeError("camera hiccup")
+
+        def getImage(self):
+            return None
+
+    panel_obj.mmc = Exploding()
+    panel_obj._on_snap()
+    assert spy.events[-1][1] is False, (
+        f"a failed snap left the sample lit: {spy.events}"
+    )
+
+
+def test_snap_uses_the_selected_channel(panel_obj):
+    """So tuning a GFP channel on Live excites with GFP, not
+    brightfield."""
+    import pandas as pd
+    _light_panel(panel_obj)
+    panel_obj.chan_table.value = pd.DataFrame([
+        {"name": "BF", "reflector_pos": 0, "led_nm": 0,
+         "led_percent": 0.0, "tl": True, "invert": True,
+         "exposure_ms": 5.0, "z_stack": True},
+        {"name": "GFP", "reflector_pos": 3, "led_nm": 475,
+         "led_percent": 20.0, "tl": False, "invert": False,
+         "exposure_ms": 200.0, "z_stack": True},
+    ])
+    panel_obj.chan_table.selection = [1]
+    ch = panel_obj.selected_channel()
+    assert ch["led_nm"] == 475 and ch["tl"] is False
+
+
+def test_snap_falls_back_to_brightfield_with_no_selection(panel_obj):
+    _light_panel(panel_obj)
+    panel_obj.chan_table.selection = []
+    ch = panel_obj.selected_channel()
+    assert ch["led_nm"] == 0 and ch["tl"] is True
+
+
+def test_REGRESSION_stopping_live_switches_the_light_off(panel_obj):
+    """Live is where the operator sits for minutes."""
+    spy = _light_panel(panel_obj)
+    spy.led_on = True
+    panel_obj._stop_live()
+    assert ("led", False) in spy.events
+    assert ("tl", False) in spy.events
+
+
+def test_darken_switches_off_both_paths(panel_obj):
+    spy = _light_panel(panel_obj)
+    assert panel_obj._darken() == []
+    assert ("led", False) in spy.events
+    assert ("tl", False) in spy.events
+
+
+def test_darken_is_safe_when_disconnected():
+    fresh = MTBSetupPanel()
+    assert fresh._darken() == []          # must not raise
+
+
+def test_REGRESSION_a_failed_darken_is_made_visible(panel_obj):
+    """Failing to switch light OFF is the one failure that damages the
+    sample, and it used to be a logger.warning nobody reads."""
+    spy = _light_panel(panel_obj, fail_off=True)
+    failed = panel_obj._darken()
+    assert failed, "a refused darken was reported as success"
+    assert "LIGHT MAY STILL BE ON" in panel_obj.run_banner.object
+
+
+def test_the_run_darkens_however_it_ends(panel_obj):
+    """finally, not on the happy path: a crashed run must not leave
+    the sample lit overnight."""
+    import inspect
+    src = inspect.getsource(MTBSetupPanel._run_loop)
+    tail = src[src.rindex("finally:"):]
+    assert "_darken" in tail, (
+        "the run loop's finally does not darken"
+    )
+
+
+def test_exit_and_session_hooks_are_installed(panel_obj):
+    """Closing the tab used to leave an LED burning until someone
+    walked to the microscope."""
+    import inspect
+    src = inspect.getsource(MTBSetupPanel._install_darken_hooks)
+    assert "atexit" in src
+    assert "on_session_destroyed" in src
+
+
+def test_run_is_refused_while_a_light_is_on(panel_obj, tmp_path):
+    """Setting up positions leaves the light on and nothing switched
+    it off. Starting a run then illuminated the sample continuously
+    until the first exposure asserted the gate."""
+    import pandas as pd
+
+    class LitSession:
+        def axis(self, role):
+            return FakeAxis()
+
+        def colibri(self):
+            class L:
+                wavelength, is_on = 475, True
+            class C:
+                def leds(self):
+                    return [L()]
+            return C()
+
+        def changer(self, role):
+            class S:
+                is_open = False
+            return S()
+
+        def has_definite_focus(self):
+            return False
+
+    panel_obj.motion = FakeMotion()
+    panel_obj.session = LitSession()
+    panel_obj.mmc = object()
+    panel_obj.pos_table.value = pd.DataFrame(
+        [{"name": "scene_000", "x_um": 1.0, "y_um": 2.0, "z_um": 3.0}]
+    )
+    panel_obj.outdir.value = str(tmp_path / "fresh")
+    msg = panel_obj._validate_run()
+    assert msg and "475 nm" in msg
+
+
+def test_lights_currently_on_is_safe_when_disconnected():
+    assert MTBSetupPanel().lights_currently_on() == []
+
+
+def test_planned_dose_counts_planes_channels_and_timepoints(panel_obj):
+    import pandas as pd
+    panel_obj.chan_table.value = pd.DataFrame([
+        {"name": "BF", "reflector_pos": 0, "led_nm": 0,
+         "led_percent": 0.0, "tl": True, "invert": True,
+         "exposure_ms": 5.0, "z_stack": True},
+        {"name": "GFP", "reflector_pos": 3, "led_nm": 475,
+         "led_percent": 20.0, "tl": False, "invert": False,
+         "exposure_ms": 200.0, "z_stack": True},
+    ])
+    panel_obj.zstack_on.value = True
+    panel_obj.zstack_planes.value = 11
+    panel_obj.zstack_step.value = 1.0
+    panel_obj.n_timepoints.value = 720
+
+    dose = panel_obj.planned_dose_s()
+    # 11 planes x 200 ms = 2.2 s of 475 nm per timepoint,
+    # x 720 timepoints = 1584 s = 26 minutes on one embryo.
+    assert dose["GFP"]["per_timepoint_s"] == pytest.approx(2.2)
+    assert dose["GFP"]["total_s"] == pytest.approx(1584.0)
+    assert dose["BF"]["per_timepoint_s"] == pytest.approx(0.055)
+
+
+def test_planned_dose_ignores_planes_for_an_unstacked_channel(
+        panel_obj):
+    import pandas as pd
+    panel_obj.chan_table.value = pd.DataFrame([
+        {"name": "GFP", "reflector_pos": 3, "led_nm": 475,
+         "led_percent": 20.0, "tl": False, "invert": False,
+         "exposure_ms": 200.0, "z_stack": False},
+    ])
+    panel_obj.zstack_on.value = True
+    panel_obj.zstack_planes.value = 50
+    panel_obj.n_timepoints.value = 10
+    assert panel_obj.planned_dose_s()["GFP"]["per_timepoint_s"] == \
+        pytest.approx(0.2)
+
+
+def test_dose_readout_warns_when_it_runs_to_minutes(panel_obj):
+    import pandas as pd
+    panel_obj.chan_table.value = pd.DataFrame([
+        {"name": "GFP", "reflector_pos": 3, "led_nm": 475,
+         "led_percent": 20.0, "tl": False, "invert": False,
+         "exposure_ms": 200.0, "z_stack": True},
+    ])
+    panel_obj.zstack_on.value = True
+    panel_obj.zstack_planes.value = 11
+    panel_obj.n_timepoints.value = 720
+    panel_obj._update_dose_info()
+    text = panel_obj.dose_info.object
+    assert "minutes of continuous illumination" in text
+    assert "475 nm" in text
+
+
+def test_dose_readout_flags_an_unbounded_run(panel_obj):
+    panel_obj.n_timepoints.value = 0
+    panel_obj._update_dose_info()
+    assert "unbounded" in panel_obj.dose_info.object
